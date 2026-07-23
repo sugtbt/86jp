@@ -299,6 +299,14 @@ namespace DfoServer.Game.SelectCharacter
             };
         }
 
+        internal void PrepareForSkillSynchronization(int characterId, int accountId)
+        {
+            Skills.ExpertContractSkillReconciler.ReconcileExpiredContractSkills(
+                _initDataRepository,
+                characterId,
+                accountId);
+        }
+
         private static void ApplyWallet(SelectCharacterInitializationSnapshot initSnapshot, WalletSnapshot wallet)
         {
             if (initSnapshot == null || wallet == null)

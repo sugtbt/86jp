@@ -99,6 +99,28 @@ namespace DfoServer.Game.Skills
             return MaxLevel;
         }
 
+        // 角色在给定有效等级下可购买到的最高技能等级。达人契约生效时，
+        // effectiveLevel = 角色等级 + [over skill]；到期对账则传真实角色等级。
+        public int GetMaxLearnableLevel(int effectiveLevel, int growType, int secondGrowType)
+        {
+            var growtypeMaximum = GetMaxLevelFor(growType, secondGrowType);
+            if (growtypeMaximum <= 0)
+                return 0;
+
+            var staticMaximum = Math.Min(
+                MaxLevel > 0 ? MaxLevel : int.MaxValue,
+                growtypeMaximum);
+            if (RequiredLevel <= 0)
+                return staticMaximum;
+            if (effectiveLevel < RequiredLevel)
+                return 0;
+
+            var interval = Math.Max(1, LevelInterval);
+            return Math.Min(
+                staticMaximum,
+                1 + (effectiveLevel - RequiredLevel) / interval);
+        }
+
         // 注: [skill fitness growtype]/[skill fitness second growtype] 是技能从属标记
         // (记录该技能属于哪些方向/觉醒段), 不是 SP 折扣——"fitness=百分比折扣"的旧解读
         // 已被实测推翻(斩铁式+1 真机成本 45 整)。门禁走 GetMaxLevelFor, 成本走费用表原值;

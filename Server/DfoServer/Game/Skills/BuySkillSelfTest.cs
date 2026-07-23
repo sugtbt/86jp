@@ -63,6 +63,7 @@ namespace DfoServer.Game.Skills
             CheckSkillTreeIndexSurvivesSelectLoad(testLevel);
             CheckDarkKnightInitialSkillLayout();
             CheckDarkKnightComboSkillInfoPersists(testLevel);
+            CheckExpiredExpertContractReconcilesSkills(sd);
 
             string tempDb = Path.Combine(Path.GetTempPath(), "buyskill_selftest.db");
             DeleteSqliteFiles(tempDb);
@@ -310,6 +311,247 @@ namespace DfoServer.Game.Skills
                 reloaded.Tail0 == ledger.RemainingTp);
         }
 
+        private static void CheckExpiredExpertContractReconcilesSkills(SkillStaticData skill)
+        {
+            const int characterId = 999005;
+            const int otherCharacterId = 999007;
+            const int accountId = 1;
+            const int expertContractPremiumType = 27;
+            const byte characterLevel = 86;
+
+            if (skill == null)
+            {
+                Check("expert-contract regression requires skill64 PVF data", false);
+                return;
+            }
+
+            var contractEffects = Game.Premium.PremiumCatalog.Load().GetEffects(expertContractPremiumType);
+            Check("PVF expert contract grants over-skill levels",
+                contractEffects != null && contractEffects.OverSkillLevel > 0);
+            if (contractEffects == null || contractEffects.OverSkillLevel <= 0)
+                return;
+
+            var ordinaryMax = skill.GetMaxLearnableLevel(characterLevel, 0, 0);
+            var contractMax = skill.GetMaxLearnableLevel(
+                characterLevel + contractEffects.OverSkillLevel,
+                0,
+                0);
+            Check($"expert contract raises skill64 cap above {ordinaryMax}", contractMax > ordinaryMax);
+            var otherCharacterLevel = (byte)Math.Max(1, skill.RequiredLevel - 1);
+            var otherOrdinaryMax = skill.GetMaxLearnableLevel(otherCharacterLevel, 0, 0);
+            var otherContractMax = skill.GetMaxLearnableLevel(
+                otherCharacterLevel + contractEffects.OverSkillLevel,
+                0,
+                0);
+            Check("expert contract exposes a normally unavailable skill",
+                otherOrdinaryMax == 0 && otherContractMax > 0);
+            if (contractMax <= ordinaryMax || otherOrdinaryMax != 0 || otherContractMax <= 0)
+                return;
+
+            var purchasedLevel = ordinaryMax + 1;
+            string tempDb = Path.Combine(Path.GetTempPath(), "buyskill_expired_expert_contract_selftest.db");
+            DeleteSqliteFiles(tempDb);
+
+            var repo = new SqliteCharacterProgressRepository(tempDb, ServerPaths.SchemaFilePath);
+            var charRepo = new Game.Characters.SqliteCharacterRepository(tempDb, ServerPaths.SchemaFilePath);
+            EnsureTestCharacter(tempDb, characterId, characterLevel);
+            EnsureTestCharacter(tempDb, otherCharacterId, otherCharacterLevel);
+            SetPremiumEndTime(
+                tempDb,
+                accountId,
+                expertContractPremiumType,
+                DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600);
+
+            var seed = new SkillInfoSnapshot();
+            seed.Pages.Add(new SkillInfoPageSnapshot());
+            seed.Pages.Add(new SkillInfoPageSnapshot());
+            SeedSkillProgress(
+                repo,
+                characterId,
+                seed,
+                characterLevel,
+                SkillPointLedger.Compute(0, characterLevel, 0, 0, seed, 0).RemainingSp);
+            SeedSkillProgress(
+                repo,
+                otherCharacterId,
+                seed,
+                otherCharacterLevel,
+                SkillPointLedger.Compute(0, otherCharacterLevel, 0, 0, seed, 0).RemainingSp);
+
+            var request = new List<BuySkillEntry>
+            {
+                new BuySkillEntry
+                {
+                    SkillIndex = (ushort)skill.SkillIndex,
+                    Level = (byte)purchasedLevel,
+                    IsRefund = 0,
+                }
+            };
+            var page0Purchase = BuySkillService.Execute(
+                repo, characterId, accountId, 0, 0, request, level: characterLevel);
+            var page1Purchase = BuySkillService.Execute(
+                repo, characterId, accountId, 0, 1, request, level: characterLevel);
+            var otherCharacterPurchase = BuySkillService.Execute(
+                repo,
+                otherCharacterId,
+                accountId,
+                0,
+                0,
+                new List<BuySkillEntry>
+                {
+                    new BuySkillEntry
+                    {
+                        SkillIndex = (ushort)skill.SkillIndex,
+                        Level = 1,
+                        IsRefund = 0,
+                    }
+                },
+                level: otherCharacterLevel);
+            Check("active expert contract permits page0 over-level skill",
+                page0Purchase != null && page0Purchase.Success
+                && page0Purchase.Entries.Count == 1
+                && page0Purchase.Entries[0].Level == purchasedLevel);
+            Check("active expert contract permits page1 over-level skill",
+                page1Purchase != null && page1Purchase.Success
+                && page1Purchase.Entries.Count == 1
+                && page1Purchase.Entries[0].Level == purchasedLevel);
+            Check("active expert contract permits another character unavailable skill",
+                otherCharacterPurchase != null && otherCharacterPurchase.Success
+                && otherCharacterPurchase.Entries.Count == 1
+                && otherCharacterPurchase.Entries[0].Level == 1);
+
+            var beforeExpiry = repo.LoadSkills(characterId);
+            var beforePage0 = SkillPointLedger.Compute(
+                0, characterLevel, 0, 0, beforeExpiry, 0);
+            var beforePage1 = SkillPointLedger.Compute(
+                0, characterLevel, 0, 0, beforeExpiry, 1);
+            var expectedRefund = skill.SpCostFor(ordinaryMax, purchasedLevel);
+
+            var selectData = new SqliteSelectCharacterDataSource(
+                tempDb,
+                ServerPaths.SchemaFilePath,
+                charRepo);
+            selectData.PrepareForSkillSynchronization(characterId, accountId);
+            var activeSelected = selectData.Load(characterId, accountId);
+            var activeSelectedSkills = activeSelected.InitializationSnapshot.SkillInfo;
+            Check("active expert contract keeps page0 over-level skill",
+                activeSelectedSkills.Pages[0].Entries.Find(
+                    x => x.SkillId == skill.SkillIndex)?.Level == purchasedLevel);
+            Check("active expert contract keeps page1 over-level skill",
+                activeSelectedSkills.Pages[1].Entries.Find(
+                    x => x.SkillId == skill.SkillIndex)?.Level == purchasedLevel);
+
+            SetPremiumEndTime(
+                tempDb,
+                accountId,
+                expertContractPremiumType,
+                DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 1);
+
+            var passiveRefresh = selectData.Load(characterId, accountId);
+            Check("expired expert contract waits for explicit skill synchronization before reconciling",
+                passiveRefresh.InitializationSnapshot.SkillInfo.Pages[0].Entries.Find(
+                    x => x.SkillId == skill.SkillIndex)?.Level == purchasedLevel);
+            Check("ordinary snapshot refresh keeps expired expert-contract marker pending",
+                PremiumRowExists(tempDb, accountId, expertContractPremiumType));
+
+            selectData.PrepareForSkillSynchronization(characterId, accountId);
+            var selected = selectData.Load(characterId, accountId);
+            var selectedSkills = selected.InitializationSnapshot.SkillInfo;
+            var selectedPage0 = selectedSkills.Pages[0].Entries.Find(
+                x => x.SkillId == skill.SkillIndex);
+            var selectedPage1 = selectedSkills.Pages[1].Entries.Find(
+                x => x.SkillId == skill.SkillIndex);
+            Check($"expired expert contract caps page0 skill64 at {ordinaryMax}",
+                selectedPage0 != null && selectedPage0.Level == ordinaryMax);
+            Check($"expired expert contract caps page1 skill64 at {ordinaryMax}",
+                selectedPage1 != null && selectedPage1.Level == ordinaryMax);
+            Check($"expired expert contract refunds page0 SP={expectedRefund}",
+                selectedSkills.Pages[0].HeaderValue == beforePage0.RemainingSp + expectedRefund);
+            Check($"expired expert contract refunds page1 SP={expectedRefund}",
+                selectedSkills.Pages[1].HeaderValue == beforePage1.RemainingSp + expectedRefund);
+
+            var persisted = repo.LoadSkills(characterId);
+            var persistedPage0 = persisted.Pages[0].Entries.Find(
+                x => x.SkillId == skill.SkillIndex);
+            var persistedPage1 = persisted.Pages[1].Entries.Find(
+                x => x.SkillId == skill.SkillIndex);
+            Check("expired expert contract persists page0 capped level",
+                persistedPage0 != null && persistedPage0.Level == ordinaryMax);
+            Check("expired expert contract persists page1 capped level",
+                persistedPage1 != null && persistedPage1.Level == ordinaryMax);
+            var otherPersisted = repo.LoadSkills(otherCharacterId);
+            Check("expired expert contract removes unavailable skill from another account character",
+                otherPersisted.Pages[0].Entries.Find(x => x.SkillId == skill.SkillIndex) == null);
+            var otherPoints = SkillPointLedger.Compute(
+                0, otherCharacterLevel, 0, 0, otherPersisted, 0);
+            Check("expired expert contract refunds all unavailable-skill SP on another character",
+                otherPoints.RemainingSp == otherPoints.TotalSp);
+            Check("expired expert contract consumes its premium event marker",
+                !PremiumRowExists(tempDb, accountId, expertContractPremiumType));
+
+            var laterGrant = repo.LoadSkills(otherCharacterId);
+            laterGrant.Pages[0].Entries.Add(new SkillInfoEntrySnapshot
+            {
+                SkillId = (ushort)skill.SkillIndex,
+                Level = 1,
+                Slot = FindUnusedSlot(laterGrant.Pages[0]),
+            });
+            repo.SaveSkillProgress(otherCharacterId, laterGrant);
+
+            var selectedAfterLaterGrant = selectData.Load(otherCharacterId, accountId);
+            Check("processed expiry does not remove a later legitimate skill grant",
+                selectedAfterLaterGrant.InitializationSnapshot.SkillInfo.Pages[0].Entries.Find(
+                    x => x.SkillId == skill.SkillIndex)?.Level == 1);
+        }
+
+        private static void SetPremiumEndTime(
+            string databasePath,
+            int accountId,
+            int premiumType,
+            long endTime)
+        {
+            using (var conn = new SqliteConnection(SqliteDatabaseBootstrap.BuildConnectionString(databasePath)))
+            {
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = @"
+INSERT INTO account_premiums (account_id, premium_type, end_time)
+VALUES (@aid, @type, @end)
+ON CONFLICT(account_id, premium_type)
+DO UPDATE SET end_time=@end;";
+                    cmd.Parameters.AddWithValue("@aid", accountId);
+                    cmd.Parameters.AddWithValue("@type", premiumType);
+                    cmd.Parameters.AddWithValue("@end", endTime);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private static bool PremiumRowExists(
+            string databasePath,
+            int accountId,
+            int premiumType)
+        {
+            using (var conn = new SqliteConnection(SqliteDatabaseBootstrap.BuildConnectionString(databasePath)))
+            {
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = @"
+SELECT EXISTS (
+    SELECT 1
+    FROM account_premiums
+    WHERE account_id=@aid
+      AND premium_type=@type
+);";
+                    cmd.Parameters.AddWithValue("@aid", accountId);
+                    cmd.Parameters.AddWithValue("@type", premiumType);
+                    return Convert.ToInt32(cmd.ExecuteScalar()) != 0;
+                }
+            }
+        }
+
         private static void CheckSkillTreeIndexSurvivesSelectLoad(byte level)
         {
             const int skillTreeCid = 999003;
@@ -547,6 +789,17 @@ namespace DfoServer.Game.Skills
             return entry == null ? -1 : entry.Slot;
         }
 
+        private static byte FindUnusedSlot(SkillInfoPageSnapshot page)
+        {
+            for (var slot = 0; slot <= byte.MaxValue; slot++)
+            {
+                if (page == null || !page.Entries.Exists(x => x.Slot == slot))
+                    return (byte)slot;
+            }
+
+            throw new InvalidOperationException("No free skill slot is available.");
+        }
+
         private static void SeedSkillProgress(
             SqliteCharacterProgressRepository repo,
             int cid,
@@ -576,8 +829,9 @@ namespace DfoServer.Game.Skills
 INSERT OR IGNORE INTO accounts (account_id, m_id, password_hash)
 VALUES (1, 'selftest', '');
 INSERT OR IGNORE INTO characters (character_id, account_id, name)
-VALUES (@cid, 1, 'selftest');";
+VALUES (@cid, 1, @name);";
                     cmd.Parameters.AddWithValue("@cid", characterId);
+                    cmd.Parameters.AddWithValue("@name", $"selftest-{characterId}");
                     cmd.ExecuteNonQuery();
                 }
                 using (var cmd = conn.CreateCommand())
