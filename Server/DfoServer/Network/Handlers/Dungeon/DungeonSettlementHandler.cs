@@ -55,7 +55,9 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             var isTowerOfDespair = DungeonData.TryGetTowerOfDespairFloor(
                 run.DungeonId,
-                out _);
+                out var towerOfDespairFloor);
+            var shouldScheduleCardRewardFlow =
+                ShouldScheduleCardRewardFlow(run.DungeonId);
             if (isTowerOfDespair)
             {
                 if (!_svc.TowerOfDespairProgress.TryRecordClear(
@@ -96,15 +98,22 @@ namespace DfoServer.Network.Handlers.Dungeon
             int dungeonLevel = 85;
             try { dungeonLevel = DungeonData.GetDungeonBasicLv(run.DungeonId); } catch (Exception ex) { FileLogger.Log($"[DungeonHandler] SET_PLAY_RESULT ERROR: dungeon level fallback dungeon={run.DungeonId} default={dungeonLevel}, card rewards will use the fallback level: {ex.Message}"); }
             var lcg = run.RoomLcg ?? new DnfLcg(run.Seed);
-            var freeGold = ClearRewardGenerator.GenerateGoldCard(
-                dungeonLevel, run.Difficulty, lcg);
-            var freeItem = ClearRewardGenerator.GenerateItemCard(
-                dungeonLevel, run.Difficulty, lcg);
-            if (isTowerOfDespair && freeItem.IsGold)
-            {
-                freeGold.GoldAmount += freeItem.GoldAmount;
-                freeItem = default;
-            }
+            var freeGold = shouldScheduleCardRewardFlow
+                ? ClearRewardGenerator.GenerateGoldCard(
+                    dungeonLevel, run.Difficulty, lcg)
+                : default;
+            var freeItem = shouldScheduleCardRewardFlow
+                ? ClearRewardGenerator.GenerateItemCard(
+                    dungeonLevel, run.Difficulty, lcg)
+                : default;
+            var towerRewardCandidates = isTowerOfDespair
+                ? BuildTowerOfDespairRewardCandidates(
+                    towerOfDespairFloor,
+                    () => ClearRewardGenerator.GenerateItemCard(
+                        dungeonLevel,
+                        run.Difficulty,
+                        lcg))
+                : Array.Empty<ClearRewardGenerator.CardReward>();
             var paidGold = default(ClearRewardGenerator.CardReward);
             var paidItem = default(ClearRewardGenerator.CardReward);
             if (ShouldGeneratePaidCardRewards(run.DungeonId))
@@ -114,11 +123,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 paidItem = ClearRewardGenerator.GenerateItemCard(
                     dungeonLevel, run.Difficulty, lcg);
             }
-            run.CardRewards = new List<ClearRewardGenerator.CardReward>
-            {
-                freeGold, freeItem, default, default,  // free: [0]gold [1]item [2-3]empty(solo)
-                paidGold, paidItem, default, default    // paid: [4]gold [5]item [6-7]empty(solo)
-            };
+            run.CardRewards = shouldScheduleCardRewardFlow
+                ? new List<ClearRewardGenerator.CardReward>
+                {
+                    freeGold, freeItem, default, default,  // free: [0]gold [1]item [2-3]empty(solo)
+                    paidGold, paidItem, default, default    // paid: [4]gold [5]item [6-7]empty(solo)
+                }
+                : null;
 
             var monsterTotalExp = run.TotalExp;
             var bossTotalExp = Math.Min(run.BossTotalExp, monsterTotalExp);
@@ -151,15 +162,29 @@ namespace DfoServer.Network.Handlers.Dungeon
                     freeCardItemId: freeItem.ItemId, freeCardItemCount: freeItem.StackCount)));
 
             var clearTimeMilliseconds = (uint)Math.Max(0, clearTimeMs);
+            var towerRewards = isTowerOfDespair
+                ? _svc.TowerOfDespairRewards.Grant(
+                    session.Player.CharacterId,
+                    session.Account?.AccountId ?? 0,
+                    towerRewardCandidates)
+                : Array.Empty<TowerOfDespairGrantedReward>();
+            if (towerRewards.Count > 0)
+            {
+                await SendTowerOfDespairInventoryUpdates(
+                    session,
+                    towerRewards);
+            }
             if (TryBuildTowerOfDespairClearRewardWithTime(
                     run.DungeonId,
                     clearTimeMilliseconds,
-                    freeItem.ItemId,
-                    freeItem.StackCount,
+                    towerRewards.Select(reward => reward.Reward).ToArray(),
                     out var towerClearReward))
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x015C, towerClearReward));
-                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] TOD_CLEAR_REWARD: dungeon={run.DungeonId} clearTimeMs={clearTimeMilliseconds}");
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] TOD_CLEAR_REWARD: " +
+                    $"dungeon={run.DungeonId} clearTimeMs={clearTimeMilliseconds} " +
+                    $"generated={towerRewardCandidates.Count} granted={towerRewards.Count}");
             }
 
             // 符合判断使用结算前等级，奖励通知放在结算三包之后。
@@ -177,13 +202,19 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             // 翻牌布局延后: 2 秒 timer 发布局, 再 4 秒 timer 自动翻免费卡。
             // Phase 已在方法入口置为 ResultShown; 懒布局分支都以它作为业务校验。
-            run.CardFlipCount = 0;
-            run.FreeCardSlots = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
-            run.PaidCardSlots = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
-            run.FreeCardRewardDelivered = false;
-            run.PaidCardRewardDelivered = false;
+            if (shouldScheduleCardRewardFlow)
+            {
+                run.CardFlipCount = 0;
+                run.FreeCardSlots = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+                run.PaidCardSlots = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+                run.FreeCardRewardDelivered = false;
+                run.PaidCardRewardDelivered = false;
 
-            _svc.CardRewards.ScheduleAutoFlow(session, layoutDelayMs: 2000, autoFlipDelayMs: 4000);
+                _svc.CardRewards.ScheduleAutoFlow(
+                    session,
+                    layoutDelayMs: 2000,
+                    autoFlipDelayMs: 4000);
+            }
 
             await UpdateDungeonPermission(session, run.DungeonId, run.Difficulty);
             await _svc.AntonNormal.ApplyClearAsync(session, run);
@@ -260,8 +291,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         private static bool TryBuildTowerOfDespairClearRewardWithTime(
             int dungeonId,
             uint clearTimeMilliseconds,
-            int itemId,
-            int itemCount,
+            IReadOnlyList<ClearRewardGenerator.CardReward> rewards,
             out byte[] body)
         {
             body = null;
@@ -271,12 +301,87 @@ namespace DfoServer.Network.Handlers.Dungeon
             body = DungeonNotificationBuilder.BuildTowerOfDespairClearReward(
                 clearTimeMilliseconds,
                 floor,
-                itemId,
-                itemCount);
+                rewards);
             return true;
         }
 
+        private static IReadOnlyList<ClearRewardGenerator.CardReward>
+            BuildTowerOfDespairRewardCandidates(
+                int floor,
+                Func<ClearRewardGenerator.CardReward> randomRewardFactory)
+        {
+            if (randomRewardFactory == null)
+                throw new ArgumentNullException(nameof(randomRewardFactory));
+
+            var isPlayerMirrorFloor =
+                floor >= 10
+                && floor <= 90
+                && floor % 10 == 0;
+            var randomRewardCount = isPlayerMirrorFloor ? 9 : 5;
+            var rewards = new List<ClearRewardGenerator.CardReward>(10);
+            for (var i = 0; i < randomRewardCount; i++)
+            {
+                var reward = randomRewardFactory();
+                if (!reward.IsGold
+                    && reward.ItemId > 0
+                    && reward.StackCount > 0)
+                {
+                    rewards.Add(reward);
+                }
+            }
+
+            if (isPlayerMirrorFloor)
+            {
+                rewards.Add(new ClearRewardGenerator.CardReward
+                {
+                    ItemId = 1252,
+                    StackCount = 1,
+                });
+            }
+            else if (floor == 100)
+            {
+                rewards.Add(new ClearRewardGenerator.CardReward
+                {
+                    ItemId = 3314,
+                    StackCount = 1,
+                });
+            }
+
+            return rewards;
+        }
+
+        private async Task SendTowerOfDespairInventoryUpdates(
+            EnhancedClientSession session,
+            IReadOnlyList<TowerOfDespairGrantedReward> granted)
+        {
+            if (_svc.InventoryRefresh == null
+                || granted == null
+                || granted.Count == 0)
+                return;
+
+            try
+            {
+                await _svc.InventoryRefresh.SendUpdateItemList(
+                    session,
+                    InventoryListType.Main,
+                    granted.Select(reward => reward.Slot));
+            }
+            catch (Exception ex)
+            {
+                // The rewards are already committed. A refresh failure must not
+                // suppress TOD_CLEAR_REWARD or abort the remaining settlement flow.
+                FileLogger.Log(
+                    $"[TowerOfDespair] inventory refresh failed after reward grant: " +
+                    $"cid={session.Player.CharacterId} error={ex.Message}");
+            }
+        }
+
         private static bool ShouldGeneratePaidCardRewards(int dungeonId)
+        {
+            return ShouldScheduleCardRewardFlow(dungeonId);
+        }
+
+        private static bool ShouldScheduleCardRewardFlow(int dungeonId)
         {
             return !DungeonData.TryGetTowerOfDespairFloor(dungeonId, out _);
         }

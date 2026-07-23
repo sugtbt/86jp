@@ -24,6 +24,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal IAssetService AssetService => _assetService;
         internal SqliteSelectCharacterDataSource SelectCharacterDataSource { get; }
         internal IRentalTimeProvider RentalTimeProvider { get; }
+        internal InventoryRefreshSender InventoryRefresh { get; }
 
         internal Game.ReviveCoin.ReviveCoinService ReviveCoin { get; }
         internal Game.DeathTower.DeathTowerHandler DeathTower { get; }
@@ -41,6 +42,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal GrowthCapsuleSyncService GrowthCapsuleSync { get; }
         internal CharacterExperienceService CharacterExperience { get; }
         internal Game.Dungeon.TowerOfDespairProgressService TowerOfDespairProgress { get; }
+        internal Game.Dungeon.TowerOfDespairRewardGrantService TowerOfDespairRewards { get; }
 
         // 组队副本联机用: 检测队伍 + 定位队员会话(可空; 未接线时副本 fan-out 优雅跳过=单人不回归)。
         internal Game.Party.PartyManager PartyManager { get; }
@@ -59,13 +61,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             Game.Quests.QuestDropService questDropService = null,
             AccountExperienceProgressService accountExperience = null)
         {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
+            _assetService = assetService
+                ?? throw new ArgumentNullException(nameof(assetService));
+            if (inventoryStore == null)
+                throw new ArgumentNullException(nameof(inventoryStore));
             ReviveCoin = reviveCoin ?? throw new ArgumentNullException(nameof(reviveCoin));
             CharacterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
             PartyManager = partyManager;
             Sessions = sessions;
             SelectCharacterDataSource = selectCharacterDataSource ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
             RentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
+            InventoryRefresh = inventoryRefresh;
             QuestDrops = questDropService ?? new Game.Quests.QuestDropService(assetService, inventoryRefresh);
             Subtype1Repository = new SqliteSubtype1Repository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             CharacterStateRepository = new SqliteCharacterStateRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
@@ -89,6 +95,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 new Game.Dungeon.TowerOfDespairProgressRepository(
                     ServerPaths.DatabasePath,
                     ServerPaths.SchemaFilePath));
+            TowerOfDespairRewards =
+                new Game.Dungeon.TowerOfDespairRewardGrantService(assetService);
             CardRewards = new Game.Dungeon.CardRewardService(this, assetService);
             Drops = new Game.Dungeon.DropService(assetService, inventoryStore);
             EntryCost = new Game.Dungeon.DungeonEntryCostService(assetService);

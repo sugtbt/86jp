@@ -201,6 +201,161 @@ namespace DfoServer.SelfTests
 
             try
             {
+                var floor15Start = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11022,
+                    x: 0,
+                    y: 0,
+                    mazeIndex: 0);
+                var floor15Middle = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11022,
+                    x: 1,
+                    y: 0,
+                    mazeIndex: 0);
+                var floor15Boss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11022,
+                    x: 2,
+                    y: 0,
+                    mazeIndex: 0);
+                Check("tower of despair floor 15 resolves all PVF room maps",
+                    floor15Start.Index == 15144
+                    && floor15Middle.Index == 15180
+                    && floor15Boss.Index == 15181,
+                    ref failures);
+
+                var floor25Boss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11032,
+                    x: 0,
+                    y: 0,
+                    mazeIndex: 0);
+                var floor25Middle1 = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11032,
+                    x: 1,
+                    y: 0,
+                    mazeIndex: 0);
+                var floor25Middle2 = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11032,
+                    x: 2,
+                    y: 0,
+                    mazeIndex: 0);
+                var floor25Start = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11032,
+                    x: 3,
+                    y: 0,
+                    mazeIndex: 0);
+                Check("tower of despair floor 25 resolves all PVF room maps",
+                    floor25Boss.Index == 15154
+                    && floor25Middle1.Index == 15250
+                    && floor25Middle2.Index == 15251
+                    && floor25Start.Index == 15252,
+                    ref failures);
+
+                var floor24 = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11031,
+                    x: 0,
+                    y: 0,
+                    mazeIndex: 0);
+                Check("generic map parsing keeps tower APCs non-blocking",
+                    CountApcs(floor24) == 3
+                    && CountBlockingApcs(floor24) == 0,
+                    ref failures);
+
+                var floor24Run = new DungeonRun(11031, 0)
+                {
+                    RoomStartSequence = 1,
+                    RoomMonsters = floor24.Monsters,
+                };
+                floor24Run.RoomKilledSeqIds.Add(1);
+                bool floor24ClearedAfterOne;
+                int floor24BlockingCount;
+                int floor24KilledBlockingCount;
+                lock (floor24Run.SyncRoot)
+                {
+                    floor24ClearedAfterOne = DungeonRoomTopology.ComputeRoomClearedLocked(
+                        floor24Run,
+                        out floor24BlockingCount,
+                        out floor24KilledBlockingCount);
+                }
+                Check("tower of despair floor 24 does not clear after one of three hostile APCs dies",
+                    floor24BlockingCount == 3
+                    && floor24KilledBlockingCount == 1
+                    && !floor24ClearedAfterOne,
+                    ref failures);
+
+                for (ushort seq = 2; seq <= 3; seq++)
+                    floor24Run.RoomKilledSeqIds.Add(seq);
+                bool floor24ClearedAfterAll;
+                lock (floor24Run.SyncRoot)
+                {
+                    floor24ClearedAfterAll = DungeonRoomTopology.ComputeRoomClearedLocked(
+                        floor24Run,
+                        out floor24BlockingCount,
+                        out floor24KilledBlockingCount);
+                }
+                Check("tower of despair floor 24 clears after all three hostile APCs die",
+                    floor24BlockingCount == 3
+                    && floor24KilledBlockingCount == 3
+                    && floor24ClearedAfterAll,
+                    ref failures);
+
+                Check("generic map parsing does not embed floor 25 clear policy",
+                    CountApcs(floor25Boss) > 0
+                    && CountApcs(floor25Middle1) > 0
+                    && CountApcs(floor25Middle2) > 0
+                    && CountApcs(floor25Start) > 0
+                    && CountBlockingApcs(floor25Boss) == 0
+                    && CountBlockingApcs(floor25Middle1) == 0
+                    && CountBlockingApcs(floor25Middle2) == 0
+                    && CountBlockingApcs(floor25Start) == 0,
+                    ref failures);
+
+                var floor82 = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11089,
+                    x: 0,
+                    y: 0,
+                    mazeIndex: 0);
+                var floor82Run = new DungeonRun(11089, 0)
+                {
+                    RoomStartSequence = 1,
+                    RoomMonsters = floor82.Monsters,
+                };
+                int floor82BlockingCount;
+                lock (floor82Run.SyncRoot)
+                {
+                    DungeonRoomTopology.ComputeRoomClearedLocked(
+                        floor82Run,
+                        out floor82BlockingCount,
+                        out _);
+                }
+                Check("tower clear policy excludes friendly APCs on floor 82",
+                    CountFriendlyApcs(floor82) > 0
+                    && floor82BlockingCount
+                        == CountRawBlockingActors(floor82)
+                           + CountHostileApcs(floor82),
+                    ref failures);
+
+                var floor55Start = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11062,
+                    x: 0,
+                    y: 0,
+                    mazeIndex: 0);
+                var floor55Boss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11062,
+                    x: 1,
+                    y: 0,
+                    mazeIndex: 0);
+                Check("tower of despair floor 55 resolves all PVF room maps",
+                    floor55Start.Index == 15204
+                    && floor55Boss.Index == 15182,
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] tower of despair multi-room PVF map resolution: {ex.Message}");
+                failures++;
+            }
+
+            try
+            {
                 var issue189StartMap = DungeonData.GetDungeonMapMonsterSummaryInformation(
                     dungeonId: 165,
                     x: 0xFF,
@@ -520,6 +675,75 @@ namespace DfoServer.SelfTests
                 if (monster.Code == monsterCode && monster.IsBlocking)
                     return true;
             return false;
+        }
+
+        private static int CountApcs(DungeonData.MazeSumInfo maze)
+        {
+            var count = 0;
+            if (maze.Monsters == null)
+                return count;
+            foreach (var monster in maze.Monsters)
+                if (monster.Type >= 5 && monster.Type <= 8)
+                    count++;
+            return count;
+        }
+
+        private static int CountBlockingApcs(DungeonData.MazeSumInfo maze)
+        {
+            var count = 0;
+            if (maze.Monsters == null)
+                return count;
+            foreach (var monster in maze.Monsters)
+                if (monster.Type >= 5 && monster.Type <= 8 && monster.IsBlocking)
+                    count++;
+            return count;
+        }
+
+        private static int CountFriendlyApcs(DungeonData.MazeSumInfo maze)
+        {
+            var count = 0;
+            if (maze.Monsters == null)
+                return count;
+            foreach (var actor in maze.Monsters)
+            {
+                if (actor.Type >= 5
+                    && actor.Type <= 8
+                    && actor.Faction == ApcFaction.Character)
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        private static int CountHostileApcs(DungeonData.MazeSumInfo maze)
+        {
+            var count = 0;
+            if (maze.Monsters == null)
+                return count;
+            foreach (var actor in maze.Monsters)
+            {
+                if (actor.Type >= 5
+                    && actor.Type <= 8
+                    && actor.Faction == ApcFaction.Monster)
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        private static int CountRawBlockingActors(DungeonData.MazeSumInfo maze)
+        {
+            var count = 0;
+            if (maze.Monsters == null)
+                return count;
+            foreach (var actor in maze.Monsters)
+            {
+                if (actor.IsBlocking)
+                    count++;
+            }
+            return count;
         }
 
         private static int CountMonster(DungeonData.MazeSumInfo maze, int monsterCode)

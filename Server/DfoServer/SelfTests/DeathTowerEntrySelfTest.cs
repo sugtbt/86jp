@@ -147,6 +147,105 @@ namespace DfoServer.SelfTests
 
             using (var fixture = SelectDungeonFixture.Create())
             {
+                var handler = fixture.CreateDungeonHandler();
+                var mapHandler = typeof(DungeonHandler).GetField(
+                        "_map",
+                        BindingFlags.NonPublic | BindingFlags.Instance)
+                    ?.GetValue(handler) as DungeonMapHandler;
+                fixture.Session.Player.Name = new byte[]
+                {
+                    (byte)'f', (byte)'l', (byte)'o', (byte)'o', (byte)'r', (byte)'1', (byte)'0',
+                };
+                var expectedTowerAppearance = new[]
+                {
+                    510000, 510001, 510002, 510003, 510004,
+                    510005, 510006, 510007, 510008, 510009,
+                    511011,
+                };
+                var appearanceEntries = new Game.Characters.CharacterAppearanceEntry[12];
+                for (byte slot = 0; slot < 10; slot++)
+                {
+                    appearanceEntries[slot] = new Game.Characters.CharacterAppearanceEntry(
+                        slot,
+                        expectedTowerAppearance[slot],
+                        4,
+                        Array.Empty<byte>(),
+                        0,
+                        0,
+                        0,
+                        0);
+                }
+                appearanceEntries[10] = new Game.Characters.CharacterAppearanceEntry(
+                    10,
+                    599999,
+                    4,
+                    Array.Empty<byte>(),
+                    0,
+                    0,
+                    0,
+                    0);
+                appearanceEntries[11] = new Game.Characters.CharacterAppearanceEntry(
+                    11,
+                    expectedTowerAppearance[10],
+                    4,
+                    Array.Empty<byte>(),
+                    0,
+                    0,
+                    0,
+                    0);
+                var expectedCreatureName = new byte[]
+                {
+                    (byte)'m', (byte)'i', (byte)'r', (byte)'r', (byte)'o', (byte)'r',
+                };
+                const uint expectedCreatureItemId = 512345;
+                fixture.Session.Player.AppearanceEntries = appearanceEntries;
+                fixture.Session.Player.Subtype0Tail =
+                    new Game.SelectCharacter.UserInfoMinimumTailSnapshot
+                    {
+                        EquippedCreatureNameBytes = expectedCreatureName,
+                        EquippedCreatureItemId = expectedCreatureItemId,
+                    };
+                fixture.Session.Player.CurrentRun =
+                    new Game.Dungeon.DungeonRun(11017, 0) { MazeIndex = 0 };
+
+                mapHandler?.SendStartMapAsync(
+                        fixture.Session,
+                        0xFF,
+                        0xFF,
+                        overrideMapId: -1)
+                    .GetAwaiter()
+                    .GetResult();
+
+                var sentPackets = mapHandler == null
+                    ? new List<SelectDungeonFixture.CapturedPacket>()
+                    : fixture.ReadSentPackets(expectedPackets: 1);
+                while (sentPackets.Count < 3 && fixture.HasPendingPacket())
+                    sentPackets.AddRange(fixture.ReadSentPackets(expectedPackets: 1));
+                Check("despair floor 10 sends START_MAP then base and current dynamic APC information",
+                    sentPackets.Count == 3
+                    && sentPackets[0].Type == 0x001D
+                    && sentPackets[1].Type == (ushort)Network.NotiPacketType.USER_APC_INFO_TOD
+                    && sentPackets[2].Type == (ushort)Network.NotiPacketType.USER_APC_INFO_TOD
+                    && HasRoomMonster(fixture.Session, 31505)
+                    && IsTowerApcInfoBody(
+                        sentPackets[1].Body,
+                        fixture.Session,
+                        0,
+                        expectedTowerAppearance,
+                        expectedCreatureName,
+                        expectedCreatureItemId)
+                    && IsTowerApcInfoBody(
+                        sentPackets[2].Body,
+                        fixture.Session,
+                        10,
+                        expectedTowerAppearance,
+                        expectedCreatureName,
+                        expectedCreatureItemId),
+                    ref failures);
+            }
+
+            using (var fixture = SelectDungeonFixture.Create())
+            {
                 var rollbackTower = CreateFinalFloorTower(config);
                 var maxLevelEntryExp = (uint)Math.Max(
                     0,
@@ -823,6 +922,78 @@ namespace DfoServer.SelfTests
             Console.WriteLine($"[{(ok ? "OK" : "FAIL")}] {name}");
             if (!ok)
                 failures++;
+        }
+
+        private static bool HasRoomMonster(
+            EnhancedClientSession session,
+            int monsterCode)
+        {
+            var monsters = session?.Player?.CurrentRun?.RoomMonsters;
+            if (monsters == null)
+                return false;
+            foreach (var monster in monsters)
+            {
+                if (monster.Code == monsterCode)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsTowerApcInfoBody(
+            byte[] body,
+            EnhancedClientSession session,
+            byte expectedLayer,
+            IReadOnlyList<int> expectedAppearance,
+            byte[] expectedCreatureName,
+            uint expectedCreatureItemId)
+        {
+            var name = session?.Player?.Name ?? Array.Empty<byte>();
+            expectedCreatureName = expectedCreatureName ?? Array.Empty<byte>();
+            if (body == null || body.Length != 112 + name.Length + expectedCreatureName.Length)
+                return false;
+            if (body[0] != expectedLayer || BitConverter.ToInt32(body, 1) != name.Length)
+                return false;
+            for (var index = 0; index < name.Length; index++)
+            {
+                if (body[5 + index] != name[index])
+                    return false;
+            }
+
+            var offset = 5 + name.Length;
+            if (body[offset++] != session.Player.Level
+                || body[offset++] != session.Player.Job
+                || body[offset++] != session.Player.GrowType)
+            {
+                return false;
+            }
+
+            var guildNameLength = BitConverter.ToInt32(body, offset);
+            offset += 4;
+            if (guildNameLength != 0 || BitConverter.ToInt32(body, offset) != 0)
+                return false;
+            offset += 4;
+
+            for (var index = 0; index < 22; index++)
+            {
+                var expectedItemId = index < expectedAppearance.Count
+                    ? expectedAppearance[index]
+                    : 0;
+                if (BitConverter.ToInt32(body, offset) != expectedItemId)
+                    return false;
+                offset += 4;
+            }
+
+            if (BitConverter.ToInt32(body, offset) != expectedCreatureName.Length)
+                return false;
+            offset += 4;
+            for (var index = 0; index < expectedCreatureName.Length; index++)
+            {
+                if (body[offset + index] != expectedCreatureName[index])
+                    return false;
+            }
+
+            offset += expectedCreatureName.Length;
+            return BitConverter.ToUInt32(body, offset) == expectedCreatureItemId;
         }
 
         private sealed class ThrowingListCharacterRepository : Game.Characters.ICharacterRepository

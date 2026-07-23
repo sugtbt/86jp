@@ -1,10 +1,15 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Net.Sockets;
 using System.Reflection;
+using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Handlers.Dungeon;
+using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
 {
@@ -56,6 +61,7 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             CheckTowerSettlementPolicy(ref failures);
+            CheckTowerRewardGrantPersistence(ref failures);
             // 3. BeginRun 建立新局
             DungeonRunLifecycle.BeginRun(session, 1002, 1);
             var run = player.CurrentRun;
@@ -249,13 +255,102 @@ namespace DfoServer.SelfTests
                     (bool)paidPolicy.Invoke(null, new object[] { 1002 }), ref failures);
             }
 
+            var cardFlowPolicy = typeof(DungeonSettlementHandler).GetMethod(
+                "ShouldScheduleCardRewardFlow",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Check("tower settlement exposes the standard card-flow policy",
+                cardFlowPolicy != null, ref failures);
+            if (cardFlowPolicy != null)
+            {
+                Check("tower of despair skips the delayed card layout and auto-flip",
+                    !(bool)cardFlowPolicy.Invoke(null, new object[] { 11008 }), ref failures);
+                Check("ordinary dungeons retain delayed card layout and auto-flip",
+                    (bool)cardFlowPolicy.Invoke(null, new object[] { 1002 }), ref failures);
+            }
+
+            var rewardFactory = typeof(DungeonSettlementHandler).GetMethod(
+                "BuildTowerOfDespairRewardCandidates",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[]
+                {
+                    typeof(int),
+                    typeof(Func<ClearRewardGenerator.CardReward>)
+                },
+                null);
+            Check("tower settlement exposes the original ten-slot reward policy",
+                rewardFactory != null, ref failures);
+            if (rewardFactory != null)
+            {
+                var nextItemId = 2600000;
+                var randomFactoryCallCount = 0;
+                Func<ClearRewardGenerator.CardReward> randomReward = () =>
+                    {
+                        randomFactoryCallCount++;
+                        return new ClearRewardGenerator.CardReward
+                        {
+                            ItemId = ++nextItemId,
+                            StackCount = 1,
+                        };
+                    };
+                var floor16 = (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(null, new object[] { 16, randomReward });
+                var floor16FactoryCalls = randomFactoryCallCount;
+                randomFactoryCallCount = 0;
+                var floor10 = (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(null, new object[] { 10, randomReward });
+                var floor10FactoryCalls = randomFactoryCallCount;
+                randomFactoryCallCount = 0;
+                var floor100 = (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(null, new object[] { 100, randomReward });
+                var floor100FactoryCalls = randomFactoryCallCount;
+
+                Check("ordinary despair floor rolls five item rewards",
+                    floor16FactoryCalls == 5
+                    && floor16.Count == 5,
+                    ref failures);
+                Check("player-mirror despair floor rolls nine items plus the synthesizer",
+                    floor10FactoryCalls == 9
+                    && floor10.Count == 10
+                    && floor10[9].ItemId == 1252
+                    && floor10[9].StackCount == 1,
+                    ref failures);
+                Check("floor 100 rolls five items plus the completion medal",
+                    floor100FactoryCalls == 5
+                    && floor100.Count == 6
+                    && floor100[5].ItemId == 3314
+                    && floor100[5].StackCount == 1,
+                    ref failures);
+
+                var fallbackFactoryCalls = 0;
+                Func<ClearRewardGenerator.CardReward> goldFallback = () =>
+                {
+                    fallbackFactoryCalls++;
+                    return new ClearRewardGenerator.CardReward
+                    {
+                        IsGold = true,
+                        GoldAmount = 123,
+                    };
+                };
+                var fallbackRewards =
+                    (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(
+                        null,
+                        new object[] { 16, goldFallback });
+                Check("invalid item fallbacks remain empty instead of becoming gold",
+                    fallbackFactoryCalls == 5
+                    && fallbackRewards.Count == 0,
+                    ref failures);
+            }
+
             var builder = typeof(DungeonSettlementHandler).GetMethod(
                 "TryBuildTowerOfDespairClearRewardWithTime",
                 BindingFlags.Static | BindingFlags.NonPublic,
                 null,
                 new[]
                 {
-                    typeof(int), typeof(uint), typeof(int), typeof(int),
+                    typeof(int), typeof(uint),
+                    typeof(IReadOnlyList<ClearRewardGenerator.CardReward>),
                     typeof(byte[]).MakeByRefType()
                 },
                 null);
@@ -264,20 +359,336 @@ namespace DfoServer.SelfTests
             if (builder == null)
                 return;
 
-            const int rewardItemId = 2600001;
-            var args = new object[] { 11013, 15750u, rewardItemId, 1, null };
+            var rewards = new List<ClearRewardGenerator.CardReward>();
+            for (var i = 0; i < 5; i++)
+            {
+                rewards.Add(new ClearRewardGenerator.CardReward
+                {
+                    ItemId = 2600001 + i,
+                    StackCount = i + 1,
+                });
+            }
+            var args = new object[] { 11013, 15750u, rewards, null };
             var built = (bool)builder.Invoke(null, args);
-            var body = args[4] as byte[];
-            Check("tower clear packet matches the client 015C wire layout",
+            var body = args[3] as byte[];
+            Check("tower clear packet keeps the original fixed ten-slot wire layout",
                 built
                 && body != null
-                && body.Length == 15
+                && body.Length == 87
                 && BitConverter.ToUInt32(body, 0) == 15750u
                 && BitConverter.ToUInt16(body, 4) == 6
-                && body[6] == 1
-                && BitConverter.ToUInt32(body, 7) == rewardItemId
-                && BitConverter.ToUInt32(body, 11) == 1u,
+                && body[6] == 10
+                && BitConverter.ToInt32(body, 7) == 2600001
+                && BitConverter.ToInt32(body, 11) == 1
+                && BitConverter.ToInt32(body, 39) == 2600005
+                && BitConverter.ToInt32(body, 43) == 5
+                && BitConverter.ToInt32(body, 47) == -1
+                && BitConverter.ToInt32(body, 51) == 0
+                && BitConverter.ToInt32(body, 79) == -1
+                && BitConverter.ToInt32(body, 83) == 0,
                 ref failures);
+        }
+
+        private static void CheckTowerRewardGrantPersistence(ref int failures)
+        {
+            const int successAccountId = 970021;
+            const int successCharacterId = 970121;
+            const int rejectionAccountId = 970022;
+            const int rejectionCharacterId = 970122;
+            const int rollbackAccountId = 970023;
+            const int rollbackCharacterId = 970123;
+            const int synthesizerItemId = 1252;
+            const int completionMedalItemId = 3314;
+            var tempDb = Path.Combine(
+                Path.GetTempPath(),
+                $"tower-of-despair-reward-{Guid.NewGuid():N}.db");
+            try
+            {
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    tempDb,
+                    ServerPaths.SchemaFilePath);
+                SeedTowerRewardOwners(
+                    connectionString,
+                    new[]
+                    {
+                        (successAccountId, successCharacterId),
+                        (rejectionAccountId, rejectionCharacterId),
+                        (rollbackAccountId, rollbackCharacterId),
+                    });
+
+                var realAssets = new SqliteAssetService(
+                    tempDb,
+                    ServerPaths.SchemaFilePath);
+                var candidates = new List<ClearRewardGenerator.CardReward>
+                {
+                    new ClearRewardGenerator.CardReward
+                    {
+                        ItemId = synthesizerItemId,
+                        StackCount = 1,
+                    },
+                    new ClearRewardGenerator.CardReward
+                    {
+                        ItemId = completionMedalItemId,
+                        StackCount = 1,
+                    },
+                };
+
+                var successService =
+                    new TowerOfDespairRewardGrantService(realAssets);
+                var successful = successService.Grant(
+                    successCharacterId,
+                    successAccountId,
+                    candidates);
+                Check("tower reward grant persists and returns successful items",
+                    successful.Count == 2
+                    && successful[0].Reward.ItemId == synthesizerItemId
+                    && successful[1].Reward.ItemId == completionMedalItemId
+                    && CountItem(
+                        realAssets,
+                        successCharacterId,
+                        successAccountId,
+                        synthesizerItemId) == 1
+                    && CountItem(
+                        realAssets,
+                        successCharacterId,
+                        successAccountId,
+                        completionMedalItemId) == 1,
+                    ref failures);
+
+                var rejectingAssets = new ControlledAssetService(
+                    realAssets,
+                    rejectItemId: completionMedalItemId);
+                var rejectionService =
+                    new TowerOfDespairRewardGrantService(rejectingAssets);
+                var acceptedOnly = rejectionService.Grant(
+                    rejectionCharacterId,
+                    rejectionAccountId,
+                    candidates);
+                Check("rejected tower rewards are not persisted or displayed",
+                    acceptedOnly.Count == 1
+                    && acceptedOnly[0].Reward.ItemId == synthesizerItemId
+                    && CountItem(
+                        realAssets,
+                        rejectionCharacterId,
+                        rejectionAccountId,
+                        synthesizerItemId) == 1
+                    && CountItem(
+                        realAssets,
+                        rejectionCharacterId,
+                        rejectionAccountId,
+                        completionMedalItemId) == 0,
+                    ref failures);
+
+                var throwingAssets = new ControlledAssetService(
+                    realAssets,
+                    throwOnAddCall: 2);
+                var rollbackService =
+                    new TowerOfDespairRewardGrantService(throwingAssets);
+                var rolledBack = rollbackService.Grant(
+                    rollbackCharacterId,
+                    rollbackAccountId,
+                    candidates);
+                Check("tower reward grant rolls back and displays nothing on exception",
+                    rolledBack.Count == 0
+                    && CountItem(
+                        realAssets,
+                        rollbackCharacterId,
+                        rollbackAccountId,
+                        synthesizerItemId) == 0
+                    && CountItem(
+                        realAssets,
+                        rollbackCharacterId,
+                        rollbackAccountId,
+                        completionMedalItemId) == 0,
+                    ref failures);
+
+                var inventoryStore = new SqliteInventoryStore(
+                    tempDb,
+                    ServerPaths.SchemaFilePath);
+                var refreshCandidates =
+                    new List<ClearRewardGenerator.CardReward>
+                    {
+                        new ClearRewardGenerator.CardReward
+                        {
+                            ItemId = synthesizerItemId,
+                            StackCount = 2,
+                        },
+                        new ClearRewardGenerator.CardReward
+                        {
+                            ItemId = 3033,
+                            StackCount = 3,
+                        },
+                    };
+                var refreshService =
+                    new TowerOfDespairRewardGrantService(realAssets);
+                var refreshGranted = refreshService.Grant(
+                    successCharacterId,
+                    successAccountId,
+                    refreshCandidates);
+                CommonInventoryItem stackedItem = null;
+                CommonInventoryItem cubeItem = null;
+                foreach (var reward in refreshGranted)
+                {
+                    var item = inventoryStore.LoadCommonItemForRefresh(
+                        successCharacterId,
+                        successAccountId,
+                        InventoryListType.Main,
+                        reward.Slot);
+                    if (item?.ItemTemplateId == synthesizerItemId)
+                        stackedItem = item;
+                    else if (item?.ItemTemplateId == 3033)
+                        cubeItem = item;
+                }
+
+                Check("existing inventory refresh path reads committed tower rewards without a nested asset scope",
+                    stackedItem != null
+                    && stackedItem.CountOrInstanceValue == 3
+                    && cubeItem != null
+                    && cubeItem.SlotIndex == 354
+                    && cubeItem.CountOrInstanceValue == 3,
+                    ref failures);
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                DeleteTempDatabase(tempDb);
+            }
+        }
+
+        private static void SeedTowerRewardOwners(
+            string connectionString,
+            IReadOnlyList<(int AccountId, int CharacterId)> owners)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                foreach (var owner in owners)
+                {
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+INSERT OR IGNORE INTO accounts (account_id, m_id, password_hash)
+VALUES (@aid, @memberId, '');
+
+INSERT OR IGNORE INTO characters (character_id, account_id, name)
+VALUES (@cid, @aid, @name);";
+                        command.Parameters.AddWithValue("@aid", owner.AccountId);
+                        command.Parameters.AddWithValue(
+                            "@memberId",
+                            $"tower-reward-{owner.AccountId}");
+                        command.Parameters.AddWithValue("@cid", owner.CharacterId);
+                        command.Parameters.AddWithValue(
+                            "@name",
+                            $"tower-reward-{owner.CharacterId}");
+                        command.ExecuteNonQuery();
+                    }
+                }
+            }
+        }
+
+        private static int CountItem(
+            IAssetService assetService,
+            int characterId,
+            int accountId,
+            int itemId)
+        {
+            using (var scope = assetService.OpenScope(characterId, accountId))
+                return assetService.CountItem(scope, itemId);
+        }
+
+        private static void DeleteTempDatabase(string databasePath)
+        {
+            foreach (var path in new[]
+            {
+                databasePath,
+                databasePath + "-wal",
+                databasePath + "-shm",
+            })
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+        }
+
+        private sealed class ControlledAssetService : IAssetService
+        {
+            private readonly IAssetService _inner;
+            private readonly int _rejectItemId;
+            private readonly int _throwOnAddCall;
+            private int _addCalls;
+
+            internal ControlledAssetService(
+                IAssetService inner,
+                int rejectItemId = 0,
+                int throwOnAddCall = 0)
+            {
+                _inner = inner;
+                _rejectItemId = rejectItemId;
+                _throwOnAddCall = throwOnAddCall;
+            }
+
+            public DbScope OpenScope(int characterId, int accountId)
+                => _inner.OpenScope(characterId, accountId);
+
+            public bool TryAddItem(
+                DbScope scope,
+                int itemTemplateId,
+                int count,
+                out short assignedSlot)
+            {
+                _addCalls++;
+                if (_throwOnAddCall > 0 && _addCalls == _throwOnAddCall)
+                {
+                    throw new InvalidOperationException(
+                        "injected tower reward persistence failure");
+                }
+                if (itemTemplateId == _rejectItemId)
+                {
+                    assignedSlot = -1;
+                    return false;
+                }
+                return _inner.TryAddItem(
+                    scope,
+                    itemTemplateId,
+                    count,
+                    out assignedSlot);
+            }
+
+            public bool TryRemoveItem(
+                DbScope scope,
+                int itemTemplateId,
+                int count,
+                out short slot,
+                out int remaining)
+                => _inner.TryRemoveItem(
+                    scope,
+                    itemTemplateId,
+                    count,
+                    out slot,
+                    out remaining);
+
+            public int CountItem(
+                DbScope scope,
+                int itemTemplateId)
+                => _inner.CountItem(scope, itemTemplateId);
+
+            public WalletSnapshot LoadWallet(DbScope scope)
+                => _inner.LoadWallet(scope);
+
+            public int GrantGold(DbScope scope, int amount)
+                => _inner.GrantGold(scope, amount);
+
+            public bool TrySpendGold(DbScope scope, int amount)
+                => _inner.TrySpendGold(scope, amount);
+
+            public void GrantLuckyStar(DbScope scope, int amount)
+                => _inner.GrantLuckyStar(scope, amount);
+
+            public bool TrySpendLuckyStar(DbScope scope, int amount)
+                => _inner.TrySpendLuckyStar(scope, amount);
+
+            public CharacterItemListSnapshot LoadSnapshot(DbScope scope)
+                => _inner.LoadSnapshot(scope);
         }
 
         private static void Check(string name, bool ok, ref int failures)

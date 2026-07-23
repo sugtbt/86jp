@@ -295,7 +295,8 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 trackable++;
                 if (monster.Type >= 5) apc++; else normal++;
-                if (monster.IsBlocking) blocking++;
+                var isBlocking = IsBlockingForRoomClear(run, monster);
+                if (isBlocking) blocking++;
 
                 var seqId = (ushort)(startSeq + i);
                 if (killed.Contains(seqId))
@@ -306,7 +307,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
 
                 remaining++;
-                if (monster.IsBlocking) blockingRemaining++;
+                if (isBlocking) blockingRemaining++;
             }
 
             return new DungeonRoomProgress(
@@ -321,7 +322,8 @@ namespace DfoServer.Network.Handlers.Dungeon
         /// <summary>
         /// 房间通关判定的唯一实现 —— 击杀主路径与组队击杀 relay 共用, 逻辑绝不允许写两份
         /// (曾因两份逻辑一份修了一份漏, 出过 blockingCount>0 门控劈叉)。
-        /// 真机 check_grid_clear(0x830A0E8): 所有 spawnType==100 的 blocking 怪死光即通过; 空房间(0 blocking)也算通过。
+        /// 真机 check_grid_clear(0x830A0E8): 所有 spawnType==100 的 blocking 怪死光即通过。
+        /// 个别副本可在 IsBlockingForRoomClear 中追加其专用房间目标；空房间(0 blocking)也算通过。
         /// 调用方必须已持有 run.SyncRoot(读 RoomMonsters/RoomKilledSeqIds)。
         /// </summary>
         internal static bool ComputeRoomClearedLocked(Game.Dungeon.DungeonRun run, out int blockingCount, out int killedBlockingCount)
@@ -333,13 +335,34 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return true;
             for (var i = 0; i < monsters.Count; i++)
             {
-                if (!monsters[i].IsBlocking) continue;
+                if (!IsBlockingForRoomClear(run, monsters[i])) continue;
                 blockingCount++;
                 var sid = (ushort)(run.RoomStartSequence + i);
                 if (run.RoomKilledSeqIds.Contains(sid))
                     killedBlockingCount++;
             }
             return killedBlockingCount >= blockingCount;
+        }
+
+        private static bool IsBlockingForRoomClear(
+            Game.Dungeon.DungeonRun run,
+            GameWorld.Dungeon.MonsterSumInfo actor)
+        {
+            return actor.IsBlocking
+                || IsTowerOfDespairRequiredTarget(run, actor);
+        }
+
+        private static bool IsTowerOfDespairRequiredTarget(
+            Game.Dungeon.DungeonRun run,
+            GameWorld.Dungeon.MonsterSumInfo actor)
+        {
+            return run != null
+                && actor.Type >= (byte)ApcAIType.Normal
+                && actor.Type <= (byte)ApcAIType.Boss
+                && actor.Faction == ApcFaction.Monster
+                && GameWorld.Dungeon.TryGetTowerOfDespairFloor(
+                    run.DungeonId,
+                    out _);
         }
     }
 
