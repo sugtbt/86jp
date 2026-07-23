@@ -2,6 +2,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Settings;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Builders.Auction;
 using DfoServer.Network.Parsers;
 using System;
 using System.Threading.Tasks;
@@ -71,8 +72,8 @@ namespace DfoServer.Network.Handlers
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0001, LoginPacketBuilder.BuildLoginSuccess()));
             await SendAccountSettingsOnLoginAsync(session);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00B7, ServiceNotificationBuilder.BuildAuctionService(0x00, 0x00)));
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00B7, ServiceNotificationBuilder.BuildAuctionService(0x01, 0x00)));
+            foreach (var packet in AuctionServiceNotificationBuilder.BuildOpenPackets())
+                await session.SendPacketAsync(packet);
             await _honorLevel.SendInfoAsync(session, ProtocolName, null);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x01A1, CommonPacketBodyBuilder.BuildZeroBytes(1)));
         }
