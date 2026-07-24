@@ -61,6 +61,13 @@ namespace DfoServer.SelfTests
                 "captured 0x010F request");
             Check(!ChronicleGrowthRequest.TryParse(captured[..^1], out _), "truncated request rejected");
 
+            var optionVariant = (byte[])captured.Clone();
+            optionVariant[12] = 0x04;
+            Check(ChronicleGrowthRequest.TryParse(optionVariant, out var optionCommand)
+                && optionCommand.Materials.Count == 1
+                && optionCommand.Materials[0].SlotIndex == FragmentSlot,
+                "option byte does not change request layout");
+
             var result = new ChronicleGrowthResult { GrowthSucceeded = true };
             result.Consumptions.Add(new ChronicleGrowthConsumption
                 { ListType = InventoryListType.Main, SlotIndex = NormalTicketSlot, ConsumedCount = 1 });

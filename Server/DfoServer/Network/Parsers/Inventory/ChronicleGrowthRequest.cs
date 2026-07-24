@@ -5,17 +5,12 @@ namespace DfoServer.Network.Parsers.Inventory
 {
     public static class ChronicleGrowthRequest
     {
-        private const int FixedLength = 13;
-        private const int MaterialLength = 6;
+        private const int FixedLength = 19;
 
         public static bool TryParse(byte[] body, out ChronicleGrowthCommand command)
         {
             command = null;
-            if (body == null || body.Length < FixedLength)
-                return false;
-
-            var materialCount = body[12];
-            if (materialCount == 0 || materialCount > 16 || body.Length != FixedLength + materialCount * MaterialLength)
+            if (body == null || body.Length != FixedLength)
                 return false;
 
             var parsed = new ChronicleGrowthCommand
@@ -26,15 +21,11 @@ namespace DfoServer.Network.Parsers.Inventory
                 TargetItemTemplateId = BitConverter.ToInt32(body, 8),
             };
 
-            var offset = FixedLength;
-            for (var i = 0; i < materialCount; i++, offset += MaterialLength)
+            parsed.Materials.Add(new ChronicleGrowthMaterialRequest
             {
-                parsed.Materials.Add(new ChronicleGrowthMaterialRequest
-                {
-                    SlotIndex = BitConverter.ToInt16(body, offset),
-                    ItemTemplateId = BitConverter.ToInt32(body, offset + 2),
-                });
-            }
+                SlotIndex = BitConverter.ToInt16(body, 13),
+                ItemTemplateId = BitConverter.ToInt32(body, 15),
+            });
 
             command = parsed;
             return true;
