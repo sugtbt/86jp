@@ -123,11 +123,8 @@ namespace DfoServer.Network.Handlers
             var costItems = result.CostItemTemplateId > 0
                 ? new System.Collections.Generic.List<CostItemUpdate> { new CostItemUpdate { ItemTemplateId = result.CostItemTemplateId, NewStackCount = result.CostItemNewStackCount } }
                 : null;
-            var hidePurchasedItemSummary = ShouldHideNpcBuyItemSummary(itemTemplateId, result);
-            if (hidePurchasedItemSummary)
-                await _refresh.SendUpdateItemList(session, result.ListType, result.SlotIndex);
 
-            var ackBody = BuyItemAckBuilder.Build(result, costItems, includePurchasedItemSummary: !hidePurchasedItemSummary);
+            var ackBody = BuyItemAckBuilder.Build(result, costItems);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0015, ackBody));
 
 
@@ -146,22 +143,14 @@ namespace DfoServer.Network.Handlers
             if (result.GoldSpent)
                 await _refresh.SendGoldUpdate(session);
 
-            if (!hidePurchasedItemSummary && result.ListType == InventoryListType.Main)
+            if (result.ListType == InventoryListType.Main)
                 await _refresh.SendUpdateItemList(session, result.ListType, result.SlotIndex);
 
-            if (!hidePurchasedItemSummary && result.ListType != InventoryListType.Main)
+            if (result.ListType != InventoryListType.Main)
             {
                 await _refresh.SendUpdateItemList(session, result.ListType, result.SlotIndex);
                 FileLogger.Log($"[{ProtocolName}] BUY_ITEM: ITEM_LIST update sent list={result.ListType} slot={result.SlotIndex}");
             }
-        }
-
-        internal static bool ShouldHideNpcBuyItemSummary(int itemTemplateId, InventoryMutationResult result)
-        {
-            if (result == null || result.ListType != InventoryListType.Main || itemTemplateId <= 0)
-                return false;
-
-            return StackableItemProvider.IsLegacyContainer(itemTemplateId);
         }
 
         public async Task Handle_ENUM_CMDPACKET_SELL_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)

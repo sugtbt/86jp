@@ -39,7 +39,6 @@ namespace DfoServer.Network.Builders
             writer.WriteByte(rewardItem.Attr);
             writer.WriteByte(rewardItem.AmplifyType);
             writer.WriteUInt16(rewardItem.AmplifyValue);
-            writer.WriteInt32(rewardItem.ExpireTime);
             WriteEmptyEquipmentSocketExtension(writer, rewardItem);
             WriteEmptyInvenItemTail(writer);
             return writer.ToArray();

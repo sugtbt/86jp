@@ -86,17 +86,16 @@ namespace DfoServer.SelfTests
                 RewardSlot,
                 rewardItem,
                 2);
-            Check("common result body length", nativeResult.Length == 56, ref failures);
+            Check("common result body length", nativeResult.Length == 52, ref failures);
             Check("common result source and reward", nativeResult[0] == 1
                 && BitConverter.ToInt16(nativeResult, 1) == LotterySlot
                 && BitConverter.ToInt16(nativeResult, 3) == RewardSlot
                 && BitConverter.ToInt32(nativeResult, 5) == SampleRewardItemId, ref failures);
             Check("common result x2 display", BitConverter.ToInt32(nativeResult, 9) == 2, ref failures);
-            Check("common result expire time", BitConverter.ToInt32(nativeResult, 19) == rewardItem.ExpireTime, ref failures);
-            Check("common result native tail", nativeResult[23] == 0xEF
-                && BitConverter.ToInt32(nativeResult, 24) == 25
-                && nativeResult.Skip(28).Take(25).All(value => value == 0)
-                && nativeResult.Skip(53).All(value => value == 0), ref failures);
+            Check("common result native tail", nativeResult[19] == 0xEF
+                && BitConverter.ToInt32(nativeResult, 20) == 25
+                && nativeResult.Skip(24).Take(25).All(value => value == 0)
+                && nativeResult.Skip(49).All(value => value == 0), ref failures);
 
             var duplicateEquipmentRewards = new[]
             {
@@ -182,6 +181,16 @@ namespace DfoServer.SelfTests
             });
             Check("buy ACK carries coin balance", BitConverter.ToInt32(buyAck, 13) == 0x12345678, ref failures);
             Check("buy ACK carries item expire time", BitConverter.ToInt32(buyAck, 32) == 0x01020304, ref failures);
+            var containerBuyAck = BuyItemAckBuilder.Build(new InventoryMutationResult
+            {
+                SlotIndex = RewardSlot,
+                ItemTemplateId = MagicBoxItemId,
+                InstanceValue = 1,
+                ExpireTime = 0x01020304,
+            });
+            Check("buy ACK carries container summary", BitConverter.ToInt32(containerBuyAck, 19) == MagicBoxItemId
+                && BitConverter.ToInt32(containerBuyAck, 23) == 1
+                && BitConverter.ToInt32(containerBuyAck, 32) == 0x01020304, ref failures);
         }
 
         private static void TestDefinitionAndSession(ref int failures)
@@ -446,28 +455,6 @@ namespace DfoServer.SelfTests
                 serviceData,
                 10 + LotteryDoubleRewardPolicy.PremiumServiceSlot * 9)
                 == LotteryDoubleRewardPolicy.DailyLimit, ref failures);
-
-            Check("NPC purchase refresh includes regular lottery", InventoryHandler.ShouldHideNpcBuyItemSummary(
-                HeroLotteryItemId,
-                new InventoryMutationResult
-                {
-                    ListType = InventoryListType.Main,
-                    ItemTemplateId = HeroLotteryItemId,
-                }), ref failures);
-            Check("NPC purchase refresh keeps random legacy container compatibility", InventoryHandler.ShouldHideNpcBuyItemSummary(
-                MagicBoxItemId,
-                new InventoryMutationResult
-                {
-                    ListType = InventoryListType.Main,
-                    ItemTemplateId = MagicBoxItemId,
-                }), ref failures);
-            Check("NPC purchase workaround excludes ordinary stackable", !InventoryHandler.ShouldHideNpcBuyItemSummary(
-                2600014,
-                new InventoryMutationResult
-                {
-                    ListType = InventoryListType.Main,
-                    ItemTemplateId = 2600014,
-                }), ref failures);
 
             DeleteTempDatabase(databasePath);
         }
