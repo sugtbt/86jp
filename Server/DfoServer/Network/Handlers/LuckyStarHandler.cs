@@ -1,26 +1,33 @@
-using DfoServer.Game.Inventory;
-using DfoServer.Game.SelectCharacter;
-using DfoServer.Network.Builders;
 using System;
 using System.Threading.Tasks;
+using DfoServer.Game.Currency;
+using DfoServer.Game.Inventory;
+using DfoServer.Game.SelectCharacter;
+using DfoServer.Infrastructure;
+using DfoServer.Network.Builders;
+using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Network.Handlers
 {
-    /// 租赁商店：购买幸运星（0x0373）。
+    /// <summary>
+    /// 租赁商店购买幸运星。金币走在线背包 slot0，幸运星仍是账号级货币。
+    /// </summary>
     public sealed class LuckyStarHandler
     {
-        private readonly IAssetService _assetService;
         private readonly SqliteSelectCharacterDataSource _dataSource;
         private readonly IRentalTimeProvider _rentalTimeProvider;
+        private readonly InventoryRefreshSender _refresh;
+        private readonly string _connectionString;
 
         public LuckyStarHandler(
-            IAssetService assetService,
             SqliteSelectCharacterDataSource dataSource,
-            IRentalTimeProvider rentalTimeProvider = null)
+            IRentalTimeProvider rentalTimeProvider = null,
+            InventoryRefreshSender refresh = null)
         {
-            _assetService = assetService;
             _dataSource = dataSource;
             _rentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
+            _refresh = refresh;
+            _connectionString = SqliteDatabaseBootstrap.Initialize(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
         }
 
         public async Task HandleShopPurchasePacket(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -42,43 +49,79 @@ namespace DfoServer.Network.Handlers
         private async Task ExecuteLuckyStarPurchase(EnhancedClientSession session, int buyCount, byte[] purchaseRequestBody)
         {
             var (characterId, accountId) = InventoryHandler.ResolveOwner(session);
-            if (characterId <= 0)
+            if (characterId <= 0 || accountId <= 0)
                 return;
 
             FileLogger.Log($"[LuckyStar] BUY request: char={characterId} buyCount={buyCount} via=0x0373");
             var totalGoldCost = RentalCatalogCodec.GoldCostPerStar * buyCount;
 
-            var newLuckyStar = (ushort)0;
-            int newGold;
-
-            // 金币扣减和幸运星增加必须同事务提交，避免只扣金币或只加星。
-            using (var scope = _assetService.OpenScope(characterId, accountId))
+            if (!InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
             {
-                var wallet = _assetService.LoadWallet(scope);
-                if (wallet.LuckyStar + buyCount > RentalCatalogCodec.MaxLuckyStar)
-                {
-                    await Send0373Error(session);
-                    return;
-                }
+                FileLogger.Log($"[LuckyStar] BUY: online inventory missing char={characterId}");
+                await Send0373Error(session);
+                return;
+            }
 
-                if (wallet.Gold < totalGoldCost)
-                {
-                    FileLogger.Log($"[LuckyStar] BUY: insufficient gold need={totalGoldCost} have={wallet.Gold} char={characterId}");
-                    await Send0373Error(session);
-                    return;
-                }
+            var newGold = 0;
+            var newLuckyStar = (ushort)0;
+            var success = false;
+            string rejectLog = null;
 
-                newGold = wallet.Gold - totalGoldCost;
-                newLuckyStar = (ushort)(wallet.LuckyStar + buyCount);
-                if (!_assetService.TrySpendGold(scope, totalGoldCost))
+            try
+            {
+                lock (lease.SyncRoot)
                 {
-                    FileLogger.Log($"[LuckyStar] BUY: TrySpendGold refused need={totalGoldCost} char={characterId}");
-                    await Send0373Error(session);
-                    return;
+                    using (var connection = new SqliteConnection(_connectionString))
+                    {
+                        connection.Open();
+                        using (var transaction = connection.BeginTransaction())
+                        {
+                            var wallet = CurrencyService.LoadWallet(connection, transaction, characterId);
+                            if (wallet.LuckyStar + buyCount > RentalCatalogCodec.MaxLuckyStar)
+                            {
+                                rejectLog = $"[LuckyStar] BUY: star limit exceeded have={wallet.LuckyStar} add={buyCount} char={characterId}";
+                            }
+                            else
+                            {
+                                var currentGold = lease.Inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart);
+                                if (currentGold < totalGoldCost)
+                                {
+                                    rejectLog = $"[LuckyStar] BUY: insufficient gold need={totalGoldCost} have={currentGold} char={characterId}";
+                                }
+                                else if (totalGoldCost > 0
+                                    && (!lease.Inventory.TryConsumeMainItem(
+                                            InventoryService.MainVirtualCurrencySlotStart,
+                                            totalGoldCost,
+                                            out var consumed)
+                                        || !consumed.Success))
+                                {
+                                    rejectLog = $"[LuckyStar] BUY: spend gold refused need={totalGoldCost} char={characterId}";
+                                }
+                                else
+                                {
+                                    newGold = lease.Inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart);
+                                    newLuckyStar = (ushort)(wallet.LuckyStar + buyCount);
+                                    CurrencyService.GrantLuckyStar(connection, transaction, accountId, buyCount);
+                                    transaction.Commit();
+                                    success = true;
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                rejectLog = $"[LuckyStar] BUY: exception char={characterId} error={ex.Message}";
+            }
 
-                _assetService.GrantLuckyStar(scope, buyCount);
-                scope.Commit();
+            if (!success)
+            {
+                if (!string.IsNullOrEmpty(rejectLog))
+                    FileLogger.Log(rejectLog);
+                await Send0373Error(session);
+                return;
             }
 
             FileLogger.Log($"[LuckyStar] BUY: char={characterId} count={buyCount} gold=-{totalGoldCost} -> {newGold} stars={newLuckyStar}");
@@ -92,8 +135,8 @@ namespace DfoServer.Network.Handlers
                 newLuckyStar,
                 _rentalTimeProvider,
                 purchaseRequestBody);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                ItemListUpdateBuilder.BuildGoldUpdate(newGold)));
+            if (_refresh != null)
+                await _refresh.SendGoldUpdate(session, newGold);
         }
 
         private static async Task Send0373Error(EnhancedClientSession session)

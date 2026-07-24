@@ -224,16 +224,13 @@ namespace DfoServer.SelfTests
                     entry => entry.Slot == KnightShieldEquipmentSnapshotSynchronizer.SupportWeaponSlot);
                 Check("subtype1 dynamically restores the deck main shield in support-weapon slot 23",
                     supportWeapon != null
-                    && supportWeapon.ItemId == 113370003
-                    && supportWeapon.Item != null
-                    && supportWeapon.Item.Slot == 23
-                    && supportWeapon.Item.ItemId == 113370003);
-                Check("dynamic shield InvenItem matches the native default list-33 state",
-                    supportWeapon?.RawEntry != null
-                    && supportWeapon.RawEntry.Length == 43
-                    && supportWeapon.RawEntry[0] == 23
-                    && BitConverter.ToInt32(supportWeapon.RawEntry, 1) == 113370003
-                    && IsZeroRange(supportWeapon.RawEntry, 5));
+                    && supportWeapon.Core != null
+                    && supportWeapon.Core.ItemId == 113370003);
+                Check("dynamic shield ItemCore keeps the native default list-33 state",
+                    supportWeapon?.Core != null
+                    && supportWeapon.Core.Value == 0
+                    && supportWeapon.Core.Attr == 0
+                    && supportWeapon.Core.Durability == 0);
                 var appearanceEntries = AppearanceService.BuildFromEquippedEntries(subtype1.EquippedEntries);
                 Check("appearance projection carries the standard support-weapon slot 23",
                     Array.Exists(
@@ -243,13 +240,13 @@ namespace DfoServer.SelfTests
                 var subtype1Body = UserInfoSubtype1Builder.BuildFromSnapshot(
                     subtype1,
                     new SkillInfoSnapshot());
-                Check("subtype1 wire body carries one complete slot-23 InvenItem",
+                Check("subtype1 wire body carries one complete slot-23 ItemCore entry",
                     subtype1Body.Length > 136
                     && subtype1Body[92] == 1
                     && subtype1Body[93] == 23
                     && BitConverter.ToInt32(subtype1Body, 94) == 113370003);
-                Check("dynamic shield restore does not persist into ordinary equipped entries",
-                    CountEquippedSlot23(connectionString) == 0);
+                Check("dynamic shield restore does not persist into ordinary equipment items",
+                    CountEquipmentSlot23(connectionString) == 0);
                 var initSequence = NewCharacterInitSequence.Build();
                 var subtype1TemplateIndex = FindTemplateIndex(
                     initSequence,
@@ -477,7 +474,7 @@ WHERE character_id = @cid;";
             }
         }
 
-        private static long CountEquippedSlot23(string connectionString)
+        private static long CountEquipmentSlot23(string connectionString)
         {
             using (var connection = new SqliteConnection(connectionString))
             {
@@ -486,9 +483,10 @@ WHERE character_id = @cid;";
                 {
                     command.CommandText = @"
 SELECT COUNT(*)
-FROM character_equipped_entries
-WHERE character_id = @cid AND slot = 23;";
+FROM character_new_items
+WHERE character_id = @cid AND list_type = @listType AND slot_index = 23;";
                     command.Parameters.AddWithValue("@cid", CharacterId);
+                    command.Parameters.AddWithValue("@listType", (int)InventoryListType.Equipment);
                     return Convert.ToInt64(command.ExecuteScalar());
                 }
             }

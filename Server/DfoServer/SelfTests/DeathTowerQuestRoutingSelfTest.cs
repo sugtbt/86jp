@@ -123,7 +123,7 @@ namespace DfoServer.SelfTests
                         Tower = new DeathTowerSession(config),
                     },
                 });
-            var manager = new QuestManager(sender, connStr, assetService: null);
+            var manager = new QuestManager(sender, connStr);
             manager
                 .HandleSetTriggerAsync(0x0021, BuildWireSetTriggerBody(AwakeningQuestId, triggerType: 0, increment: false))
                 .GetAwaiter()
@@ -266,7 +266,7 @@ VALUES (@cid, @aid, @name, 4, 4, 50);";
                     AccountId = AccountId,
                     MId = "death-tower-quest-routing",
                 };
-                session.GameSession = new Game.Session.GameSession(session, connStr, assetService: null);
+                session.GameSession = new Game.Session.GameSession(session, connStr);
 
                 return new SessionFixture(listener, client, accepted, session);
             }

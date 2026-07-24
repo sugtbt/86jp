@@ -1,10 +1,7 @@
 using DfoServer.Game.Inventory;
-using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Inventory;
-using Microsoft.Data.Sqlite;
 using System;
-using System.IO;
 
 namespace DfoServer.SelfTests
 {
@@ -113,39 +110,56 @@ namespace DfoServer.SelfTests
 
         private static void TestStore()
         {
-            var databasePath = Path.Combine(Path.GetTempPath(), "DfoServerSelfTests", "chronicle-growth.db");
-            DeleteDatabase(databasePath);
-            Seed(databasePath);
-            var store = new SqliteInventoryStore(databasePath, ServerPaths.SchemaFilePath);
+            var inventory = new InventoryService(CharacterId, AccountId);
+            inventory.SetItem(InventoryListType.Main, TargetSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = TargetItemId,
+                Uid = 10001,
+                Durability = 40,
+                GenuineUpgrade = 8,
+            });
+            AddTicket(inventory, NormalTicketSlot, NormalTicketId);
+            AddTicket(inventory, AdvancedTicketSlot, AdvancedTicketId);
+            inventory.SetItem(InventoryListType.Main, FragmentSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindMaterial,
+                ItemId = ChronicleGrowthCostCalculator.FragmentItemTemplateId,
+                Count = 100,
+            });
 
             var normal = CreateCommand(NormalTicketSlot, NormalTicketId);
-            Check(store.TryGrowChronicleEquipment(CharacterId, AccountId, normal, out var normalResult)
+            Check(ChronicleGrowthService.TryGrow(inventory, normal, out var normalResult)
                 && normalResult.GrowthSucceeded
                 && normalResult.OldLevel == 70
                 && normalResult.NewLevel == 73
                 && normalResult.RequiredFragmentCount == 6,
-                "normal ticket grows forged equipment 70 to 73 without a forging surcharge");
-            Check(ReadGrowthLevel(store) == 3 && store.CountItem(CharacterId, NormalTicketId) == 0
-                && store.CountItem(CharacterId, ChronicleGrowthCostCalculator.FragmentItemTemplateId) == 94,
-                "normal growth persists and consumes atomically");
+                "normal ticket grows equipment 70 to 73");
+            Check(inventory.GetItem(InventoryListType.Main, TargetSlot).EmancipateEquipmentLevel == 3
+                && inventory.GetItem(InventoryListType.Main, NormalTicketSlot) == null
+                && inventory.GetItem(InventoryListType.Main, FragmentSlot).Count == 94,
+                "normal growth mutates ItemCore and consumes atomically");
 
             var advanced = CreateCommand(AdvancedTicketSlot, AdvancedTicketId);
-            Check(store.TryGrowChronicleEquipment(CharacterId, AccountId, advanced, out var advancedResult)
+            Check(ChronicleGrowthService.TryGrow(inventory, advanced, out var advancedResult)
                 && advancedResult.GrowthSucceeded
                 && advancedResult.OldLevel == 73
                 && advancedResult.NewLevel == 78,
                 "advanced ticket grows 73 to 78");
 
-            SetGrowthLevel(databasePath, 15);
-            AddTicket(databasePath, AdvancedTicketSlot, AdvancedTicketId);
-            Check(store.TryGrowChronicleEquipment(CharacterId, AccountId, advanced, out var cappedResult)
-                && cappedResult.NewLevel == 86 && ReadGrowthLevel(store) == 16,
+            var target = inventory.GetItem(InventoryListType.Main, TargetSlot).Copy();
+            target.EmancipateEquipmentLevel = 15;
+            inventory.SetItem(InventoryListType.Main, TargetSlot, target);
+            AddTicket(inventory, AdvancedTicketSlot, AdvancedTicketId);
+            Check(ChronicleGrowthService.TryGrow(inventory, advanced, out var cappedResult)
+                && cappedResult.NewLevel == 86
+                && inventory.GetItem(InventoryListType.Main, TargetSlot).EmancipateEquipmentLevel == 16,
                 "advanced ticket caps at 86");
 
-            AddTicket(databasePath, AdvancedTicketSlot, AdvancedTicketId);
-            Check(!store.TryGrowChronicleEquipment(CharacterId, AccountId, advanced, out var maximumResult)
+            AddTicket(inventory, AdvancedTicketSlot, AdvancedTicketId);
+            Check(!ChronicleGrowthService.TryGrow(inventory, advanced, out var maximumResult)
                 && maximumResult.ErrorCode == ChronicleGrowthResult.ErrorMaximumLevel
-                && store.CountItem(CharacterId, AdvancedTicketId) == 1,
+                && inventory.GetItem(InventoryListType.Main, AdvancedTicketSlot).Count == 1,
                 "maximum level rejects without consuming");
         }
 
@@ -159,109 +173,26 @@ namespace DfoServer.SelfTests
                 TargetItemTemplateId = TargetItemId,
             };
             command.Materials.Add(new ChronicleGrowthMaterialRequest
-                { SlotIndex = FragmentSlot, ItemTemplateId = ChronicleGrowthCostCalculator.FragmentItemTemplateId });
+            {
+                SlotIndex = FragmentSlot,
+                ItemTemplateId = ChronicleGrowthCostCalculator.FragmentItemTemplateId,
+            });
             return command;
         }
 
-        private static void Seed(string databasePath)
+        private static void AddTicket(
+            InventoryService inventory,
+            short slotIndex,
+            int itemTemplateId)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(databasePath));
-            using var connection = new SqliteConnection(SqliteDatabaseBootstrap.Initialize(databasePath, ServerPaths.SchemaFilePath));
-            connection.Open();
-            using var command = connection.CreateCommand();
-            command.CommandText = @"
-INSERT OR IGNORE INTO accounts (account_id, m_id, password_hash) VALUES (@aid, 'chronicle-growth', '');
-INSERT OR IGNORE INTO characters (character_id, account_id, name) VALUES (@cid, @aid, 'chronicle-growth');
-INSERT OR REPLACE INTO character_container_state (character_id, list_type, list_param16) VALUES (@cid, 0, 24);
-INSERT OR REPLACE INTO character_items (owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, durability, seal_flag, option_value, expire_time, marker_16, pet_serial_or_handle, extra_json)
-VALUES ('character', @cid, @cid, 0, @targetSlot, @targetId, 'equipment', @quality, @quality, 40, 0, 0, 0, -1, 0, @extraJson);
-INSERT OR REPLACE INTO character_items (owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, durability, seal_flag, option_value, expire_time, marker_16, pet_serial_or_handle, extra_json)
-VALUES ('character', @cid, @cid, 0, @normalSlot, @normalId, 'stackable', 1, 1, 0, 0, 0, 0, 0, 0, '{}');
-INSERT OR REPLACE INTO character_items (owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, durability, seal_flag, option_value, expire_time, marker_16, pet_serial_or_handle, extra_json)
-VALUES ('character', @cid, @cid, 0, @advancedSlot, @advancedId, 'stackable', 1, 1, 0, 0, 0, 0, 0, 0, '{}');
-INSERT OR REPLACE INTO character_items (owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, durability, seal_flag, option_value, expire_time, marker_16, pet_serial_or_handle, extra_json)
-VALUES ('character', @cid, @cid, 0, @fragmentSlot, @fragmentId, 'stackable', 100, 100, 0, 0, 0, 0, 0, 0, '{}');";
-            command.Parameters.AddWithValue("@aid", AccountId);
-            command.Parameters.AddWithValue("@cid", CharacterId);
-            command.Parameters.AddWithValue("@targetSlot", TargetSlot);
-            command.Parameters.AddWithValue("@targetId", TargetItemId);
-            command.Parameters.AddWithValue("@quality", unchecked((int)ItemQuality.TopQualitySeed));
-            command.Parameters.AddWithValue("@extraJson", InventoryItemCodec.SerializeCommon(CreateTarget()));
-            command.Parameters.AddWithValue("@normalSlot", NormalTicketSlot);
-            command.Parameters.AddWithValue("@normalId", NormalTicketId);
-            command.Parameters.AddWithValue("@advancedSlot", AdvancedTicketSlot);
-            command.Parameters.AddWithValue("@advancedId", AdvancedTicketId);
-            command.Parameters.AddWithValue("@fragmentSlot", FragmentSlot);
-            command.Parameters.AddWithValue("@fragmentId", ChronicleGrowthCostCalculator.FragmentItemTemplateId);
-            command.ExecuteNonQuery();
-        }
-
-        private static CommonInventoryItem CreateTarget()
-        {
-            var tail = new byte[37];
-            tail[27] = 8;
-            var item = new CommonInventoryItem
+            inventory.SetItem(InventoryListType.Main, slotIndex, new ItemCore
             {
-                SlotIndex = TargetSlot,
-                ItemTemplateId = TargetItemId,
-                CountOrInstanceValue = unchecked((int)ItemQuality.TopQualitySeed),
-                Durability = 40,
-                Marker16 = -1,
-                TailData2F = tail,
-                JewelSocket = new byte[30],
-            };
-            return item;
+                ItemKind = ItemCore.KindConsumable,
+                ItemId = itemTemplateId,
+                Count = 1,
+            });
         }
-
-        private static byte ReadGrowthLevel(SqliteInventoryStore store)
-        {
-            var snapshot = store.LoadCharacterItemListSnapshot(CharacterId, AccountId);
-            var item = snapshot.MainItems.Find(entry => entry.SlotIndex == TargetSlot);
-            return item == null ? (byte)0 : new InventoryItemEntry84View(
-                item.SlotIndex, item.ItemTemplateId, item.CountOrInstanceValue, item.ExtData0, item.Durability,
-                item.SealFlag, item.PrefixData0E, item.Marker16, item.MiddleData1A, item.ExpireTime,
-                item.TailData2F, item.JewelSocket, null).EmancipateEquipmentLevel;
-        }
-
-        private static void SetGrowthLevel(string databasePath, byte value)
-        {
-            using var connection = new SqliteConnection(SqliteDatabaseBootstrap.Initialize(databasePath, ServerPaths.SchemaFilePath));
-            connection.Open();
-            using var load = connection.CreateCommand();
-            load.CommandText = "SELECT extra_json FROM character_items WHERE character_id=@cid AND list_type=0 AND slot_index=@slot";
-            load.Parameters.AddWithValue("@cid", CharacterId);
-            load.Parameters.AddWithValue("@slot", TargetSlot);
-            var extra = Convert.ToString(load.ExecuteScalar());
-            var tail = InventoryItemCodec.ReadHexValue(extra, "tailData2F", 37);
-            tail[28] = value;
-            using var update = connection.CreateCommand();
-            update.CommandText = "UPDATE character_items SET extra_json=@json WHERE character_id=@cid AND list_type=0 AND slot_index=@slot";
-            update.Parameters.AddWithValue("@json", extra.Replace(InventoryItemCodec.ToHex(InventoryItemCodec.ReadHexValue(extra, "tailData2F", 37)), InventoryItemCodec.ToHex(tail)));
-            update.Parameters.AddWithValue("@cid", CharacterId);
-            update.Parameters.AddWithValue("@slot", TargetSlot);
-            update.ExecuteNonQuery();
-        }
-
-        private static void AddTicket(string databasePath, short slot, int itemId)
-        {
-            using var connection = new SqliteConnection(SqliteDatabaseBootstrap.Initialize(databasePath, ServerPaths.SchemaFilePath));
-            connection.Open();
-            using var command = connection.CreateCommand();
-            command.CommandText = @"INSERT OR REPLACE INTO character_items (owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, durability, seal_flag, option_value, expire_time, marker_16, pet_serial_or_handle, extra_json)
-VALUES ('character', @cid, @cid, 0, @slot, @itemId, 'stackable', 1, 1, 0, 0, 0, 0, 0, 0, '{}');";
-            command.Parameters.AddWithValue("@cid", CharacterId);
-            command.Parameters.AddWithValue("@slot", slot);
-            command.Parameters.AddWithValue("@itemId", itemId);
-            command.ExecuteNonQuery();
-        }
-
         private static byte[] Hex(string value) => Convert.FromHexString(value.Replace(" ", string.Empty));
-
-        private static void DeleteDatabase(string path)
-        {
-            foreach (var candidate in new[] { path, path + "-wal", path + "-shm" })
-                if (File.Exists(candidate)) File.Delete(candidate);
-        }
 
         private static void Check(bool condition, string label)
         {

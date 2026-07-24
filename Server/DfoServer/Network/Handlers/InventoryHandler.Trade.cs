@@ -3,7 +3,6 @@ using DfoServer.Game.Inventory;
 using DfoServer.Network.Builders;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers
@@ -15,7 +14,8 @@ namespace DfoServer.Network.Handlers
             if (body == null || body.Length < 4)
                 return;
 
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
+            var hasInventoryLease = TryGetOwnedInventoryLease(session, cid, out var lease);
 
 
             if (body.Length >= 15 && body[1] >= 1 && body[1] <= 100)
@@ -33,7 +33,20 @@ namespace DfoServer.Network.Handlers
                     var deleteCount = (short)BitConverter.ToInt32(body, offset + 8);
                     offset += 12;
 
-                    if (!_inventoryStore.TryDeleteItem(cid, aid, listType, slotIndex, deleteCount, out var result))
+                    InventoryMutationResult result = null;
+                    var deleted = false;
+                    if (hasInventoryLease)
+                    {
+                        lock (lease.SyncRoot)
+                            deleted = InventoryDeleteService.TryDeleteForClient(
+                                lease.Inventory,
+                                listType,
+                                slotIndex,
+                                deleteCount,
+                                out result);
+                    }
+
+                    if (!deleted)
                     {
                         FileLogger.Log($"[{ProtocolName}] DELETE_ITEM(ext): failed at listType={listType} slot={slotIndex} count={deleteCount}");
                         var errAck = new byte[] { 0x00, 0x17, (byte)listType };
@@ -52,7 +65,20 @@ namespace DfoServer.Network.Handlers
             if (!TryParseDeleteOrSellRequest(body, out var lt, out var si, out var ic))
                 return;
 
-            if (!_inventoryStore.TryDeleteItem(cid, aid, lt, si, ic, out var simpleResult))
+            InventoryMutationResult simpleResult = null;
+            var simpleDeleted = false;
+            if (hasInventoryLease)
+            {
+                lock (lease.SyncRoot)
+                    simpleDeleted = InventoryDeleteService.TryDeleteForClient(
+                        lease.Inventory,
+                        lt,
+                        si,
+                        ic,
+                        out simpleResult);
+            }
+
+            if (!simpleDeleted)
             {
                 var errAck = new byte[] { 0x00, 0x17, (byte)lt };
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0012, errAck));
@@ -72,21 +98,34 @@ namespace DfoServer.Network.Handlers
             if (buyCount <= 0) buyCount = 1;
             FileLogger.Log($"[{ProtocolName}] BUY_ITEM: itemTemplateId=0x{itemTemplateId:X8} count={buyCount}");
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryBuyItem(cid, aid, itemTemplateId, buyCount, out var result))
+            var (cid, _) = ResolveOwner(session);
+            InventoryMutationResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryShopRuntimeService.TryBuyNpcItem(lease.Inventory, itemTemplateId, buyCount, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 FileLogger.Log($"[{ProtocolName}] BUY_ITEM: FAILED itemTemplateId=0x{itemTemplateId:X8}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0015, BuyItemAckBuilder.BuildError(0x04)));
                 return;
             }
 
-            FileLogger.Log($"[{ProtocolName}] BUY_ITEM: OK slot={result.SlotIndex} gold={result.UpdatedGold} costId={result.CostItemTemplateId} costNew={result.CostItemNewStackCount}");
+            FileLogger.Log($"[{ProtocolName}] BUY_ITEM: OK slot={result.SlotIndex} gold={result.UpdatedGold} sp={result.UpdatedSp} coin={result.UpdatedCoin} expire={result.ExpireTime} costId={result.CostItemTemplateId} costNew={result.CostItemNewStackCount}");
             var costItems = result.CostItemTemplateId > 0
                 ? new System.Collections.Generic.List<CostItemUpdate> { new CostItemUpdate { ItemTemplateId = result.CostItemTemplateId, NewStackCount = result.CostItemNewStackCount } }
                 : null;
             var hidePurchasedItemSummary = ShouldHideNpcBuyItemSummary(itemTemplateId, result);
             if (hidePurchasedItemSummary)
-                await SendPurchasedMainItemRefresh(session, cid, aid, result);
+                await _refresh.SendUpdateItemList(session, result.ListType, result.SlotIndex);
 
             var ackBody = BuyItemAckBuilder.Build(result, costItems, includePurchasedItemSummary: !hidePurchasedItemSummary);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0015, ackBody));
@@ -95,15 +134,25 @@ namespace DfoServer.Network.Handlers
 
             if (result.CostItemTemplateId > 0)
             {
-                var updBody = ItemListUpdateBuilder.BuildCommonSlotUpdate(result.CostItemSlotIndex, result.CostItemTemplateId, result.CostItemNewStackCount);
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, updBody));
-                FileLogger.Log($"[{ProtocolName}] BUY_ITEM: NOTI 14 cost update slot={result.CostItemSlotIndex} id=0x{result.CostItemTemplateId:X8} newCount={result.CostItemNewStackCount}");
+                if (result.CostItemNewStackCount <= 0
+                    && result.ListType == InventoryListType.Main
+                    && result.SlotIndex == result.CostItemSlotIndex)
+                    await _refresh.SendEmptyUpdateItemList(session, InventoryListType.Main, result.CostItemSlotIndex);
+                else
+                    await _refresh.SendUpdateItemList(session, InventoryListType.Main, result.CostItemSlotIndex);
+                FileLogger.Log($"[{ProtocolName}] BUY_ITEM: ACK cost item slot={result.CostItemSlotIndex} id=0x{result.CostItemTemplateId:X8} newCount={result.CostItemNewStackCount}");
             }
 
-            if (result.ListType == InventoryListType.Pet)
+            if (result.GoldSpent)
+                await _refresh.SendGoldUpdate(session);
+
+            if (!hidePurchasedItemSummary && result.ListType == InventoryListType.Main)
+                await _refresh.SendUpdateItemList(session, result.ListType, result.SlotIndex);
+
+            if (!hidePurchasedItemSummary && result.ListType != InventoryListType.Main)
             {
-                await _refresh.SendUpdateItemList(session, InventoryListType.Pet, result.SlotIndex);
-                FileLogger.Log($"[{ProtocolName}] BUY_ITEM: pet ITEM_LIST update sent slot={result.SlotIndex}");
+                await _refresh.SendUpdateItemList(session, result.ListType, result.SlotIndex);
+                FileLogger.Log($"[{ProtocolName}] BUY_ITEM: ITEM_LIST update sent list={result.ListType} slot={result.SlotIndex}");
             }
         }
 
@@ -115,24 +164,6 @@ namespace DfoServer.Network.Handlers
             return StackableItemProvider.IsLegacyContainer(itemTemplateId);
         }
 
-        private async Task SendPurchasedMainItemRefresh(EnhancedClientSession session, int characterId, int accountId, InventoryMutationResult result)
-        {
-            var snapshot = _inventoryStore.LoadCharacterItemListSnapshot(characterId, accountId);
-            var item = snapshot?.MainItems?.FirstOrDefault(x =>
-                x.SlotIndex == result.SlotIndex && x.ItemTemplateId == result.ItemTemplateId);
-            if (item == null)
-            {
-                FileLogger.Log($"[{ProtocolName}] BUY_ITEM: skipped package refresh slot={result.SlotIndex} item=0x{result.ItemTemplateId:X8}");
-                return;
-            }
-
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                0x000E,
-                ItemListUpdateBuilder.BuildCommonUpdates(new[] { item })));
-            FileLogger.Log($"[{ProtocolName}] BUY_ITEM: package ITEM_LIST refresh sent before ACK slot={item.SlotIndex} item=0x{item.ItemTemplateId:X8} count={item.CountOrInstanceValue}");
-        }
-
         public async Task Handle_ENUM_CMDPACKET_SELL_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             FileLogger.Log($"[{ProtocolName}] SELL_ITEM raw body({body?.Length ?? 0}): {(body != null ? BitConverter.ToString(body) : "null")}");
@@ -142,8 +173,26 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] SELL_ITEM: listType={listType}({(byte)listType}) slot={slotIndex} count={sellCount}");
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TrySellItem(cid, aid, listType, slotIndex, sellCount, out var result))
+            var (cid, _) = ResolveOwner(session);
+            InventoryMutationResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryShopRuntimeService.TrySellItem(
+                        lease.Inventory,
+                        listType,
+                        slotIndex,
+                        sellCount,
+                        out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 FileLogger.Log($"[{ProtocolName}] SELL_ITEM: FAILED listType={listType} slot={slotIndex} count={sellCount}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0016, SellItemBuilder.BuildError(0x11)));
@@ -182,9 +231,12 @@ namespace DfoServer.Network.Handlers
             var itemId = BitConverter.ToInt32(body, 8);
             var category = BitConverter.ToInt32(body, 12);
             var index = BitConverter.ToInt32(body, 16);
+            var opName = header.type == 0x019C ? "PUT" : "GET";
+            FileLogger.Log($"[{ProtocolName}] TITLE_BOOK_{opName}: itemSpace={itemSpaceRaw} slot={slot} item=0x{itemId:X8} category={category} index={index}");
 
             if (!TryParseInventoryListType(itemSpaceRaw, out var itemSpace))
             {
+                FileLogger.Log($"[{ProtocolName}] TITLE_BOOK_{opName}: invalid itemSpace={itemSpaceRaw}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01, header.type, BuildTitleBookFailure(itemSpaceRaw, category, 0x0A)));
                 return;
@@ -200,10 +252,14 @@ namespace DfoServer.Network.Handlers
 
             if (!ok)
             {
+                FileLogger.Log($"[{ProtocolName}] TITLE_BOOK_{opName}: FAILED itemSpace={itemSpace} slot={slot} item=0x{itemId:X8} category={category} index={index} error=0x{(result != null ? result.ErrorCode : (byte)0x0A):X2}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01, header.type, BuildTitleBookFailure(itemSpaceRaw, category, result != null ? result.ErrorCode : (byte)0x0A)));
                 return;
             }
+
+            if (!SaveTitleBookMutation(session, cid))
+                FileLogger.Log($"[{ProtocolName}] TITLE_BOOK_{opName}: SaveDirty skipped/failed cid={cid} item=0x{itemId:X8} category={result.Category} index={result.BookIndex}");
 
             if (result.EquipmentChanged)
             {
@@ -216,6 +272,18 @@ namespace DfoServer.Network.Handlers
 
             if (result.ItemLockChanged)
                 await _refresh.SendAllEquipmentItemLockListRefresh(session);
+        }
+
+        private static bool SaveTitleBookMutation(EnhancedClientSession session, int characterId)
+        {
+            if (session == null || characterId <= 0)
+                return false;
+
+            if (InventoryContext.TryGetLease(characterId, out var lease)
+                && lease.IsOwnedBy(session.SessionId))
+                return InventoryPersistenceService.SaveDirty(lease);
+
+            return false;
         }
 
         public async Task Handle_ACHIEVEMENT_TRIGGER(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -306,7 +374,7 @@ namespace DfoServer.Network.Handlers
         }
 
         // ── 账号金库 ──────────────────────────────────────────────────────────
-        // SQL 已下沉 SqliteInventoryStore.Cargo.cs; handler 只留解析+ACK。
+        // SQL 已下沉到新背包持久化层；handler 只留解析和 ACK。
 
         public async Task Handle_DEPOSIT_MONEY(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
@@ -333,11 +401,24 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
             int newCharGold, newCargoGold;
-            var ok = isDeposit
-                ? _inventoryStore.TryDepositCargoGold(cid, aid, amount, out newCharGold, out newCargoGold)
-                : _inventoryStore.TryWithdrawCargoGold(cid, aid, amount, out newCharGold, out newCargoGold);
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                {
+                    ok = isDeposit
+                        ? InventoryCargoRuntimeService.TryDepositCargoGold(lease.Inventory, amount, out newCharGold, out newCargoGold)
+                        : InventoryCargoRuntimeService.TryWithdrawCargoGold(lease.Inventory, amount, out newCharGold, out newCargoGold);
+                }
+            }
+            else
+            {
+                ok = false;
+                newCharGold = 0;
+                newCargoGold = 0;
+            }
             if (!ok)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, wireType, new byte[] { 0x00, 0x0A }));
@@ -349,8 +430,7 @@ namespace DfoServer.Network.Handlers
             ack.WriteInt32(newCargoGold);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, wireType, ack.ToArray()));
 
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                ItemListUpdateBuilder.BuildGoldUpdate(newCharGold)));
+            await _refresh.SendGoldUpdate(session);
 
             FileLogger.Log($"[{ProtocolName}] {(isDeposit ? "DEPOSIT" : "WITHDRAW")}_MONEY: amount={amount} charGold={newCharGold} cargoGold={newCargoGold}");
         }
@@ -358,7 +438,22 @@ namespace DfoServer.Network.Handlers
         public async Task Handle_CREATE_ACCOUNT_CARGO(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryCreateAccountCargo(cid, aid, out var costResult, out var errorCode))
+            InventoryMutationResult costResult;
+            byte errorCode;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryCargoRuntimeService.TryCreateAccountCargo(lease.Inventory, out costResult, out errorCode);
+            }
+            else
+            {
+                ok = false;
+                costResult = null;
+                errorCode = 0x14;
+            }
+
+            if (!ok)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0131, new byte[] { 0x00, errorCode }));
                 return;
@@ -373,7 +468,22 @@ namespace DfoServer.Network.Handlers
         public async Task Handle_UPGRADE_ACCOUNT_CARGO(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryUpgradeAccountCargo(cid, aid, out var costResult, out var errorCode))
+            InventoryMutationResult costResult;
+            byte errorCode;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryCargoRuntimeService.TryUpgradeAccountCargo(lease.Inventory, out costResult, out errorCode);
+            }
+            else
+            {
+                ok = false;
+                costResult = null;
+                errorCode = 0x15;
+            }
+
+            if (!ok)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0132, new byte[] { 0x00, errorCode }));
                 return;
@@ -392,18 +502,13 @@ namespace DfoServer.Network.Handlers
 
             if (costResult.GoldSpent)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(costResult.UpdatedGold)));
+                await _refresh.SendGoldUpdate(session);
                 return;
             }
 
             if (costResult.CostItemTemplateId > 0)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildCommonSlotUpdate(
-                        costResult.CostItemSlotIndex,
-                        costResult.CostItemTemplateId,
-                        costResult.CostItemNewStackCount)));
+                await _refresh.SendUpdateItemList(session, InventoryListType.Main, costResult.CostItemSlotIndex);
                 return;
             }
 
@@ -417,7 +522,22 @@ namespace DfoServer.Network.Handlers
         public async Task Handle_UPGRADE_CARGO(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryUpgradePersonalCargo(cid, aid, out var newListParam16, out var errorCode))
+            ushort newListParam16;
+            byte errorCode;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryCargoRuntimeService.TryUpgradePersonalCargo(lease.Inventory, out newListParam16, out errorCode);
+            }
+            else
+            {
+                ok = false;
+                newListParam16 = 0;
+                errorCode = 0x13;
+            }
+
+            if (!ok)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, header.type, new byte[] { 0x00, errorCode }));
                 FileLogger.Log($"[{ProtocolName}] UPGRADE_CARGO: failed cid={cid} aid={aid} error=0x{errorCode:X2} rawBody({body?.Length ?? 0}B)={(body != null ? BitConverter.ToString(body) : "null")}");

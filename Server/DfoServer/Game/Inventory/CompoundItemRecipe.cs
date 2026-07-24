@@ -33,6 +33,24 @@ namespace DfoServer.Game.Inventory
         public string RecipeType { get; set; } = string.Empty;
 
         public string PvfPath { get; set; } = string.Empty;
+
+        internal IReadOnlyList<short> GetMainRefreshSlots()
+        {
+            var slots = new List<short>();
+            foreach (var entry in DeletedEntries)
+            {
+                if (entry.ListType == InventoryListType.Main && !slots.Contains(entry.SlotIndex))
+                    slots.Add(entry.SlotIndex);
+            }
+
+            foreach (var reward in Rewards)
+            {
+                if (reward.ListType == InventoryListType.Main && !slots.Contains(reward.SlotIndex))
+                    slots.Add(reward.SlotIndex);
+            }
+
+            return slots;
+        }
     }
 
     public sealed class CompoundItemDeletedEntry

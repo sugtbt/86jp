@@ -97,6 +97,7 @@ namespace DfoServer.Network.Builders
                 FileLogger.Log($"[GameProtocol] MERCENARY/STRIKER state rejected owner={activeCharacterId}: support subtype1 missing cid={support.CharacterId}");
                 return null;
             }
+            ApplyOfflineInventoryProjection(snapshot, support.CharacterId);
 
             if (!TryBuildEquipmentList(snapshot, support, out var equipment, out reason))
             {
@@ -139,7 +140,7 @@ namespace DfoServer.Network.Builders
             byte packedGrowContext,
             ushort selectedSkillId,
             UserInfoAdditionSnapshot snapshot,
-            IReadOnlyList<InvenItem> equipment,
+            IReadOnlyList<EquippedEntrySnapshot> equipment,
             IReadOnlyList<SkillInfoEntrySnapshot> skills)
         {
             if (snapshot == null)
@@ -165,7 +166,14 @@ namespace DfoServer.Network.Builders
             writer.WriteBytes(statBlob);
             writer.WriteByte(checked((byte)equipment.Count));
             foreach (var item in equipment)
-                item.Write(writer);
+            {
+                ItemListProtocolWriter.WriteNoti2EquippedEntry(
+                    writer,
+                    item.Slot,
+                    item.Core,
+                    snapshot.GetAvatarDetail(item.Core),
+                    snapshot.GetCreatureDetail(item.Core));
+            }
             writer.WriteUInt32(snapshot.CloneTitleItemId);
             writer.WriteByte(checked((byte)skills.Count));
             writer.WriteByte(snapshot.SkillTreeIndex);
@@ -223,6 +231,35 @@ namespace DfoServer.Network.Builders
             return NormalizeSkillPageEntries(state, learned);
         }
 
+        private static void ApplyOfflineInventoryProjection(
+            UserInfoAdditionSnapshot snapshot,
+            int characterId)
+        {
+            if (snapshot == null || characterId <= 0)
+                return;
+
+            using (var conn = new SqliteConnection(ConnectionString.Value))
+            {
+                conn.Open();
+                var equippedItems = InventoryItemRepository.LoadEquippedItems(conn, characterId);
+                var avatarDetails = AvatarDetailRepository.LoadForCharacter(conn, characterId);
+                var creatureDetails = CreatureDetailRepository.LoadForCharacter(conn, characterId);
+                var projection = new Noti2InventoryProjectionBuilder()
+                    .BuildUserInfoAddition(equippedItems, avatarDetails, creatureDetails);
+
+                var existingSlots = new HashSet<short>(snapshot.EquippedEntries.Select(entry => entry.Slot));
+                foreach (var entry in projection.EquippedEntries)
+                {
+                    if (existingSlots.Add(entry.Slot))
+                        snapshot.EquippedEntries.Add(entry);
+                }
+                foreach (var pair in projection.AvatarDetails)
+                    snapshot.AvatarDetails[pair.Key] = pair.Value;
+                foreach (var pair in projection.CreatureDetails)
+                    snapshot.CreatureDetails[pair.Key] = pair.Value;
+            }
+        }
+
         private static List<SkillInfoEntrySnapshot> NormalizeSkillPageEntries(
             MercenarySupportState state,
             IReadOnlyList<SkillInfoEntrySnapshot> learned)
@@ -239,12 +276,12 @@ namespace DfoServer.Network.Builders
         private static bool TryBuildEquipmentList(
             UserInfoAdditionSnapshot snapshot,
             CharacterSummary support,
-            out List<InvenItem> result,
+            out List<EquippedEntrySnapshot> result,
             out string reason)
         {
-            result = new List<InvenItem>();
+            result = new List<EquippedEntrySnapshot>();
             reason = null;
-            var bySlot = new Dictionary<byte, InvenItem>();
+            var bySlot = new Dictionary<byte, EquippedEntrySnapshot>();
 
             foreach (var entry in snapshot.EquippedEntries)
             {
@@ -255,22 +292,18 @@ namespace DfoServer.Network.Builders
                     reason = $"equipment slot {entry.Slot} is outside client range 0..{LastClientEquipmentSlot}";
                     return false;
                 }
-                if (entry.Item == null)
+                var core = entry.Core;
+                if (core == null)
                 {
-                    reason = $"slot {entry.Slot} item {entry.ItemId} has no parsed InvenItem";
+                    reason = $"slot {entry.Slot} has no ItemCore";
                     return false;
                 }
-                if (entry.Item.Slot != entry.Slot || entry.Item.ItemId != entry.ItemId)
-                {
-                    reason = $"slot/item mismatch db=({entry.Slot},{entry.ItemId}) raw=({entry.Item.Slot},{entry.Item.ItemId})";
-                    return false;
-                }
-                if (!IsEquipmentSlotMatch(entry.Item, out var slotReason))
+                if (!IsEquipmentSlotMatch(entry.Slot, core, out var slotReason))
                 {
                     reason = slotReason;
                     return false;
                 }
-                if (!bySlot.TryAdd((byte)entry.Slot, entry.Item))
+                if (!bySlot.TryAdd((byte)entry.Slot, entry))
                 {
                     reason = $"duplicate equipment slot {entry.Slot}";
                     return false;
@@ -290,7 +323,7 @@ namespace DfoServer.Network.Builders
                     if (defaults == null || defaults.Count <= slot || defaults[slot] <= 0)
                         continue;
                     var defaultItem = CreateDefaultAvatarItem((byte)slot, defaults[slot]);
-                    if (!IsEquipmentSlotMatch(defaultItem, out var slotReason))
+                    if (!IsEquipmentSlotMatch(defaultItem.Slot, defaultItem.Core, out var slotReason))
                     {
                         reason = slotReason;
                         return false;
@@ -308,30 +341,28 @@ namespace DfoServer.Network.Builders
             return true;
         }
 
-        private static InvenItem CreateDefaultAvatarItem(byte slot, int itemId)
+        private static EquippedEntrySnapshot CreateDefaultAvatarItem(byte slot, int itemId)
         {
-            return new InvenItem
+            return new EquippedEntrySnapshot
             {
                 Slot = slot,
-                ItemId = itemId,
-                JewelSocket = new byte[30],
-                Expansion = new byte[4],
-                Tail10 = new byte[10],
+                Core = ItemCore.Create(ItemCore.KindAvatar, itemId),
             };
         }
 
-        private static bool IsEquipmentSlotMatch(InvenItem item, out string reason)
+        private static bool IsEquipmentSlotMatch(short slot, ItemCore core, out string reason)
         {
             reason = null;
-            var rawType = ItemMetadataResolver.ResolveEquipmentType(item.ItemId);
+            var itemId = core?.ItemId ?? 0;
+            var rawType = ItemMetadataResolver.ResolveEquipmentType(itemId);
             if (!EquipmentTypeInfo.TryParse(rawType, out var type) || type == EquipmentType.Unknown)
             {
-                reason = $"equipment PVF type missing slot={item.Slot} item={item.ItemId} type={rawType ?? "<null>"}";
+                reason = $"equipment PVF type missing slot={slot} item={itemId} type={rawType ?? "<null>"}";
                 return false;
             }
-            if ((int)type != item.Slot)
+            if ((int)type != slot)
             {
-                reason = $"equipment PVF type/slot mismatch slot={item.Slot} item={item.ItemId} type={type}({(int)type})";
+                reason = $"equipment PVF type/slot mismatch slot={slot} item={itemId} type={type}({(int)type})";
                 return false;
             }
             return true;
@@ -444,16 +475,16 @@ WHERE character_id IN (@owner, @support) AND delete_flag=0", conn))
             byte growType,
             ushort selectedSkillId,
             UserInfoAdditionSnapshot snapshot,
-            IReadOnlyList<InvenItem> equipment,
+            IReadOnlyList<EquippedEntrySnapshot> equipment,
             IReadOnlyList<SkillInfoEntrySnapshot> skills)
         {
             return BuildRecord(mappedCharacterId, name, level, job, growType, selectedSkillId,
-                snapshot, equipment, skills);
+                snapshot, equipment ?? Array.Empty<EquippedEntrySnapshot>(), skills);
         }
 
         internal static bool IsEquipmentSlotMatchForTest(byte slot, int itemId)
         {
-            return IsEquipmentSlotMatch(new InvenItem { Slot = slot, ItemId = itemId }, out _);
+            return IsEquipmentSlotMatch(slot, ItemCore.Create(ItemCore.KindEquipment, itemId), out _);
         }
 
         internal static List<SkillInfoEntrySnapshot> NormalizeSkillPageEntriesForTest(

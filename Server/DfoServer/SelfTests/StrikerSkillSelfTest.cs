@@ -348,29 +348,19 @@ WHERE character_id=@cid", conn))
                 CloneTitleItemId = 456789,
                 SkillTreeIndex = 1,
             };
-            var avatar = new InvenItem
+            var avatar = ItemCore.Create(ItemCore.KindAvatar, 400001);
+            var weapon = ItemCore.Create(ItemCore.KindEquipment, 12345);
+            weapon.Value = 0x10203040;
+            weapon.Durability = 77;
+            ApplyTailFields(weapon, Enumerable.Range(1, 10).Select(i => (byte)i).ToArray());
+            var lastClientSlot = ItemCore.Create(ItemCore.KindEquipment, 0x17E69F80);
+            ApplyTailFields(lastClientSlot, Enumerable.Repeat((byte)0x5A, 10).ToArray());
+            var equipment = new[]
             {
-                Slot = 0,
-                ItemId = 400001,
-                JewelSocket = new byte[30],
-                Expansion = new byte[4],
-                Tail10 = new byte[10],
+                CreateEquippedEntry(0, avatar),
+                CreateEquippedEntry(11, weapon),
+                CreateEquippedEntry(29, lastClientSlot),
             };
-            var weapon = new InvenItem
-            {
-                Slot = 11,
-                ItemId = 12345,
-                Value = 0x10203040,
-                Durability = 77,
-                Tail10 = Enumerable.Range(1, 10).Select(i => (byte)i).ToArray(),
-            };
-            var lastClientSlot = new InvenItem
-            {
-                Slot = 29,
-                ItemId = 0x17E69F80,
-                Tail10 = Enumerable.Repeat((byte)0x5A, 10).ToArray(),
-            };
-            var equipment = new[] { avatar, weapon, lastClientSlot };
             var skillPage = new List<SkillInfoEntrySnapshot>
             {
                 new SkillInfoEntrySnapshot { Slot = 54, SkillId = 33, Level = 10 },
@@ -417,8 +407,8 @@ WHERE character_id=@cid", conn))
             Check("0x019F serializer writes equipment count", record[offset++] == equipment.Length);
             foreach (var item in equipment)
             {
-                var rawItem = item.ToBytes();
-                Check($"0x019F serializer preserves InvenItem bytes for synthetic slot {item.Slot}",
+                var rawItem = BuildExpectedNoti2Entry(item, snapshot);
+                Check($"0x019F serializer writes ItemCore bytes for synthetic slot {item.Slot}",
                     record.Skip(offset).Take(rawItem.Length).SequenceEqual(rawItem));
                 offset += rawItem.Length;
             }
@@ -444,7 +434,7 @@ WHERE character_id=@cid", conn))
 
             var emptyRecord = StrikerSupportTagCharacterPacketBuilder.BuildRecordForTest(
                 1001, new byte[] { 0x54, 0x45, 0x53, 0x54 }, 86, 0, 0x21, 72,
-                snapshot, Array.Empty<InvenItem>(), Array.Empty<SkillInfoEntrySnapshot>());
+                snapshot, Array.Empty<EquippedEntrySnapshot>(), Array.Empty<SkillInfoEntrySnapshot>());
             Check("0x019F serializer supports zero equipment and skill counts",
                 emptyRecord.Length == 113 && emptyRecord[101] == 0 && emptyRecord[106] == 0 &&
                 emptyRecord.Skip(108).SequenceEqual(new byte[5]));
@@ -459,7 +449,7 @@ WHERE character_id=@cid", conn))
                 .ToList();
             var maxSkillRecord = StrikerSupportTagCharacterPacketBuilder.BuildRecordForTest(
                 1001, new byte[] { 0x54, 0x45, 0x53, 0x54 }, 86, 0, 0x21, 72,
-                snapshot, Array.Empty<InvenItem>(), maxSkillPage);
+                snapshot, Array.Empty<EquippedEntrySnapshot>(), maxSkillPage);
             Check("0x019F serializer accepts the u8 maximum skill count",
                 maxSkillRecord[106] == byte.MaxValue && maxSkillRecord.Length == 113 + byte.MaxValue * 4);
 
@@ -469,7 +459,7 @@ WHERE character_id=@cid", conn))
                 StrikerSupportTagCharacterPacketBuilder.BuildRecordForTest(
                     1001, new byte[] { 0x54 }, 86, 0, 0x21, 72,
                     snapshot,
-                    Array.Empty<InvenItem>(),
+                    Array.Empty<EquippedEntrySnapshot>(),
                     maxSkillPage.Concat(new[] { new SkillInfoEntrySnapshot { Slot = 255, SkillId = 2000, Level = 1 } }).ToList());
             }
             catch (ArgumentOutOfRangeException)
@@ -484,6 +474,52 @@ WHERE character_id=@cid", conn))
             Console.WriteLine((ok ? "[PASS] " : "[FAIL] ") + name);
             if (!ok)
                 _failures++;
+        }
+
+        private static EquippedEntrySnapshot CreateEquippedEntry(short slot, ItemCore core)
+        {
+            return new EquippedEntrySnapshot
+            {
+                Slot = slot,
+                Core = core,
+            };
+        }
+
+        private static byte[] BuildExpectedNoti2Entry(EquippedEntrySnapshot entry, UserInfoAdditionSnapshot snapshot)
+        {
+            var writer = new DfoServer.Network.GamePacketWriter();
+            ItemListProtocolWriter.WriteNoti2EquippedEntry(
+                writer,
+                entry.Slot,
+                entry.Core,
+                snapshot.GetAvatarDetail(entry.Core),
+                snapshot.GetCreatureDetail(entry.Core));
+            return writer.ToArray();
+        }
+
+        private static void ApplyTailFields(ItemCore core, byte[] tail)
+        {
+            if (core == null || tail == null)
+                return;
+
+            if (tail.Length > 0)
+                core.GenuineUpgrade = tail[0];
+            if (tail.Length > 1)
+                core.EmancipateEquipmentLevel = tail[1];
+            if (tail.Length > 2)
+                core.TradeRestriction = tail[2];
+            if (tail.Length > 4)
+                core.TailUnknown0 = BitConverter.ToUInt16(tail, 3);
+            if (tail.Length > 5)
+                core.TailUnknown1 = tail[5];
+            if (tail.Length > 6)
+                core.TailUnknown2 = tail[6];
+            if (tail.Length > 7)
+                core.TailUnknown3 = tail[7];
+            if (tail.Length > 8)
+                core.RemainUseCount = tail[8];
+            if (tail.Length > 9)
+                core.SortLockFlag = tail[9];
         }
 
         private sealed class FixedSelectCharacterDataSource : ISelectCharacterDataSource

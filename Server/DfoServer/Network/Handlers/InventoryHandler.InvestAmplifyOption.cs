@@ -22,8 +22,21 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] INVEST_ITEM_AMPLIFY_OPTION raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")} action={request.Action} target=({request.TargetSlotIndex},0x{request.TargetItemTemplateId:X8}) material=({request.MaterialSlotIndex},0x{request.MaterialItemTemplateId:X8}) selected={request.SelectedOption}");
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryInvestItemAmplifyOption(cid, aid, request, out var result))
+            var (cid, _) = ResolveOwner(session);
+            InvestItemAmplifyOptionResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TryInvestItemAmplifyOption(lease.Inventory, request, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 var errorCode = result != null ? result.ErrorCode : InvestItemAmplifyOptionResult.ErrorInvalidRequest;
                 FileLogger.Log($"[{ProtocolName}] INVEST_ITEM_AMPLIFY_OPTION: FAILED error=0x{errorCode:X2} action={request.Action} targetSlot={request.TargetSlotIndex} materialSlot={request.MaterialSlotIndex} selected={request.SelectedOption}");

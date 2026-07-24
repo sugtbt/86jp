@@ -22,8 +22,22 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] UPGRADE_CHRONICLE ticket=({command.TicketSlotIndex},0x{command.TicketItemTemplateId:X8}) target=({command.TargetSlotIndex},0x{command.TargetItemTemplateId:X8}) materials={string.Join(",", command.Materials.Select(x => $"({x.SlotIndex},0x{x.ItemTemplateId:X8})"))}");
 
-            var (characterId, accountId) = ResolveOwner(session);
-            if (!_inventoryStore.TryGrowChronicleEquipment(characterId, accountId, command, out var result))
+            var (characterId, _) = ResolveOwner(session);
+            ChronicleGrowthResult result;
+            bool ok;
+            InventoryLease lease = null;
+            if (TryGetOwnedInventoryLease(session, characterId, out lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = ChronicleGrowthService.TryGrow(lease.Inventory, command, out result);
+            }
+            else
+            {
+                ok = false;
+                result = ChronicleGrowthResult.Error(command, ChronicleGrowthResult.ErrorInvalidRequest);
+            }
+
+            if (!ok)
             {
                 var errorCode = result?.ErrorCode ?? ChronicleGrowthResult.ErrorInvalidRequest;
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
@@ -32,6 +46,9 @@ namespace DfoServer.Network.Handlers
                 FileLogger.Log($"[{ProtocolName}] UPGRADE_CHRONICLE: FAILED error=0x{errorCode:X2}");
                 return;
             }
+
+            if (lease != null && !InventoryPersistenceService.SaveDirty(lease))
+                FileLogger.Log($"[{ProtocolName}] UPGRADE_CHRONICLE: persistence failed cid={characterId}");
 
             var refreshSlots = result.Consumptions.Select(x => x.SlotIndex)
                 .Append(command.TargetSlotIndex)

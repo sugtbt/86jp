@@ -23,7 +23,7 @@ namespace DfoServer.Game.Appearance
             ICharacterRepository characterRepository,
             int characterId, int accountId)
         {
-            var updated = LoadAppearanceFromEquipEntries(characterId);
+            var updated = LoadOnlineAppearanceFromInventory(characterId);
 
             player.AppearanceEntries = updated;
             characterRepository.UpdateAppearance(characterId, updated);
@@ -38,7 +38,7 @@ namespace DfoServer.Game.Appearance
             if (player == null)
                 return Array.Empty<byte>();
 
-            var updated = LoadAppearanceFromEquipEntries(player.CharacterId);
+            var updated = LoadOnlineAppearanceFromInventory(player.CharacterId);
             player.AppearanceEntries = updated;
             if (characterRepository != null && player.CharacterId > 0)
                 characterRepository.UpdateAppearance(player.CharacterId, updated);
@@ -56,7 +56,7 @@ namespace DfoServer.Game.Appearance
             var tail = player.Subtype0Tail ?? new UserInfoMinimumTailSnapshot();
             tail.CloneTitleItemId = (uint)(cloneTitleItemId > 0 ? cloneTitleItemId : 0);
             player.Subtype0Tail = tail;
-            var updated = LoadAppearanceFromEquipEntries(characterId);
+            var updated = LoadOnlineAppearanceFromInventory(characterId);
 
             player.AppearanceEntries = updated;
             characterRepository.UpdateAppearance(characterId, updated);
@@ -80,7 +80,7 @@ namespace DfoServer.Game.Appearance
                 var tail = player.Subtype0Tail ?? new UserInfoMinimumTailSnapshot();
                 tail.CloneTitleItemId = (uint)(cloneTitleItemId > 0 ? cloneTitleItemId : 0);
                 player.Subtype0Tail = tail;
-                player.AppearanceEntries = LoadAppearanceFromEquipEntries(player.CharacterId);
+                player.AppearanceEntries = LoadOnlineAppearanceFromInventory(player.CharacterId);
             }
 
             return BuildNoti2Body(player);
@@ -96,15 +96,74 @@ namespace DfoServer.Game.Appearance
 
         public static CharacterAppearanceEntry[] LoadAppearanceFromEquipEntries(int characterId)
         {
-            var dbPath = ServerPaths.DatabasePath;
-            var schemaPath = ServerPaths.SchemaFilePath;
-            var repo = new Game.CharacterData.SqliteSubtype1Repository(dbPath, schemaPath);
+            return LoadOnlineAppearanceFromInventory(characterId);
+        }
 
-            if (!repo.HasData(characterId))
+        public static CharacterAppearanceEntry[] LoadOnlineAppearanceFromInventory(int characterId)
+        {
+            var projectionBuilder = new Noti2InventoryProjectionBuilder();
+            if (InventoryContext.TryGetLease(characterId, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    return projectionBuilder.BuildAppearanceEntries(lease.Inventory);
+            }
+
+            return Array.Empty<CharacterAppearanceEntry>();
+        }
+
+        public static CharacterAppearanceEntry[] LoadCharacterAppearanceFromDb(int characterId)
+        {
+            if (characterId <= 0)
                 return Array.Empty<CharacterAppearanceEntry>();
 
-            var addition = repo.Load(characterId);
-            return BuildFromEquippedEntries(addition.EquippedEntries);
+            var connectionString = SqliteDatabaseBootstrap.Initialize(
+                ServerPaths.DatabasePath,
+                ServerPaths.SchemaFilePath);
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var equippedItems = InventoryItemRepository.LoadEquippedItems(connection, characterId);
+                var avatarDetails = AvatarDetailRepository.LoadForCharacter(connection, characterId);
+                return new Noti2InventoryProjectionBuilder()
+                    .BuildAppearanceEntries(equippedItems, avatarDetails);
+            }
+        }
+
+        public static Dictionary<int, CharacterAppearanceEntry[]> LoadRosterAppearancesFromDb(int accountId)
+        {
+            var result = new Dictionary<int, CharacterAppearanceEntry[]>();
+            if (accountId <= 0)
+                return result;
+
+            var connectionString = SqliteDatabaseBootstrap.Initialize(
+                ServerPaths.DatabasePath,
+                ServerPaths.SchemaFilePath);
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                var equippedItems = InventoryItemRepository.LoadEquippedItemsByAccount(connection, accountId);
+                var avatarDetails = AvatarDetailRepository.LoadForAccount(connection, accountId);
+                var grouped = new Dictionary<int, List<InventoryItem>>();
+                foreach (var item in equippedItems)
+                {
+                    if (item == null || !item.CharacterId.HasValue || item.CharacterId.Value <= 0)
+                        continue;
+
+                    if (!grouped.TryGetValue(item.CharacterId.Value, out var list))
+                    {
+                        list = new List<InventoryItem>();
+                        grouped[item.CharacterId.Value] = list;
+                    }
+
+                    list.Add(item);
+                }
+
+                var projectionBuilder = new Noti2InventoryProjectionBuilder();
+                foreach (var pair in grouped)
+                    result[pair.Key] = projectionBuilder.BuildAppearanceEntries(pair.Value, avatarDetails);
+            }
+
+            return result;
         }
 
         internal static CharacterAppearanceEntry[] BuildFromEquippedEntries(
@@ -124,44 +183,38 @@ namespace DfoServer.Game.Appearance
                 if (entry.Slot > TitleAppearanceSlot
                     && entry.Slot != (byte)EquipmentType.SupportWeapon)
                     continue;
-                if (entry.ItemId == 0) continue;
+                var core = entry.Core;
+                if (core == null || core.ItemId == 0)
+                    continue;
 
-                int displayItemId = entry.ItemId;
-                if (entry.Slot <= 9
-                    && entry.RawEntry != null
-                    && entry.RawEntry.Length >= 16)
-                {
-                    uint cloneTarget = BitConverter.ToUInt32(entry.RawEntry, 12);
-                    if (cloneTarget > 0)
-                        displayItemId = (int)cloneTarget;
-                }
+                int displayItemId = core.ItemId;
 
                 result.Add(new CharacterAppearanceEntry(
                     (byte)entry.Slot,
                     displayItemId,
                     4,
-                    BuildAppearanceExpansionData(entry.Item),
-                    BuildAppearanceState(entry.Item),
+                    BuildAppearanceExpansionData(core),
+                    BuildAppearanceState(core),
                     0,
                     0u,
-                    entry.Item?.EnchantUpgradeCount ?? (byte)0));
+                    core.EnchantUpgradeCount));
             }
 
             return result.ToArray();
         }
 
-        internal static byte BuildAppearanceState(InvenItem item)
+        internal static byte BuildAppearanceState(ItemCore core)
         {
-            if (item == null)
+            if (core == null)
                 return 0;
 
-            var upgrade = item.Attr & 0x1F;
-            return unchecked((byte)(upgrade * 2 + (item.AmplifyType != 0 ? 1 : 0)));
+            var upgrade = core.Attr & 0x1F;
+            return unchecked((byte)(upgrade * 2 + (core.AmplifyType != 0 ? 1 : 0)));
         }
 
-        private static byte[] BuildAppearanceExpansionData(InvenItem item)
+        private static byte[] BuildAppearanceExpansionData(ItemCore core)
         {
-            return MakeEquipListCodec.NormalizeExpansionData(item?.Expansion);
+            return new byte[4];
         }
 
         public static int LoadCloneTitleItemId(int characterId)

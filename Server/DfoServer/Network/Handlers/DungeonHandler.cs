@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Quests;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers.Dungeon;
@@ -19,12 +20,11 @@ namespace DfoServer.Network.Handlers
         private readonly DungeonTutorialHandler _tutorial;
 
         public DungeonHandler(
-            IAssetService assetService,
             Game.ReviveCoin.ReviveCoinService reviveCoinService,
             Game.Characters.SqliteCharacterRepository characterRepository,
             SqliteSelectCharacterDataSource selectCharacterDataSource,
             IRentalTimeProvider rentalTimeProvider,
-            IInventoryStore inventoryStore,
+            string connectionString,
             InventoryRefreshSender inventoryRefresh,
             Game.Party.PartyManager partyManager = null,
             Game.Session.ISessionDirectory sessionDirectory = null,
@@ -32,20 +32,19 @@ namespace DfoServer.Network.Handlers
             Game.Accounts.AccountExperienceProgressService accountExperience = null)
         {
             _services = new DungeonSharedServices(
-                assetService,
                 reviveCoinService,
                 characterRepository,
                 selectCharacterDataSource,
                 rentalTimeProvider,
-                inventoryStore,
+                connectionString,
                 inventoryRefresh,
                 partyManager,
                 sessionDirectory,
                 questDropService,
                 accountExperience);
-            _settlement = new DungeonSettlementHandler(_services);
             _map = new DungeonMapHandler(_services);
             _entry = new DungeonEntryHandler(_services, _map);
+            _settlement = new DungeonSettlementHandler(_services, _entry);
             _combat = new DungeonCombatHandler(_services, _settlement);
             _tutorial = new DungeonTutorialHandler(_services, _settlement);
         }
@@ -133,6 +132,22 @@ namespace DfoServer.Network.Handlers
 
         public Task Handle_SPECIAL_SEA_CHASE_OBSERVE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
             => Dungeon.SpecialDungeonNotifier.ObserveSeaChasePacketAsync(session, header, body);
+
+        public Task Handle_BREAK_TRAP_RESULT(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+            => Dungeon.TimeSpiralDungeonCoordinator.HandleBreakTrapResultAsync(
+                session,
+                header,
+                body);
+
+        internal Task HandleQuestSetTriggerResultAsync(
+            EnhancedClientSession session,
+            QuestSetTriggerResult result)
+            => _settlement.TryClearQuestNpcDungeonAsync(
+                session,
+                result);
 
         public Task HandleDungeonSceneUniqueIdReport(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {

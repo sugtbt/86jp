@@ -5,10 +5,12 @@ namespace DfoServer.GameWorld
 {
     public struct QuestDropCandidate
     {
+        public int QuestId;
         public int ItemId;
         public int Count;
         public int DropRate;
         public int MaxStack;
+        public bool PreferQuestInventory;
     }
 
     public static class QuestDropProvider
@@ -36,7 +38,7 @@ namespace DfoServer.GameWorld
                 try
                 {
                     var qst = QuestData.GetQuestFile(questId);
-                    if (qst == null || qst.MonsterRewardItems == null || qst.MonsterRewardItems.Count == 0)
+                    if (qst == null)
                         continue;
 
                     foreach (var entry in qst.MonsterRewardItems)
@@ -48,16 +50,77 @@ namespace DfoServer.GameWorld
 
                         results.Add(new QuestDropCandidate
                         {
+                            QuestId = questId,
                             ItemId = entry.ItemId,
                             Count = entry.Count,
                             DropRate = entry.DropRate,
                             MaxStack = entry.MaxStack,
+                            PreferQuestInventory =
+                                IsSeekingTargetItem(
+                                    questId,
+                                    entry.ItemId),
+                        });
+                    }
+
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log($"[QuestDropProvider] ERROR: monster drop match failed, quest {questId} skipped: {ex.Message}");
+                }
+            }
+
+            return results.Count > 0 ? results : null;
+        }
+
+        public static List<QuestDropCandidate> CheckClearReward(
+            ICollection<int> activeQuestIds,
+            int dungeonIndex,
+            int difficulty)
+        {
+            if (activeQuestIds == null || activeQuestIds.Count == 0)
+                return null;
+
+            var results = new List<QuestDropCandidate>();
+            foreach (var questId in activeQuestIds)
+            {
+                try
+                {
+                    var quest = QuestData.GetQuestFile(questId);
+                    if (quest?.ClearRewardItems == null)
+                        continue;
+
+                    foreach (var entry in quest.ClearRewardItems)
+                    {
+                        if (entry.ItemId <= 0
+                            || entry.Count <= 0
+                            || !MatchesScope(
+                                entry.DungeonId,
+                                entry.Difficulty,
+                                dungeonIndex,
+                                difficulty))
+                        {
+                            continue;
+                        }
+
+                        results.Add(new QuestDropCandidate
+                        {
+                            QuestId = questId,
+                            ItemId = entry.ItemId,
+                            Count = entry.Count,
+                            DropRate = entry.DropRate,
+                            MaxStack = entry.MaxStack,
+                            PreferQuestInventory =
+                                IsSeekingTargetItem(
+                                    questId,
+                                    entry.ItemId),
                         });
                     }
                 }
                 catch (Exception ex)
                 {
-                    FileLogger.Log($"[QuestDropProvider] ERROR: monster drop match failed, quest {questId} skipped: {ex.Message}");
+                    FileLogger.Log(
+                        $"[QuestDropProvider] ERROR: clear reward match " +
+                        $"failed, quest {questId} skipped: {ex.Message}");
                 }
             }
 
@@ -91,10 +154,15 @@ namespace DfoServer.GameWorld
 
                         results.Add(new QuestDropCandidate
                         {
+                            QuestId = questId,
                             ItemId = entry.ItemId,
                             Count = entry.Count,
                             DropRate = entry.DropRate,
                             MaxStack = entry.MaxStack,
+                            PreferQuestInventory =
+                                IsSeekingTargetItem(
+                                    questId,
+                                    entry.ItemId),
                         });
                     }
                 }
@@ -105,6 +173,15 @@ namespace DfoServer.GameWorld
             }
 
             return results.Count > 0 ? results : null;
+        }
+
+        private static bool IsSeekingTargetItem(int questId, int itemId)
+        {
+            if (questId <= 0 || itemId <= 0)
+                return false;
+
+            return QuestData.GetSeekingConsumeItems(questId).Exists(
+                item => item.ItemId == itemId && item.Count > 0);
         }
 
         private static bool MatchesScope(int dungeonId, int rewardDifficulty, int dungeonIndex, int difficulty)

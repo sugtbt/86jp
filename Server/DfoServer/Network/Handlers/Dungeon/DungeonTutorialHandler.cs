@@ -1,6 +1,7 @@
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
 using DfoServer.Game.Skills;
@@ -62,7 +63,6 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             // RewardTutorial: PVF serverparameter.etc [escalade tutorial reward]
             var inserted = new List<(short slot, int itemId, int count)>();
-            var accountId = session.Account?.AccountId ?? 1;
             if (rewardFlag != 0)
             {
                 var rewards = TutorialRewardProvider.GetRewards(flagIndex);
@@ -71,7 +71,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     foreach (var r in rewards)
                     {
                         short slot;
-                        if (TryPickupItemToInventory(session.Player.CharacterId, accountId, r.ItemId, r.Count, out slot))
+                        if (TryGrantTutorialReward(session, r.ItemId, r.Count, out slot))
                         {
                             inserted.Add((slot, r.ItemId, r.Count));
                             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] RewardTutorial: flag={flagIndex} gave item {r.ItemId} x{r.Count} -> slot {slot}");
@@ -172,21 +172,40 @@ namespace DfoServer.Network.Handlers.Dungeon
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ReturnToVillage: town state + subtype0 sent");
         }
 
-        private bool TryPickupItemToInventory(int characterId, int accountId, int itemTemplateId, int stackCount, out short assignedSlot)
+        private static bool TryGrantTutorialReward(
+            EnhancedClientSession session,
+            int itemTemplateId,
+            int stackCount,
+            out short assignedSlot)
         {
             assignedSlot = -1;
             try
             {
-                using (var scope = _svc.AssetService.OpenScope(characterId, accountId))
+                var characterId = session?.Player?.CharacterId ?? 0;
+                if (characterId <= 0
+                    || !InventoryContext.TryGetLease(characterId, out var lease)
+                    || !lease.IsOwnedBy(session.SessionId))
                 {
-                    var result = _svc.AssetService.TryAddItem(scope, itemTemplateId, stackCount, out assignedSlot);
-                    if (result) scope.Commit();
-                    return result;
+                    FileLogger.Log($"[DungeonTutorial] TryGrantTutorialReward missing inventory cid={characterId} item={itemTemplateId}");
+                    return false;
                 }
+
+                if (!InventoryRewardGrantService.TryCreateAndInsert(
+                        lease,
+                        itemTemplateId,
+                        ItemCreateReason.QuestReward,
+                        stackCount,
+                        out var grant)
+                    || grant == null
+                    || !grant.Success)
+                    return false;
+
+                assignedSlot = grant.SlotIndex;
+                return true;
             }
             catch (Exception ex)
             {
-                FileLogger.Log($"[DungeonTutorial] TryPickupItemToInventory ERROR: {ex.Message}");
+                FileLogger.Log($"[DungeonTutorial] TryGrantTutorialReward ERROR: {ex.Message}");
                 return false;
             }
         }

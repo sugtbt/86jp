@@ -16,14 +16,11 @@ namespace DfoServer.Network.Handlers
         private readonly GrowthCapsuleClaimService _claimService;
 
         public GrowthCapsuleHandler(
-            IAssetService assetService,
             InventoryRefreshSender inventoryRefresh,
             ICharacterRepository characterRepository)
         {
-            if (assetService == null)
-                throw new ArgumentNullException(nameof(assetService));
             _inventoryRefresh = inventoryRefresh ?? throw new ArgumentNullException(nameof(inventoryRefresh));
-            _claimService = new GrowthCapsuleClaimService(assetService);
+            _claimService = new GrowthCapsuleClaimService(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             _sync = new GrowthCapsuleSyncService(
                 characterRepository ?? throw new ArgumentNullException(nameof(characterRepository)));
         }
@@ -43,7 +40,14 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var claim = _claimService.Claim(characterId, accountId);
+            if (!InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+            {
+                await SendFailureAckAsync(session);
+                return;
+            }
+
+            var claim = _claimService.Claim(lease);
             if (!claim.Success)
             {
                 FileLogger.Log($"[GameProtocol] GROWTH_CAPSULE_CLAIM rejected: account={accountId} cid={characterId} status={claim.Status} total={claim.Summary.TotalExp} required={claim.Summary.RequiredExp}");

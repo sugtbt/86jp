@@ -1,35 +1,34 @@
 using System;
 using System.Collections.Generic;
+using DfoServer.Game.Inventory;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.Currency
 {
     public static class CurrencyService
     {
-        // ── Cube Fragment (晶块) ──────────────────────────────
-        // 6 种小晶块是账号共享、固定 slot 的物品。
-        // item_id → (accounts 列名, 固定 slot)
-        private static readonly Dictionary<int, (string ColumnName, int Slot)> CubeFragmentMap = new Dictionary<int, (string, int)>
-        {
-            { 3033, ("cube_black", 354) },
-            { 3034, ("cube_white", 355) },
-            { 3035, ("cube_red",   356) },
-            { 3036, ("cube_blue",  357) },
-            { 3037, ("cube_clear", 358) },
-            { 3262, ("cube_gold",  359) },
-        };
+        private static readonly Dictionary<int, (string ColumnName, int Slot)> CubeFragmentMap =
+            new Dictionary<int, (string, int)>
+            {
+                { 3033, ("cube_black", 354) },
+                { 3034, ("cube_white", 355) },
+                { 3035, ("cube_red", 356) },
+                { 3036, ("cube_blue", 357) },
+                { 3037, ("cube_clear", 358) },
+                { 3262, ("cube_gold", 359) },
+            };
 
-        // 晶块固定 slot 范围 (FindEmptySlot 保护用)
         public const int CubeFragmentSlotStart = 354;
         public const int CubeFragmentSlotEnd = 359;
 
-        public static bool IsCubeFragment(int itemId) => CubeFragmentMap.ContainsKey(itemId);
+        public static bool IsCubeFragment(int itemId)
+        {
+            return CubeFragmentMap.ContainsKey(itemId);
+        }
 
         public static int GetCubeFragmentSlot(int itemId)
         {
-            if (CubeFragmentMap.TryGetValue(itemId, out var entry))
-                return entry.Slot;
-            return -1;
+            return CubeFragmentMap.TryGetValue(itemId, out var entry) ? entry.Slot : -1;
         }
 
         public static int GetCubeFragmentItemIdFromSlot(int slot)
@@ -39,6 +38,7 @@ namespace DfoServer.Game.Currency
                 if (kv.Value.Slot == slot)
                     return kv.Key;
             }
+
             return -1;
         }
 
@@ -47,10 +47,10 @@ namespace DfoServer.Game.Currency
             return slot >= CubeFragmentSlotStart && slot <= CubeFragmentSlotEnd;
         }
 
-        /// <summary>
-        /// 读取账号的 6 种晶块数量, 返回 (itemId, slot, count) 列表。
-        /// </summary>
-        public static List<(int ItemId, int Slot, int Count)> LoadCubeFragments(SqliteConnection conn, SqliteTransaction tx, int accountId)
+        public static List<(int ItemId, int Slot, int Count)> LoadCubeFragments(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int accountId)
         {
             var result = new List<(int, int, int)>();
             using (var cmd = conn.CreateCommand())
@@ -71,13 +71,16 @@ namespace DfoServer.Game.Currency
                     }
                 }
             }
+
             return result;
         }
 
-        /// <summary>
-        /// 累加指定晶块到账号。
-        /// </summary>
-        public static void AddCubeFragment(SqliteConnection conn, SqliteTransaction tx, int accountId, int itemId, int count)
+        public static void AddCubeFragment(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int accountId,
+            int itemId,
+            int count)
         {
             if (!CubeFragmentMap.TryGetValue(itemId, out var entry))
                 throw new ArgumentException($"itemId {itemId} is not a cube fragment");
@@ -92,15 +95,28 @@ namespace DfoServer.Game.Currency
             }
         }
 
+        public static void SetCubeFragmentCount(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int accountId,
+            int itemId,
+            int count)
+        {
+            if (!CubeFragmentMap.TryGetValue(itemId, out var entry))
+                throw new ArgumentException($"itemId {itemId} is not a cube fragment");
 
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = $"UPDATE accounts SET {entry.ColumnName} = @count WHERE account_id = @aid;";
+                cmd.Parameters.AddWithValue("@count", Math.Max(0, count));
+                cmd.Parameters.AddWithValue("@aid", accountId);
+                cmd.ExecuteNonQuery();
+            }
+        }
 
-        /// <summary>
-        /// 启动时迁移: 把 character_items slot 354-359 的旧晶块数量归集到 accounts 表, 然后删除旧行。
-        /// 幂等: 只在 accounts 对应列为 0 且 character_items 有数据时才迁移。
-        /// </summary>
         public static void MigrateCubeFragmentsFromCharacterItems(SqliteConnection conn)
         {
-            // 检查是否有待迁移的数据(任何角色在 slot 354-359 有晶块)
             bool hasOldData;
             using (var cmd = conn.CreateCommand())
             {
@@ -110,10 +126,10 @@ WHERE list_type = 0 AND slot_index >= 354 AND slot_index <= 359
   AND item_template_id IN (3033, 3034, 3035, 3036, 3037, 3262);";
                 hasOldData = Convert.ToInt32(cmd.ExecuteScalar()) > 0;
             }
+
             if (!hasOldData)
                 return;
 
-            // 检查是否已经迁移过(accounts 表已有非零晶块)
             bool alreadyMigrated;
             using (var cmd = conn.CreateCommand())
             {
@@ -123,9 +139,9 @@ WHERE cube_black != 0 OR cube_white != 0 OR cube_red != 0
    OR cube_blue != 0 OR cube_clear != 0 OR cube_gold != 0;";
                 alreadyMigrated = Convert.ToInt32(cmd.ExecuteScalar()) > 0;
             }
+
             if (alreadyMigrated)
             {
-                // 已迁移但旧行残留, 清理旧行
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = @"
@@ -134,22 +150,20 @@ WHERE list_type = 0 AND slot_index >= 354 AND slot_index <= 359
   AND item_template_id IN (3033, 3034, 3035, 3036, 3037, 3262);";
                     cmd.ExecuteNonQuery();
                 }
+
                 return;
             }
 
-            // 对每个 account, 从其角色的 character_items 中读取晶块数据
-            // (单账号项目: 取角色中各晶块的 MAX stack_count 做为账号值)
             foreach (var kv in CubeFragmentMap)
             {
                 var itemId = kv.Key;
-                var colName = kv.Value.ColumnName;
+                var columnName = kv.Value.ColumnName;
                 var slot = kv.Value.Slot;
-
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = $@"
 UPDATE accounts
-SET {colName} = COALESCE((
+SET {columnName} = COALESCE((
     SELECT MAX(ci.stack_count)
     FROM character_items ci
     JOIN characters ch ON ch.character_id = ci.character_id
@@ -157,14 +171,13 @@ SET {colName} = COALESCE((
       AND ci.list_type = 0 AND ci.slot_index = @slot
       AND ci.item_template_id = @itemId
 ), 0)
-WHERE {colName} = 0;";
+WHERE {columnName} = 0;";
                     cmd.Parameters.AddWithValue("@slot", slot);
                     cmd.Parameters.AddWithValue("@itemId", itemId);
                     cmd.ExecuteNonQuery();
                 }
             }
 
-            // 删除旧的 character_items 行
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = @"
@@ -175,9 +188,12 @@ WHERE list_type = 0 AND slot_index >= 354 AND slot_index <= 359
             }
         }
 
-        public static WalletSnapshot LoadWallet(SqliteConnection connection, SqliteTransaction transaction, int characterId)
+        public static WalletSnapshot LoadWallet(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
         {
-            var w = new WalletSnapshot { Gold = LoadGold(connection, transaction, characterId) };
+            var wallet = new WalletSnapshot { Gold = LoadGold(connection, transaction, characterId) };
             using (var cmd = connection.CreateCommand())
             {
                 cmd.Transaction = transaction;
@@ -191,14 +207,14 @@ WHERE c.character_id = @cid;";
                 {
                     if (reader.Read())
                     {
-                        w.Cera = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
-                        w.TokenCera = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
-                        w.HappyTokenCera = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
-                        w.LuckyStar = reader.IsDBNull(3) ? (ushort)0 : NormalizeLuckyStar(Convert.ToInt32(reader.GetValue(3)));
+                        wallet.Cera = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                        wallet.TokenCera = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
+                        wallet.HappyTokenCera = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
+                        wallet.LuckyStar = reader.IsDBNull(3) ? (ushort)0 : NormalizeLuckyStar(Convert.ToInt32(reader.GetValue(3)));
                     }
                 }
             }
-            // 读取账号级晶块
+
             using (var cmd = connection.CreateCommand())
             {
                 cmd.Transaction = transaction;
@@ -212,80 +228,61 @@ WHERE c.character_id = @cid;";
                 {
                     if (reader.Read())
                     {
-                        w.CubeBlack = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
-                        w.CubeWhite = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
-                        w.CubeRed = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
-                        w.CubeBlue = reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3));
-                        w.CubeClear = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4));
-                        w.CubeGold = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5));
+                        wallet.CubeBlack = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                        wallet.CubeWhite = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
+                        wallet.CubeRed = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
+                        wallet.CubeBlue = reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3));
+                        wallet.CubeClear = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4));
+                        wallet.CubeGold = reader.IsDBNull(5) ? 0 : Convert.ToInt32(reader.GetValue(5));
                     }
                 }
             }
-            return w;
+
+            return wallet;
         }
 
-        // ── Grant / TrySpend ──────────────────────────────────────────────
-        // 货币写入唯一入口。发放=SQL原子增量; 扣费=条件扣减(余额不足返回false, 绝不clamp到0)。
-        // 绝对值SET的旧 Update* 已全部删除, 任何路径不得整值覆盖钱包列。
-
-        public static int GrantGold(SqliteConnection connection, SqliteTransaction transaction, int characterId, int amount)
+        public static int GrantGold(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int amount)
         {
             if (amount < 0)
                 throw new ArgumentOutOfRangeException(nameof(amount), amount, "GrantGold amount must be >= 0; use TrySpendGold to deduct");
             if (amount == 0)
                 return 0;
 
-            var before = LoadGold(connection, transaction, characterId);
             var limit = CharacterGoldLimitRepository.LoadEffectiveGoldCarryLimit(
-                connection, transaction, characterId);
+                connection,
+                transaction,
+                characterId);
 
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.Transaction = transaction;
-                cmd.CommandText = @"
-UPDATE character_items
-SET stack_count = CASE
-        WHEN stack_count >= @limit THEN stack_count
-        ELSE MIN(@limit, CAST(stack_count AS INTEGER) + @amt)
-    END,
-    instance_value = CASE
-        WHEN stack_count >= @limit THEN stack_count
-        ELSE MIN(@limit, CAST(stack_count AS INTEGER) + @amt)
-    END
-WHERE character_id = @cid AND list_type = 0 AND slot_index = 0;";
-                cmd.Parameters.AddWithValue("@amt", amount);
-                cmd.Parameters.AddWithValue("@limit", limit);
-                cmd.Parameters.AddWithValue("@cid", characterId);
-                if (cmd.ExecuteNonQuery() > 0)
-                    return Math.Max(0, LoadGold(connection, transaction, characterId) - before);
-            }
-
-            // 金币行不存在(新角色): 建行, 初值即发放额
-            var granted = Math.Min(amount, limit);
-            InsertCurrencySlotRow(connection, transaction, characterId, 0, granted);
-            return granted;
+            return InventoryMainVirtualCountRepository.GrantCurrency(
+                connection,
+                transaction,
+                characterId,
+                InventoryService.MainVirtualCurrencySlotStart,
+                amount,
+                limit);
         }
 
-        public static bool TrySpendGold(SqliteConnection connection, SqliteTransaction transaction, int characterId, int amount)
+        public static bool TrySpendGold(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int amount)
         {
             if (amount < 0)
                 throw new ArgumentOutOfRangeException(nameof(amount), amount, "TrySpendGold amount must be >= 0");
             if (amount == 0)
                 return true;
 
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.Transaction = transaction;
-                cmd.CommandText = @"
-UPDATE character_items
-SET stack_count = stack_count - @amt,
-    instance_value = instance_value - @amt
-WHERE character_id = @cid AND list_type = 0 AND slot_index = 0
-  AND stack_count >= @amt;";
-                cmd.Parameters.AddWithValue("@amt", amount);
-                cmd.Parameters.AddWithValue("@cid", characterId);
-                return cmd.ExecuteNonQuery() > 0;
-            }
+            return InventoryMainVirtualCountRepository.TrySpendCurrency(
+                connection,
+                transaction,
+                characterId,
+                InventoryService.MainVirtualCurrencySlotStart,
+                amount);
         }
 
         public static void GrantCera(SqliteConnection connection, SqliteTransaction transaction, int characterId, int amount)
@@ -306,7 +303,6 @@ WHERE character_id = @cid AND list_type = 0 AND slot_index = 0
         public static bool TrySpendHappyTokenCera(SqliteConnection connection, SqliteTransaction transaction, int characterId, int amount)
             => TrySpendAccountCurrency(connection, transaction, characterId, "happy_token_cera", amount);
 
-        // 幸运星按账号ID直接寻址(accounts.lucky_star), 上限999在SQL内钳制
         public static void GrantLuckyStar(SqliteConnection connection, SqliteTransaction transaction, int accountId, int amount)
         {
             if (amount < 0)
@@ -347,7 +343,12 @@ WHERE account_id = @aid AND lucky_star >= @amt;";
             }
         }
 
-        private static void GrantAccountCurrency(SqliteConnection connection, SqliteTransaction transaction, int characterId, string column, int amount)
+        private static void GrantAccountCurrency(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            string column,
+            int amount)
         {
             if (amount < 0)
                 throw new ArgumentOutOfRangeException(nameof(amount), amount, $"Grant {column} amount must be >= 0; use TrySpend to deduct");
@@ -367,7 +368,12 @@ WHERE account_id = (SELECT account_id FROM characters WHERE character_id = @cid)
             }
         }
 
-        private static bool TrySpendAccountCurrency(SqliteConnection connection, SqliteTransaction transaction, int characterId, string column, int amount)
+        private static bool TrySpendAccountCurrency(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            string column,
+            int amount)
         {
             if (amount < 0)
                 throw new ArgumentOutOfRangeException(nameof(amount), amount, $"TrySpend {column} amount must be >= 0");
@@ -402,44 +408,20 @@ WHERE account_id = (SELECT account_id FROM characters WHERE character_id = @cid)
             SqliteTransaction transaction,
             int characterId)
         {
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = @"
-SELECT stack_count
-FROM character_items
-WHERE character_id=@cid AND list_type=0 AND slot_index=0;";
-                command.Parameters.AddWithValue("@cid", characterId);
-                var raw = command.ExecuteScalar();
-                return raw == null || raw == DBNull.Value ? 0 : Convert.ToInt32(raw);
-            }
+            return InventoryMainVirtualCountRepository.LoadCurrencyCount(
+                connection,
+                transaction,
+                characterId,
+                InventoryService.MainVirtualCurrencySlotStart);
         }
-
-        // 前置条件: 同事务内已确认该槽位无行(UPDATE命中0行)。
-        // 用普通INSERT而非OR REPLACE: REPLACE会把未列出的列(pet_serial_or_handle/equipment_lock_id/extra_json)清掉。
-        private static void InsertCurrencySlotRow(SqliteConnection connection, SqliteTransaction transaction, int characterId, int slot, int value)
-        {
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.Transaction = transaction;
-                cmd.CommandText = @"INSERT INTO character_items
-(owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, durability, seal_flag, option_value, expire_time, marker_16)
-VALUES ('character', @cid, @cid, 0, @slot, 0, 'special', @val, @val, 0, 0, 0, 0, 0);";
-                cmd.Parameters.AddWithValue("@val", value);
-                cmd.Parameters.AddWithValue("@slot", slot);
-                cmd.Parameters.AddWithValue("@cid", characterId);
-                cmd.ExecuteNonQuery();
-            }
-        }
-
     }
 
     public sealed class WalletSnapshot
     {
         public int Gold { get; set; }
+
         public int Cera { get; set; }
 
-        // 技能点(character_items slot 2), 仅 InventoryDbPrimitives.LoadWallet 填充
         public int Sp { get; set; }
 
         public int TokenCera { get; set; }
@@ -448,12 +430,16 @@ VALUES ('character', @cid, @cid, 0, @slot, 0, 'special', @val, @val, 0, 0, 0, 0,
 
         public ushort LuckyStar { get; set; }
 
-        // 账号级晶块
         public int CubeBlack { get; set; }
+
         public int CubeWhite { get; set; }
+
         public int CubeRed { get; set; }
+
         public int CubeBlue { get; set; }
+
         public int CubeClear { get; set; }
+
         public int CubeGold { get; set; }
     }
 }

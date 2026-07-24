@@ -20,7 +20,6 @@ namespace DfoServer.Game.Quests
         private readonly ISessionPacketSender _sender;
         private readonly string _connStr;
         private readonly string _databasePath;
-        private readonly IAssetService _assetService;
         private readonly QuestService _service;
         private readonly SqliteCharacterRepository _characterRepository;
         private readonly SqliteCharacterProgressRepository _progressRepository;
@@ -28,13 +27,12 @@ namespace DfoServer.Game.Quests
         private readonly SqliteSubtype0FieldsRepository _subtype0Repository;
         private readonly GrowthCapsuleProgressRepository _growthCapsuleRepository;
 
-        public QuestManager(ISessionPacketSender sender, string connStr, IAssetService assetService)
+        public QuestManager(ISessionPacketSender sender, string connStr)
         {
             _sender = sender;
             _connStr = connStr;
             _databasePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connStr).DataSource;
-            _assetService = assetService;
-            _service = new QuestService(connStr, assetService);
+            _service = new QuestService(connStr);
             _characterRepository = new SqliteCharacterRepository(_databasePath, ServerPaths.SchemaFilePath);
             _progressRepository = SqliteCharacterProgressRepository.FromConnectionString(connStr);
             _honorLevel = new HonorLevelSyncService(
@@ -74,21 +72,24 @@ namespace DfoServer.Game.Quests
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildGiveup(result));
         }
 
-        public async Task HandleSetTriggerAsync(ushort wireType, byte[] body)
+        public async Task<QuestSetTriggerResult> HandleSetTriggerAsync(
+            ushort wireType,
+            byte[] body)
         {
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
-            if (cid <= 0) return;
+            if (cid <= 0) return null;
 
             QuestSetTriggerResult deferred;
             if (TryBuildDeferredClearMapSetTrigger(cid, qBody, out deferred))
             {
                 await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildSetTrigger(deferred));
-                return;
+                return deferred;
             }
 
             var result = _service.HandleSetTrigger(cid, qBody);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildSetTrigger(result));
+            return result;
         }
 
         public async Task HandleFinishQuestAsync(ushort wireType, byte[] body)
@@ -310,7 +311,12 @@ namespace DfoServer.Game.Quests
             if (quest == null || quest.TriggerValue == 0)
                 return false;
 
-            result = new QuestSetTriggerResult { QuestId = questId, TriggerValue = quest.TriggerValue };
+            result = new QuestSetTriggerResult
+            {
+                QuestId = questId,
+                PreviousTriggerValue = quest.TriggerValue,
+                TriggerValue = quest.TriggerValue,
+            };
             FileLogger.Log($"[QuestManager] SET_TRIGGER deferred clear-map start target: cid={characterId} quest={questId} trigger={quest.TriggerValue} dungeon={run.DungeonId} maze={run.MazeIndex} map={run.MazeStartMapId}");
             return true;
         }
@@ -367,10 +373,9 @@ namespace DfoServer.Game.Quests
             int growType = character != null ? character.GrowType : -1;
 
             var clearedFlags = new QuestRepository(_connStr).LoadClearedFlags(cid);
-            var allowedCreatureKinds = SqliteInventoryStore.LoadEligiblePetCreatureEvolutionQuestKinds(
-                ServerPaths.DatabasePath,
-                ServerPaths.SchemaFilePath,
-                cid);
+            var allowedCreatureKinds = InventoryContext.TryGetLease(cid, out var lease)
+                ? PetCreatureEvolutionRuntimeService.LoadEligiblePetCreatureEvolutionQuestKinds(lease.Inventory)
+                : new HashSet<int>();
             await _sender.SendNotiAsync(
                 0x0015,
                 QuestListBodyBuilder.BuildBody(level, job, growType, clearedFlags, allowedCreatureKinds));

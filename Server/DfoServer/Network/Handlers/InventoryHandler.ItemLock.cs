@@ -13,8 +13,34 @@ namespace DfoServer.Network.Handlers
             if (!TryParseEquipmentItemLockRequest(body, out var listType, out var slotIndex))
                 return;
 
-            var (cid, aid) = ResolveOwner(session);
-            var ok = _inventoryStore.TryLockEquipmentItem(cid, listType, slotIndex, out var result);
+            var (cid, _) = ResolveOwner(session);
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+                return;
+
+            EquipmentItemLockResult result;
+            bool ok;
+            lock (lease.SyncRoot)
+            {
+                var equipmentLockId = InventoryEquipmentLockTableService.AllocateLockId(cid, lease.Inventory);
+                ok = InventoryLockService.TryLockEquipmentItem(lease.Inventory, listType, slotIndex, equipmentLockId, out result);
+                if (ok && result.Success
+                    && !InventoryEquipmentLockTableService.UpsertLock(cid, result.EquipmentLockId, result.ListType, result.SlotIndex, state: 1, remainingSeconds: null))
+                {
+                    InventoryLockService.SetEquipmentLockId(lease.Inventory, result.ListType, result.SlotIndex, 0);
+                    MarkEquipmentLockPersistenceFailed(result);
+                    ok = false;
+                }
+                else if (ok && result.Success)
+                {
+                    lease.Inventory.EquipmentLocks.Attach(new EquipmentItemLock
+                    {
+                        EquipmentLockId = result.EquipmentLockId,
+                        State = 1,
+                        RemainingSeconds = 0,
+                    });
+                }
+            }
+
             if (!ok || !result.Success)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x010B,
@@ -22,6 +48,7 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
+            SaveEquipmentLockItemCore(lease, "ITEM_LOCK");
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x010B,
                 EquipmentItemLockBuilder.BuildLockAck(result.ListType, result.SlotIndex)));
             await SendEquipmentItemLockEntryRefresh(session, result, 1, "ITEM_LOCK_LIST_DELTA_LOCK");
@@ -32,8 +59,28 @@ namespace DfoServer.Network.Handlers
             if (!TryParseEquipmentItemLockRequest(body, out var listType, out var slotIndex))
                 return;
 
-            var (cid, aid) = ResolveOwner(session);
-            var ok = _inventoryStore.TryUnlockEquipmentItem(cid, listType, slotIndex, out var result);
+            var (cid, _) = ResolveOwner(session);
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+                return;
+
+            EquipmentItemLockResult result;
+            bool ok;
+            lock (lease.SyncRoot)
+            {
+                ok = InventoryLockService.TryUnlockEquipmentItem(lease.Inventory, listType, slotIndex, out result);
+                if (ok && result.Success
+                    && !InventoryEquipmentLockTableService.DeleteLock(cid, result.EquipmentLockId))
+                {
+                    InventoryLockService.SetEquipmentLockId(lease.Inventory, result.ListType, result.SlotIndex, result.EquipmentLockId);
+                    MarkEquipmentLockPersistenceFailed(result);
+                    ok = false;
+                }
+                else if (ok && result.Success)
+                {
+                    lease.Inventory.EquipmentLocks.Remove(result.EquipmentLockId);
+                }
+            }
+
             if (!ok || !result.Success)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x010C,
@@ -41,6 +88,7 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
+            SaveEquipmentLockItemCore(lease, "ITEM_UNLOCK");
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x010C,
                 EquipmentItemLockBuilder.BuildUnlockAck(result.ListType, result.SlotIndex, 0)));
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00FC,
@@ -52,8 +100,32 @@ namespace DfoServer.Network.Handlers
             if (!TryParseEquipmentItemLockRequest(body, out var listType, out var slotIndex))
                 return;
 
-            var (cid, aid) = ResolveOwner(session);
-            var ok = _inventoryStore.TryCancelEquipmentItemUnlock(cid, listType, slotIndex, out var result);
+            var (cid, _) = ResolveOwner(session);
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+                return;
+
+            EquipmentItemLockResult result;
+            bool ok;
+            lock (lease.SyncRoot)
+            {
+                ok = InventoryLockService.TryCancelEquipmentItemUnlock(lease.Inventory, listType, slotIndex, out result);
+                if (ok && result.Success
+                    && !InventoryEquipmentLockTableService.UpsertLock(cid, result.EquipmentLockId, result.ListType, result.SlotIndex, state: 1, remainingSeconds: null))
+                {
+                    MarkEquipmentLockPersistenceFailed(result);
+                    ok = false;
+                }
+                else if (ok && result.Success)
+                {
+                    lease.Inventory.EquipmentLocks.Attach(new EquipmentItemLock
+                    {
+                        EquipmentLockId = result.EquipmentLockId,
+                        State = 1,
+                        RemainingSeconds = 0,
+                    });
+                }
+            }
+
             if (!ok || !result.Success)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x010D,
@@ -61,6 +133,7 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
+            SaveEquipmentLockItemCore(lease, "ITEM_UNLOCK_CANCEL");
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x010D,
                 EquipmentItemLockBuilder.BuildUnlockCancelAck(result.ListType, result.SlotIndex)));
             await SendEquipmentItemLockEntryRefresh(session, result, 1, "ITEM_LOCK_LIST_DELTA_CANCEL");
@@ -82,6 +155,21 @@ namespace DfoServer.Network.Handlers
             InventoryRefreshSender.LogEquipmentItemLockList(tag, entries);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00FB,
                 EquipmentItemLockBuilder.BuildLockList(entries)));
+        }
+
+        private static void SaveEquipmentLockItemCore(InventoryLease lease, string action)
+        {
+            if (!InventoryPersistenceService.SaveDirty(lease))
+                FileLogger.Log($"[GameProtocol] {action}: equipment lock item_core save failed cid={lease?.CharacterId}");
+        }
+
+        private static void MarkEquipmentLockPersistenceFailed(EquipmentItemLockResult result)
+        {
+            if (result == null)
+                return;
+
+            result.Success = false;
+            result.ErrorCode = 19;
         }
 
         private static bool TryParseEquipmentItemLockRequest(byte[] body, out InventoryListType listType, out short slotIndex)

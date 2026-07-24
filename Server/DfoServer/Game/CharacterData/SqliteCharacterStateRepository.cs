@@ -11,7 +11,6 @@ namespace DfoServer.Game.CharacterData
         private readonly string _connectionString;
         private readonly CharacterAchievementRepository _achievement;
         private readonly CharacterItemValueRepository _itemValue;
-        private readonly CharacterItemLockRepository _itemLock;
         private readonly CharacterMiscStateRepository _miscState;
 
         public SqliteCharacterStateRepository(string databasePath, string schemaFilePath)
@@ -19,7 +18,6 @@ namespace DfoServer.Game.CharacterData
             _connectionString = SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
             _achievement = new CharacterAchievementRepository(_connectionString);
             _itemValue = new CharacterItemValueRepository(_connectionString);
-            _itemLock = new CharacterItemLockRepository(_connectionString);
             _miscState = new CharacterMiscStateRepository(_connectionString);
         }
 
@@ -234,6 +232,41 @@ VALUES (@cid, (SELECT COALESCE(MAX(sort_order),0)+1 FROM character_dungeon_permi
                 }
                 return true;
             }
+        }
+
+        public List<DungeonPermissionEntrySnapshot> LoadDungeonPermissions(
+            int characterId)
+        {
+            var result = new List<DungeonPermissionEntrySnapshot>();
+            if (characterId <= 0)
+                return result;
+
+            using (var conn = new SqliteConnection(_connectionString))
+            {
+                conn.Open();
+                using (var cmd = new SqliteCommand(
+                    @"SELECT dungeon_id, clear_state
+                      FROM character_dungeon_permissions
+                      WHERE character_id = @cid
+                      ORDER BY sort_order",
+                    conn))
+                {
+                    cmd.Parameters.AddWithValue("@cid", characterId);
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            result.Add(new DungeonPermissionEntrySnapshot
+                            {
+                                DungeonId = (ushort)reader.GetInt32(0),
+                                ClearState = (byte)reader.GetInt32(1),
+                            });
+                        }
+                    }
+                }
+            }
+
+            return result;
         }
 
         public void SaveFlags(int characterId, SelectCharacterInitializationSnapshot snapshot)
@@ -539,14 +572,8 @@ ON CONFLICT(character_id) DO UPDATE SET
             _itemValue.SaveItemValueListIfEmpty(characterId, "cooltime", snapshot.CooltimeItems);
             _itemValue.SaveItemValueListIfEmpty(characterId, "effect", snapshot.EffectItems);
 
-            if (_itemLock.LoadItemLocks(characterId).Entries.Count == 0 && snapshot.ItemLockList.Entries.Count > 0)
-                _itemLock.SaveItemLocks(characterId, snapshot.ItemLockList);
-
             if (_achievement.LoadAchievementComplete(characterId).Entries.Count == 0 && snapshot.AchievementComplete.Entries.Count > 0)
                 _achievement.SaveAchievementComplete(characterId, snapshot.AchievementComplete);
-
-            if (_achievement.LoadAchievementChunks(characterId).Count == 0 && snapshot.AchievementChunks.Count > 0)
-                _achievement.SaveAchievementChunks(characterId, snapshot.AchievementChunks);
 
             if (_miscState.LoadUnknown725(characterId).Count == 0 && snapshot.Unknown725Packets.Count > 0)
                 _miscState.SaveUnknown725(characterId, snapshot.Unknown725Packets);
@@ -567,14 +594,7 @@ ON CONFLICT(character_id) DO UPDATE SET
             snapshot.EffectItems.Clear();
             snapshot.EffectItems.AddRange(effect);
 
-            var locks = _itemLock.LoadItemLocks(characterId);
-            snapshot.ItemLockList = locks;
-
             snapshot.AchievementComplete = _achievement.LoadAchievementComplete(characterId);
-
-            var chunks = _achievement.LoadAchievementChunks(characterId);
-            snapshot.AchievementChunks.Clear();
-            snapshot.AchievementChunks.AddRange(chunks);
 
             var u725 = _miscState.LoadUnknown725(characterId);
             snapshot.Unknown725Packets.Clear();

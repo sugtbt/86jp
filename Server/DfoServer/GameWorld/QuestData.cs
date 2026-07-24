@@ -750,17 +750,21 @@ namespace DfoServer.GameWorld
                 {
                     var fixedRewards = ParseItemPairs(
                         qst.RewardIntData, playerJob, playerGrowType, preserveGoldMarker: true);
+                    bool hasGoldMarker = false;
                     foreach (var fr in fixedRewards)
                     {
                         if (fr.ItemId == 0)
                         {
-                            gold = param.ComputeGoldReward(playerLevel, questMinLevel, qst.GoldMultiple, ignoreLevel);
+                            hasGoldMarker = true;
                         }
                         else
                         {
                             items.Add(fr);
                         }
                     }
+
+                    if (hasGoldMarker || qst.GoldMultiple > 0)
+                        gold = param.ComputeGoldReward(playerLevel, questMinLevel, qst.GoldMultiple, ignoreLevel);
 
                     if (rewardSelectIdx >= 0)
                     {
@@ -935,6 +939,12 @@ namespace DfoServer.GameWorld
         internal static bool IsSeekAndMeetNpcQuest(int questId)
         {
             return IsSeekAndMeetNpcQuest(GetQuestFile(questId));
+        }
+
+        internal static bool IsMeetNpcQuest(int questId)
+        {
+            var tag = NormalizeQuestTag(GetQuestFile(questId)?.Type);
+            return tag == "meet npc" || tag == "seek n meet npc";
         }
 
         private static bool IsSeekAndMeetNpcQuest(QuestFile qst)

@@ -7,110 +7,92 @@ namespace DfoServer.Network.Builders
 {
     public static class ItemListUpdateBuilder
     {
-        public static byte[] BuildCommonUpdates(IReadOnlyList<CommonInventoryItem> items)
-            => BuildCommonUpdates(InventoryListType.Main, items);
-
-        public static byte[] BuildCommonUpdates(InventoryListType itemSpace, IReadOnlyList<CommonInventoryItem> items)
+        public static byte[] BuildUpdateBody(
+            int characterId,
+            int accountId,
+            InventoryListType itemSpace,
+            short slotIndex)
         {
-            EnsureCommonUpdateItemSpace(itemSpace);
+            return BuildUpdateBody(characterId, accountId, itemSpace, new[] { slotIndex });
+        }
+
+        public static byte[] BuildUpdateBody(
+            int characterId,
+            int accountId,
+            InventoryListType itemSpace,
+            IReadOnlyList<short> slotIndexes)
+        {
+            var lease = ItemListPacketBuilder.GetOnlineInventoryLease(characterId);
+            lock (lease.SyncRoot)
+                return BuildItemSpaceUpdateBody(lease.Inventory, itemSpace, slotIndexes);
+        }
+
+        internal static byte[] BuildItemSpaceUpdateBody(
+            InventoryService inventory,
+            InventoryListType itemSpace,
+            IReadOnlyList<short> slotIndexes)
+        {
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+
+            var slots = slotIndexes != null
+                ? NormalizeSlots(slotIndexes)
+                : new List<short>();
+            var entries = new GamePacketWriter();
+            ushort count = 0;
+            var nowUnixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            foreach (var slotIndex in slots)
+                WriteOnlineUpdateEntry(entries, inventory, itemSpace, slotIndex, nowUnixTime, ref count);
 
             var writer = new GamePacketWriter();
             writer.WriteByte((byte)itemSpace);
-            writer.WriteUInt16((ushort)(items != null ? items.Count : 0));
-
-            if (items != null)
-            {
-                foreach (var item in items)
-                    WriteCommonUpdateEntry(writer, item);
-            }
-
+            writer.WriteUInt16(count);
+            writer.WriteBytes(entries.ToArray());
             return writer.ToArray();
         }
 
-        public static byte[] BuildCommonSlotUpdate(short slotIndex, int itemTemplateId, int countOrInstanceValue)
-            => BuildCommonSlotUpdate(InventoryListType.Main, slotIndex, itemTemplateId, countOrInstanceValue);
-
-        public static byte[] BuildCommonSlotUpdate(InventoryListType itemSpace, short slotIndex, int itemTemplateId, int countOrInstanceValue)
-            => BuildCommonUpdates(itemSpace, new[] { CreateCommonSlotUpdate(slotIndex, itemTemplateId, countOrInstanceValue) });
-
-        public static byte[] BuildGoldUpdate(int gold)
-            => BuildCommonSlotUpdate(InventoryListType.Main, 0, 0, gold);
-
-        // NOTI 14 UPDATE_ITEM_LIST - 84B raw item entry (Reverse/SUBSYSTEMS/inventory_system.md)
-        // 客户端按 PacketPopBuffer(84) 整块 memcpy, 不逐字段读取。全仓 84B 条目构造只此一处。
-        public static byte[] BuildRawItemEntry(short slotIndex, uint itemId, uint instanceValue)
+        private static void WriteOnlineUpdateEntry(
+            GamePacketWriter writer,
+            InventoryService inventory,
+            InventoryListType itemSpace,
+            short slotIndex,
+            long nowUnixTime,
+            ref ushort count)
         {
-            var buf = new byte[84];
-            BitConverter.GetBytes(slotIndex).CopyTo(buf, 0);
-            BitConverter.GetBytes(itemId).CopyTo(buf, 2);
-            BitConverter.GetBytes(instanceValue).CopyTo(buf, 6);
-            return buf;
-        }
-
-        public static byte[] BuildRawEquipEntry(short slotIndex, uint itemId,
-            uint qualitySeed = Game.Inventory.ItemQuality.TopQualitySeed, ushort durability = 32,
-            byte sealFlag = 0)
-        {
-            var buf = new byte[84];
-            BitConverter.GetBytes(slotIndex).CopyTo(buf, 0);
-            BitConverter.GetBytes(itemId).CopyTo(buf, 2);
-            BitConverter.GetBytes(qualitySeed).CopyTo(buf, 6);
-            BitConverter.GetBytes(durability).CopyTo(buf, 11);
-            buf[13] = sealFlag;
-            BitConverter.GetBytes(0xFFFFFFFF).CopyTo(buf, 22);
-            return buf;
-        }
-
-        public static byte[] BuildPetUpdates(IReadOnlyList<PetInventoryItem> items)
-        {
-            var writer = new GamePacketWriter();
-
-            writer.WriteByte((byte)InventoryListType.Pet);
-            writer.WriteUInt16((ushort)(items != null ? items.Count : 0));
-
-            if (items != null)
+            if (itemSpace == InventoryListType.Main && InventoryService.IsVirtualMainSlot(slotIndex))
             {
-                foreach (var item in items)
-                    ItemListPacketBuilder.WritePetEntry(writer, item);
+                ItemListPacketBuilder.WriteMainVirtualCountEntry(writer, inventory, slotIndex, ref count);
+                return;
             }
 
-            return writer.ToArray();
-        }
-
-        public static byte[] BuildEquipmentUpdates(IReadOnlyList<CommonInventoryItem> items)
-        {
-            var writer = new GamePacketWriter();
-            writer.WriteByte((byte)InventoryListType.Equipment);
-            writer.WriteUInt16((ushort)(items != null ? items.Count : 0));
-
-            if (items != null)
+            var core = inventory.GetItem(itemSpace, slotIndex);
+            if (ItemListPacketBuilder.TryWriteOnlineEntry(
+                    writer,
+                    inventory,
+                    itemSpace,
+                    slotIndex,
+                    core,
+                    nowUnixTime))
             {
-                foreach (var item in items)
-                    WriteCommonUpdateEntry(writer, item);
+                count++;
+                return;
             }
 
-            return writer.ToArray();
+            ItemListProtocolWriter.WriteEmptyEntry(writer, itemSpace, slotIndex);
+            count++;
         }
 
-        public static byte[] BuildAvatarUpdates(IReadOnlyList<AvatarInventoryItem> items)
-            => BuildAvatarUpdates(InventoryListType.Avatar, items);
-
-        public static byte[] BuildAvatarUpdates(InventoryListType itemSpace, IReadOnlyList<AvatarInventoryItem> items)
+        private static List<short> NormalizeSlots(IReadOnlyList<short> slotIndexes)
         {
-            EnsureAvatarUpdateItemSpace(itemSpace);
-
-            var writer = new GamePacketWriter();
-
-            writer.WriteByte((byte)itemSpace);
-            writer.WriteUInt16((ushort)(items != null ? items.Count : 0));
-
-            if (items != null)
+            var result = new List<short>();
+            var seen = new HashSet<short>();
+            foreach (var slotIndex in slotIndexes)
             {
-                foreach (var item in items)
-                    ItemListPacketBuilder.WriteAvatarEntry(writer, item);
+                if (seen.Add(slotIndex))
+                    result.Add(slotIndex);
             }
 
-            return writer.ToArray();
+            return result;
         }
 
         public static byte[] BuildEmptyUpdates(InventoryListType itemSpace, IReadOnlyList<short> slotIndexes)
@@ -127,94 +109,6 @@ namespace DfoServer.Network.Builders
             }
 
             return writer.ToArray();
-        }
-
-        public static void WriteCommonUpdateEntry(GamePacketWriter writer, CommonInventoryItem item)
-        {
-            if (writer == null) throw new ArgumentNullException(nameof(writer));
-            if (item == null) throw new ArgumentNullException(nameof(item));
-
-            writer.WriteInt16(item.SlotIndex);
-            if (item.ItemTemplateId < 0)
-            {
-                writer.WriteInt32(-1);
-                WriteEmptyEntryTail(writer, 0x54);
-                return;
-            }
-
-            writer.WriteInt32(item.ItemTemplateId);
-            writer.WriteInt32(item.CountOrInstanceValue);
-            writer.WriteByte(item.ExtData0);
-            writer.WriteUInt16(item.Durability);
-            writer.WriteByte(item.SealFlag);
-            WriteFixedBytes(writer, item.PrefixData0E, 8);
-            writer.WriteInt32(item.Marker16);
-            WriteFixedBytes(writer, item.MiddleData1A, 17);
-            writer.WriteInt32(item.ExpireTime);
-            WriteFixedBytes(writer, item.TailData2F, 37);
-        }
-
-        public static CommonInventoryItem CreateEmptyCommonItem(short slotIndex)
-        {
-            return new CommonInventoryItem
-            {
-                SlotIndex = slotIndex,
-                ItemTemplateId = -1,
-                CountOrInstanceValue = 0,
-            };
-        }
-
-        public static CommonInventoryItem CreateCommonSlotUpdate(short slotIndex, int itemTemplateId, int countOrInstanceValue)
-        {
-            var normalizedItemId = countOrInstanceValue > 0 || itemTemplateId <= 0 ? itemTemplateId : -1;
-            var normalizedCount = countOrInstanceValue > 0 ? countOrInstanceValue : 0;
-            return new CommonInventoryItem
-            {
-                SlotIndex = slotIndex,
-                ItemTemplateId = normalizedItemId,
-                CountOrInstanceValue = normalizedCount,
-            };
-        }
-
-        public static InventoryPacketType GetInventoryPacketTypeFromItemSpace(InventoryListType itemSpace)
-        {
-            switch ((byte)itemSpace)
-            {
-                case 0:
-                    return InventoryPacketType.Item;
-                case 1:
-                    return InventoryPacketType.Avatar;
-                case 2:
-                    return InventoryPacketType.Cargo;
-                case 3:
-                    return InventoryPacketType.Body;
-                case 7:
-                    return InventoryPacketType.Creature;
-                case 18:
-                    return InventoryPacketType.Unknown5;
-                default:
-                    return InventoryPacketType.Default;
-            }
-        }
-
-        public static bool IsCommonUpdateItemSpace(InventoryListType itemSpace)
-        {
-            return itemSpace == InventoryListType.Main
-                || itemSpace == InventoryListType.PersonalCargo
-                || itemSpace == InventoryListType.AccountCargo
-                || itemSpace == InventoryListType.QuickSlot;
-        }
-
-        private static void EnsureCommonUpdateItemSpace(InventoryListType itemSpace)
-        {
-            if (!IsCommonUpdateItemSpace(itemSpace))
-                throw new ArgumentOutOfRangeException(nameof(itemSpace), itemSpace, "Unsupported common item update space.");
-        }
-
-        private static void EnsureAvatarUpdateItemSpace(InventoryListType itemSpace)
-        {
-            if (itemSpace != InventoryListType.Avatar && itemSpace != InventoryListType.Equipment)
-                throw new ArgumentOutOfRangeException(nameof(itemSpace), itemSpace, "Unsupported avatar item update space.");
         }
 
         private static int GetUpdateEntrySize(InventoryListType itemSpace)
@@ -237,7 +131,6 @@ namespace DfoServer.Network.Builders
 
         private static void WriteEmptyEntry(GamePacketWriter writer, short slotIndex, int entrySize)
         {
-            // 空槽刷新先按通用结构测试：slot + item_id=-1 + 剩余字节清零。
             writer.WriteInt16(slotIndex);
             writer.WriteInt32(-1);
             WriteEmptyEntryTail(writer, entrySize);
@@ -248,23 +141,5 @@ namespace DfoServer.Network.Builders
             writer.WriteZeroBytes(entrySize - 6);
         }
 
-        private static void WriteFixedBytes(GamePacketWriter writer, byte[] value, int length)
-        {
-            if (value == null || value.Length == 0)
-            {
-                writer.WriteZeroBytes(length);
-                return;
-            }
-
-            if (value.Length == length)
-            {
-                writer.WriteBytes(value);
-                return;
-            }
-
-            var buffer = new byte[length];
-            Array.Copy(value, 0, buffer, 0, Math.Min(value.Length, length));
-            writer.WriteBytes(buffer);
-        }
     }
 }

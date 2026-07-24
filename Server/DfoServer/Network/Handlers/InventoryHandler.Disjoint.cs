@@ -21,8 +21,39 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] DISJOINT_ITEM raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")} target=({request.ItemSpace},{request.TargetSlotIndex}) disjointSlot={request.DisjointItemSlotIndex} ctx=0x{request.ContextValue:X8}");
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryDisjointItem(cid, aid, request, out var result))
+            var (cid, _) = ResolveOwner(session);
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x001A,
+                    DisjointItemAckBuilder.BuildError(DisjointItemResult.ErrorInvalidTarget)));
+                return;
+            }
+
+            bool hasRewardSpace;
+            int freeMaterialSlots;
+            ItemSlotRange materialRange;
+            DisjointItemResult result = null;
+            bool ok;
+            lock (lease.SyncRoot)
+            {
+                hasRewardSpace = InventorySpaceCheckService.HasEnoughMaterialFreeSlots(
+                    lease.Inventory,
+                    out freeMaterialSlots,
+                    out materialRange);
+
+                ok = hasRewardSpace
+                    && InventoryDisjointService.TryDisjointItem(lease.Inventory, request, out result);
+            }
+
+            if (!hasRewardSpace)
+            {
+                FileLogger.Log($"[{ProtocolName}] DISJOINT_ITEM: FAILED material free slots insufficient free={freeMaterialSlots} required={InventorySpaceCheckService.RequiredFreeMaterialRewardSlots} range={materialRange.Start}-{materialRange.End}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x001A,
+                    DisjointItemAckBuilder.BuildError(DisjointItemResult.ErrorInventoryFull)));
+                return;
+            }
+
+            if (!ok)
             {
                 var errorCode = result != null ? result.ErrorCode : DisjointItemResult.ErrorInvalidTarget;
                 FileLogger.Log($"[{ProtocolName}] DISJOINT_ITEM: FAILED error=0x{errorCode:X2} target=({request.ItemSpace},{request.TargetSlotIndex})");

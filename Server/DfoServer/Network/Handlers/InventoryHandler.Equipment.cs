@@ -21,9 +21,28 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] ENCHANT_BY_BEAD raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")} bead=({request.BeadListType},{request.BeadSlotIndex}) target=({request.TargetListType},{request.TargetSlotIndex})");
 
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
             var command = request.ToCommand();
-            if (!_inventoryStore.TryEnchantByBead(cid, aid, command, out var result))
+            if (command.TargetListType == InventoryListType.Pet)
+            {
+                await HandlePetCreatureEnchantByBead(session, command, cid);
+                return;
+            }
+
+            EnchantByBeadResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TryEnchantByBead(lease.Inventory, command, out result);
+            }
+            else
+            {
+                ok = false;
+                result = EnchantByBeadResult.Error(command, EnchantByBeadResult.ErrorInvalidTarget);
+            }
+
+            if (!ok)
             {
                 var errorCode = result != null ? result.ErrorCode : EnchantByBeadResult.ErrorInvalidBead;
                 FileLogger.Log($"[{ProtocolName}] ENCHANT_BY_BEAD: FAILED error=0x{errorCode:X2}");
@@ -43,6 +62,38 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log($"[{ProtocolName}] ENCHANT_BY_BEAD: OK target=({request.TargetListType},{request.TargetSlotIndex}) enchantCard=0x{result.EnchantCardItemId:X8}");
         }
 
+        private async Task HandlePetCreatureEnchantByBead(
+            EnhancedClientSession session,
+            EnchantByBeadCommand command,
+            int characterId)
+        {
+            EnchantByBeadResult result;
+            var ok = false;
+            if (InventoryContext.TryGetLease(characterId, out var lease) && lease.IsOwnedBy(session.SessionId))
+            {
+                lock (lease.SyncRoot)
+                    ok = PetCreatureEnchantService.TryEnchantByBead(lease.Inventory, command, out result);
+            }
+            else
+            {
+                result = EnchantByBeadResult.Error(command, EnchantByBeadResult.ErrorInvalidTarget);
+            }
+
+            if (!ok)
+            {
+                var errorCode = result != null ? result.ErrorCode : EnchantByBeadResult.ErrorInvalidTarget;
+                FileLogger.Log($"[{ProtocolName}] ENCHANT_BY_BEAD pet: FAILED error=0x{errorCode:X2}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0110, EnchantByBeadAckBuilder.BuildError(errorCode)));
+                return;
+            }
+
+            await _refresh.SendUpdateItemList(session, result.TargetListType, result.TargetSlotIndex);
+            await _refresh.SendUpdateItemList(session, result.BeadListType, result.BeadSlotIndex);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0110, EnchantByBeadAckBuilder.BuildSuccess(result)));
+
+            FileLogger.Log($"[{ProtocolName}] ENCHANT_BY_BEAD pet: OK target=({command.TargetListType},{command.TargetSlotIndex}) enchantCard=0x{result.EnchantCardItemId:X8}");
+        }
+
         public async Task Handle_ENUM_CMDPACKET_UPGRADE_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             if (!ItemUpgradeRequest.TryParse(body, out var request))
@@ -54,9 +105,40 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")} mode={request.Mode} target=({request.TargetSlotIndex},0x{request.TargetItemTemplateId:X8}) materialSlot={request.MaterialSlotIndex} optSlot={request.OptionalTicketSlotIndex} name={request.TargetItemName}");
 
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
             var command = request.ToCommand();
-            if (!_inventoryStore.TryUpgradeItem(cid, aid, command, out var result))
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0050,
+                    ItemUpgradeAckBuilder.BuildError(ItemUpgradeResult.ErrorInvalidTarget)));
+                return;
+            }
+
+            bool hasRewardSpace;
+            int freeMaterialSlots;
+            ItemSlotRange materialRange;
+            ItemUpgradeResult result = null;
+            bool ok;
+            lock (lease.SyncRoot)
+            {
+                hasRewardSpace = InventorySpaceCheckService.HasEnoughMaterialFreeSlots(
+                    lease.Inventory,
+                    out freeMaterialSlots,
+                    out materialRange);
+
+                ok = hasRewardSpace
+                    && InventoryItemUpgradeService.TryUpgradeItem(lease.Inventory, command, out result);
+            }
+
+            if (!hasRewardSpace)
+            {
+                FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: FAILED material free slots insufficient free={freeMaterialSlots} required={InventorySpaceCheckService.RequiredFreeMaterialRewardSlots} range={materialRange.Start}-{materialRange.End}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0050,
+                    ItemUpgradeAckBuilder.BuildError(ItemUpgradeResult.ErrorInventoryFull)));
+                return;
+            }
+
+            if (!ok)
             {
                 var errorCode = result != null ? result.ErrorCode : ItemUpgradeResult.ErrorInvalidTarget;
                 FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: FAILED error={errorCode} mode={request.Mode} targetSlot={request.TargetSlotIndex} materialSlot={request.MaterialSlotIndex}");
@@ -74,8 +156,7 @@ namespace DfoServer.Network.Handlers
 
             if (result.GoldCost > 0)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(result.UpdatedGold)));
+                await _refresh.SendUpdateItemList(session, InventoryListType.Main, InventoryService.MainVirtualCurrencySlotStart);
                 FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: gold refresh queued gold={result.UpdatedGold}");
             }
 
@@ -116,8 +197,21 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryOpenEquipmentSocket(cid, targetSlot, targetItemId, materialSlot, out var result))
+            var (cid, _) = ResolveOwner(session);
+            EquipmentSocketMutationResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TryOpenEquipmentSocket(lease.Inventory, targetSlot, targetItemId, materialSlot, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x031D, new byte[] { 0x00, 0x04 }));
                 return;
@@ -145,10 +239,23 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TrySetEquipmentEmblems(cid, targetSlot, targetItemId, emblems, out var result))
+            var (cid, _) = ResolveOwner(session);
+            EquipmentEmblemMutationResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
             {
-                if (await TryHandleAvatarEmblemAttach(session, 0x031C, targetSlot, targetItemId, emblems, cid, aid))
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TrySetEquipmentEmblems(lease.Inventory, targetSlot, targetItemId, emblems, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
+            {
+                if (await TryHandleAvatarEmblemAttach(session, 0x031C, targetSlot, targetItemId, emblems, cid))
                     return;
 
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x031C, new byte[] { 0x00, 0x04 }));
@@ -171,8 +278,21 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryOpenAvatarSocket(cid, targetSlot, targetItemId, materialSlot, out var result))
+            var (cid, _) = ResolveOwner(session);
+            AvatarSocketMutationResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TryOpenAvatarSocket(lease.Inventory, targetSlot, targetItemId, materialSlot, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x00CE, new byte[] { 0x00, 0x04 }));
                 return;
@@ -201,14 +321,27 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!await TryHandleAvatarEmblemAttach(session, header.type, targetSlot, targetItemId, emblems, cid, aid))
+            var (cid, _) = ResolveOwner(session);
+            if (!await TryHandleAvatarEmblemAttach(session, header.type, targetSlot, targetItemId, emblems, cid))
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, header.type, new byte[] { 0x00, 0x04 }));
         }
 
-        private async Task<bool> TryHandleAvatarEmblemAttach(EnhancedClientSession session, ushort ackType, short targetSlot, int targetItemId, IReadOnlyList<EquipmentEmblemApplyRequest> emblems, int cid, int aid)
+        private async Task<bool> TryHandleAvatarEmblemAttach(EnhancedClientSession session, ushort ackType, short targetSlot, int targetItemId, IReadOnlyList<EquipmentEmblemApplyRequest> emblems, int cid)
         {
-            if (!_inventoryStore.TrySetAvatarEmblems(cid, targetSlot, targetItemId, emblems, out var result))
+            AvatarEmblemMutationResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TrySetAvatarEmblems(lease.Inventory, targetSlot, targetItemId, emblems, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
                 return false;
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, ackType, BuildEmblemAttachAck(targetSlot, targetItemId, emblems.Count)));

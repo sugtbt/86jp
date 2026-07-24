@@ -53,10 +53,4 @@ namespace DfoServer.Game.Lottery
         public int GrantedCount { get; set; }
     }
 
-    internal sealed class LotteryRewardPlan
-    {
-        internal int ItemTemplateId { get; set; }
-
-        internal int Count { get; set; }
-    }
 }

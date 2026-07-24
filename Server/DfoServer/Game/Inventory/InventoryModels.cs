@@ -111,6 +111,8 @@ namespace DfoServer.Game.Inventory
 
         public byte ExtData0 { get; set; }
 
+        public int ExpireTime { get; set; }
+
         public int UpdatedGold { get; set; }
 
         public int UpdatedSp { get; set; }
@@ -148,41 +150,6 @@ namespace DfoServer.Game.Inventory
         public bool PetSatietyChanged { get; set; }
 
         public bool NameTagEquipped { get; set; }
-    }
-
-    public sealed class DungeonInventoryDropPayload
-    {
-        public bool IsGold { get; set; }
-
-        public bool IsStackable { get; set; }
-
-        public int ItemTemplateId { get; set; }
-
-        public int DroppedCount { get; set; }
-
-        public int RemainingCount { get; set; }
-
-        public CommonInventoryItem PacketItem { get; set; }
-
-        public string ItemKind { get; set; } = "unknown";
-
-        public int InstanceValue { get; set; }
-
-        public ushort Durability { get; set; }
-
-        public byte SealFlag { get; set; }
-
-        public byte OptionValue { get; set; }
-
-        public int ExpireTime { get; set; }
-
-        public int Marker16 { get; set; }
-
-        public int PetSerialOrHandle { get; set; }
-
-        public byte EquipmentLockId { get; set; }
-
-        public string ExtraJson { get; set; } = "{}";
     }
 
     public enum PersonalCargoUpgradeTicketStatus

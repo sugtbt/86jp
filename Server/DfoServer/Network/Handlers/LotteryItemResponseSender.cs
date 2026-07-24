@@ -14,21 +14,17 @@ namespace DfoServer.Network.Handlers
     {
         private const string ProtocolName = "GameProtocol";
 
-        private readonly IInventoryStore _inventoryStore;
         private readonly LotteryDoubleRewardPolicy _doubleRewardPolicy;
         private readonly InventoryRefreshSender _refresh;
         private readonly string _connectionString;
         private readonly Func<byte[], Task> _broadcastGamePacket;
 
         public LotteryItemResponseSender(
-            IInventoryStore inventoryStore,
             LotteryDoubleRewardPolicy doubleRewardPolicy,
             InventoryRefreshSender refresh,
             string connectionString,
             Func<byte[], Task> broadcastGamePacket = null)
         {
-            _inventoryStore = inventoryStore
-                ?? throw new ArgumentNullException(nameof(inventoryStore));
             _doubleRewardPolicy = doubleRewardPolicy
                 ?? throw new ArgumentNullException(nameof(doubleRewardPolicy));
             _refresh = refresh ?? throw new ArgumentNullException(nameof(refresh));
@@ -38,19 +34,17 @@ namespace DfoServer.Network.Handlers
             _broadcastGamePacket = broadcastGamePacket;
         }
 
-        public async Task SendOpenResult(
+        internal async Task SendOpenResult(
             EnhancedClientSession session,
-            int characterId,
-            int accountId,
+            InventoryService inventory,
             LotteryOpenResult result)
         {
-            var snapshot = _inventoryStore.LoadCharacterItemListSnapshot(characterId, accountId);
             var displayRewards = LotteryPresentationPolicy.ResolveDisplayRewards(result?.Rewards);
             var mainRewards = displayRewards
                 .Where(reward => reward.ListType == InventoryListType.Main)
                 .ToList();
             var displayReward = displayRewards.FirstOrDefault();
-            var displayItem = LotteryPresentationPolicy.ResolveResultItem(snapshot, displayReward);
+            var displayItem = LotteryPresentationPolicy.ResolveResultCore(inventory, displayReward);
             var displayValue = LotteryPresentationPolicy.ResolveDisplayValue(
                 displayItem,
                 displayReward,
@@ -65,29 +59,29 @@ namespace DfoServer.Network.Handlers
             await SendNativeResult(
                 session,
                 result,
-                snapshot,
+                inventory,
                 displayReward,
                 displayItem,
                 displayValue);
 
-            var refreshRewards = LotteryPresentationPolicy.ResolvePostResultMainRefreshRewards(
+            var refreshRewards = ResolveMainRewardUpdatesAfterNativeResult(
                 displayReward,
                 mainRewards,
                 useDoubleResultFlow);
-            await SendRewardUpdates(session, snapshot, refreshRewards);
+            await SendRewardUpdates(session, refreshRewards);
 
-            var firstNoticeItem = LotteryPresentationPolicy.ResolveResultItem(
-                snapshot,
+            var firstNoticeItem = LotteryPresentationPolicy.ResolveResultCore(
+                inventory,
                 mainRewards.FirstOrDefault());
             await BroadcastNotices(
                 session,
-                snapshot,
+                inventory,
                 mainRewards,
                 firstNoticeItem,
                 suppressDuplicateNotices: !useDoubleResultFlow);
             await SendAvatarOrPetUpdates(session, result.Rewards);
             if (LotteryPresentationPolicy.ShouldSendGoldRefresh(result))
-                await SendGoldRefresh(session, result.UpdatedGold);
+                await _refresh.SendUpdateItemList(session, InventoryListType.Main, 0);
         }
 
         public async Task SendPremiumServiceRefresh(
@@ -119,9 +113,9 @@ namespace DfoServer.Network.Handlers
         private static async Task SendNativeResult(
             EnhancedClientSession session,
             LotteryOpenResult result,
-            CharacterItemListSnapshot snapshot,
+            InventoryService inventory,
             LotteryRewardGrant displayReward,
-            CommonInventoryItem displayItem,
+            ItemCore displayItem,
             int displayValue)
         {
             byte[] resultBody;
@@ -129,12 +123,15 @@ namespace DfoServer.Network.Handlers
             {
                 resultBody = LotteryItemAckBuilder.BuildAvatarItemResult(
                     result?.SourceSlotIndex ?? (short)-1,
-                    LotteryPresentationPolicy.ResolveAvatarResultItem(snapshot, displayReward));
+                    displayReward.SlotIndex,
+                    displayItem,
+                    ResolveAvatarDetail(inventory, displayItem));
             }
             else
             {
                 resultBody = LotteryItemAckBuilder.BuildCommonItemResult(
                     result?.SourceSlotIndex ?? (short)-1,
+                    displayReward?.SlotIndex ?? (short)-1,
                     displayItem,
                     displayValue);
             }
@@ -142,31 +139,44 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x001B, resultBody));
         }
 
-        private static async Task SendRewardUpdates(
+        private async Task SendRewardUpdates(
             EnhancedClientSession session,
-            CharacterItemListSnapshot snapshot,
             IReadOnlyList<LotteryRewardGrant> rewards)
         {
             if (rewards == null || rewards.Count == 0)
                 return;
 
-            var updates = rewards
-                .Select(reward => LotteryPresentationPolicy.FindResultItem(snapshot, reward))
-                .Where(item => item != null)
-                .ToList();
-            if (updates.Count == 0)
+            var slots = rewards
+                .Where(reward => reward != null && reward.ListType == InventoryListType.Main)
+                .Select(reward => reward.SlotIndex)
+                .ToHashSet();
+            if (slots.Count == 0)
                 return;
 
-            var body = ItemListUpdateBuilder.BuildCommonUpdates(updates);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, body));
-            FileLogger.Log($"[{ProtocolName}] USE_LOTTERY_ITEM: refreshed reward slots {string.Join(",", updates.Select(item => $"0x{item.ItemTemplateId:X8}@{item.SlotIndex}"))}");
+            await _refresh.SendUpdateItemList(session, InventoryListType.Main, slots);
+            FileLogger.Log($"[{ProtocolName}] USE_LOTTERY_ITEM: refreshed reward slots {string.Join(",", rewards.Where(reward => reward != null && slots.Contains(reward.SlotIndex)).Select(reward => $"0x{reward.ItemTemplateId:X8}@{reward.SlotIndex}"))}");
+        }
+
+        internal static IReadOnlyList<LotteryRewardGrant> ResolveMainRewardUpdatesAfterNativeResult(
+            LotteryRewardGrant displayReward,
+            IReadOnlyList<LotteryRewardGrant> mainRewards,
+            bool useDoubleResultFlow)
+        {
+            var updates = LotteryPresentationPolicy.ResolvePostResultMainRefreshRewards(
+                    displayReward,
+                    mainRewards,
+                    useDoubleResultFlow)
+                .Where(reward => reward != null)
+                .ToList();
+
+            return updates;
         }
 
         private async Task BroadcastNotices(
             EnhancedClientSession session,
-            CharacterItemListSnapshot snapshot,
+            InventoryService inventory,
             IReadOnlyList<LotteryRewardGrant> mainRewards,
-            CommonInventoryItem firstDisplayItem,
+            ItemCore firstDisplayItem,
             bool suppressDuplicateNotices)
         {
             if (mainRewards == null || mainRewards.Count == 0)
@@ -187,23 +197,25 @@ namespace DfoServer.Network.Handlers
 
                 var item = index == 0
                     ? firstDisplayItem
-                    : LotteryPresentationPolicy.ResolveResultItem(snapshot, mainRewards[index]);
+                    : LotteryPresentationPolicy.ResolveResultCore(
+                        inventory,
+                        mainRewards[index]);
                 await BroadcastNotice(session, item);
             }
         }
 
         private async Task BroadcastNotice(
             EnhancedClientSession session,
-            CommonInventoryItem displayItem)
+            ItemCore displayItem)
         {
             if (_broadcastGamePacket == null
                 || displayItem == null
-                || displayItem.ItemTemplateId <= 0)
+                || displayItem.ItemId <= 0)
             {
                 return;
             }
 
-            var metadata = ItemMetadataResolver.Resolve(displayItem.ItemTemplateId);
+            var metadata = ItemMetadataResolver.Resolve(displayItem.ItemId);
             if (!LotteryPresentationPolicy.IsNoticeEligible(metadata))
                 return;
 
@@ -213,10 +225,10 @@ namespace DfoServer.Network.Handlers
                 if (userUniqueId == 0 && session?.Player?.CharacterId > 0)
                     userUniqueId = (ushort)session.Player.CharacterId;
 
-                var upgradeLevel = (byte)(displayItem.ExtData0 & 0x1F);
+                var upgradeLevel = displayItem.Upgrade;
                 var noticeBody = LotteryItemNoticeBuilder.Build(
                     userUniqueId,
-                    displayItem.ItemTemplateId,
+                    displayItem.ItemId,
                     upgradeLevel);
                 await _broadcastGamePacket(GamePacketEnvelopeBuilder.Build(0x00, 0x0056, noticeBody));
             }
@@ -247,10 +259,12 @@ namespace DfoServer.Network.Handlers
                 await _refresh.SendUpdateItemList(session, InventoryListType.Pet, petSlots);
         }
 
-        private static Task SendGoldRefresh(EnhancedClientSession session, int updatedGold)
+        private static AvatarDetail ResolveAvatarDetail(InventoryService inventory, ItemCore core)
         {
-            var body = ItemListUpdateBuilder.BuildGoldUpdate(updatedGold);
-            return session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, body));
+            if (inventory == null || core == null || core.ItemKind != ItemCore.KindAvatar)
+                return null;
+
+            return inventory.AvatarDetails.GetDetail(core.AvatarUid);
         }
     }
 }
