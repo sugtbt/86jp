@@ -91,12 +91,7 @@ namespace DfoServer
         {
             try
             {
-                _ = GameWorld.GameWorldConfig.PvfArchivePath;
-                GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
-
-                var connectionString = Infrastructure.SqliteDatabaseBootstrap.Initialize(
-                    Infrastructure.ServerPaths.DatabasePath,
-                    Infrastructure.ServerPaths.SchemaFilePath);
+                var connectionString = InitializeInventoryMigrationConnectionString();
                 using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(connectionString))
                 {
                     connection.Open();
@@ -113,9 +108,70 @@ namespace DfoServer
             }
         }
 
+        private static int RebuildInventoryDerivedTables()
+        {
+            try
+            {
+                var connectionString = InitializeInventoryMigrationConnectionString();
+                using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(connectionString))
+                {
+                    connection.Open();
+
+                    Game.Inventory.InventoryNewItemMigrationService.Migrate(connection);
+                    Game.Inventory.InventoryNewItemMigrationService.MigrateMainVirtualCurrencySlots(connection);
+
+                    ClearTable(connection, "character_new_titlebook");
+                    Game.TitleBook.CharacterTitleBookRepository.MigrateLegacyToNewTable(connection);
+
+                    ClearTable(connection, "character_name_tag_state");
+                    Game.Inventory.NameTagStateRepository.EnsureTableAndMigrateLegacy(connection);
+
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        Game.Inventory.AvatarDetailRepository.EnsureAvatarUidSequence(connection, transaction);
+                        Game.Inventory.CreatureDetailRepository.EnsureCreatureUidSequence(connection, transaction);
+                        transaction.Commit();
+                    }
+                }
+
+                Console.WriteLine($"[InventoryMigration] rebuilt inventory derived tables from legacy tables: {Infrastructure.ServerPaths.DatabasePath}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[InventoryMigration] rebuild derived tables failed: {ex}");
+                return 1;
+            }
+        }
+
+        private static string InitializeInventoryMigrationConnectionString()
+        {
+            _ = GameWorld.GameWorldConfig.PvfArchivePath;
+            GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
+
+            return Infrastructure.SqliteDatabaseBootstrap.Initialize(
+                Infrastructure.ServerPaths.DatabasePath,
+                Infrastructure.ServerPaths.SchemaFilePath);
+        }
+
+        private static void ClearTable(Microsoft.Data.Sqlite.SqliteConnection connection, string tableName)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = "DELETE FROM " + tableName + ";";
+                command.ExecuteNonQuery();
+            }
+        }
+
         static void Main(string[] args)
         {
             args ??= Array.Empty<string>();
+
+            if (Array.IndexOf(args, "--rebuild-inventory-derived-tables") >= 0)
+            {
+                Environment.Exit(RebuildInventoryDerivedTables());
+                return;
+            }
 
             if (Array.IndexOf(args, "--rebuild-inventory-new-items") >= 0)
             {
