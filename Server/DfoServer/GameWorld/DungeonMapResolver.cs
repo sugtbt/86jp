@@ -76,6 +76,16 @@ namespace DfoServer.GameWorld
         {
             var maplst = Dungeon.LoadLstFile(Path.Combine("map", "map.lst"));
             var loaded = Dungeon.LoadDungeonFileWithPath(dungeonId);
+
+            if (loaded.File.TowerOfDespair > 0)
+            {
+                var towerMapId = Dungeon.TryGetTowerOfDespairFloor(dungeonId, out var floor)
+                    ? ResolveTowerOfDespairMapId(maplst, floor)
+                    : -1;
+                if (towerMapId > 0)
+                    return towerMapId;
+            }
+
             var mapDirCandidates = Dungeon.BuildMapDirCandidates(maplst, maze, loaded.FilePath);
 
             var effectiveBoss = bossPos ?? (maze.BossMap != null && maze.BossMap.Length >= 2
@@ -87,6 +97,23 @@ namespace DfoServer.GameWorld
             bool isQuestConnected = maze.QuestConnection != null && maze.QuestConnection.Length >= 2;
 
             var index = GetOrBuildIndex(dungeonId, maplst, mapDirCandidates);
+
+            // A boss specification belongs to the selected maze, while the directory
+            // index is shared by every maze in the dungeon. Resolve the maze-local
+            // declaration first so another maze's boss file at the same coordinate
+            // cannot be selected from the shared index.
+            if (isBossRoom)
+            {
+                var explicitBossMapId = ResolveFromMapSpecification(
+                    maplst,
+                    maze,
+                    x,
+                    y,
+                    isBossRoom: true,
+                    allowMapTypeForBossRoom: false);
+                if (explicitBossMapId > 0)
+                    return explicitBossMapId;
+            }
 
             // For non-quest start/boss rooms, a typed directory file at the exact
             // coordinate takes priority over generic MapSpecification (the start/boss
@@ -230,9 +257,36 @@ namespace DfoServer.GameWorld
             }
         }
 
+        private static int ResolveTowerOfDespairMapId(LstFile maplst, int floor)
+        {
+            if (maplst == null || floor <= 0)
+                return -1;
+
+            var expectedMapSuffix = $"despair{floor:000}.map";
+            foreach (var entry in maplst.Entries)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.FilePath))
+                    continue;
+
+                var normalizedPath = entry.FilePath.Replace('\\', '/');
+                if ((normalizedPath.StartsWith("towerofdespair_down/", StringComparison.OrdinalIgnoreCase)
+                     || normalizedPath.StartsWith("towerofdespair_up/", StringComparison.OrdinalIgnoreCase))
+                    && normalizedPath.EndsWith(expectedMapSuffix, StringComparison.OrdinalIgnoreCase))
+                    return entry.Id;
+            }
+
+            return -1;
+        }
+
         // --- Step 1: MapSpecification ---
 
-        private static int ResolveFromMapSpecification(LstFile maplst, MazeInfo maze, int x, int y, bool isBossRoom)
+        private static int ResolveFromMapSpecification(
+            LstFile maplst,
+            MazeInfo maze,
+            int x,
+            int y,
+            bool isBossRoom,
+            bool allowMapTypeForBossRoom = true)
         {
             if (maze.MapSpecifications == null || maze.MapSpecifications.Count == 0)
                 return -1;
@@ -247,7 +301,8 @@ namespace DfoServer.GameWorld
                     if (item.X != x || item.Y != y) continue;
                     var specType = item.Type ?? string.Empty;
                     if (!string.Equals(specType, "boss", StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(specType, "map", StringComparison.OrdinalIgnoreCase))
+                        && !(allowMapTypeForBossRoom
+                            && string.Equals(specType, "map", StringComparison.OrdinalIgnoreCase)))
                         continue;
 
                     var candidates = item.MapCandidates != null && item.MapCandidates.Length > 0

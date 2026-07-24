@@ -9,6 +9,7 @@ namespace DfoServer.GameWorld
     {
         public int DungeonId { get; set; }
         public int QuestId { get; set; }
+        public bool HasExplicitQuestId { get; set; }
         public bool InProgressOnly { get; set; }
     }
 
@@ -200,15 +201,17 @@ namespace DfoServer.GameWorld
                         i += markerTokenCount;
                     }
 
-                    if (i >= tokens.Count || !int.TryParse(tokens[i], out var questId))
-                        questId = -1;
-                    else
+                    var questId = -1;
+                    var hasExplicitQuestId =
+                        i < tokens.Count && int.TryParse(tokens[i], out questId);
+                    if (hasExplicitQuestId)
                         i++;
 
                     area.Dungeons.Add(new WorldMapDungeonEntry
                     {
                         DungeonId = dungeonId,
                         QuestId = questId,
+                        HasExplicitQuestId = hasExplicitQuestId,
                         InProgressOnly = inProgressOnly,
                     });
                 }
@@ -237,6 +240,7 @@ namespace DfoServer.GameWorld
                     {
                         DungeonId = dungeonId,
                         QuestId = questId,
+                        HasExplicitQuestId = true,
                         InProgressOnly = true,
                     });
                 }

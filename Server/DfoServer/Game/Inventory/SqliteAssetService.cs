@@ -26,6 +26,19 @@ namespace DfoServer.Game.Inventory
         }
 
         public bool TryAddItem(DbScope scope, int itemTemplateId, int count, out short assignedSlot)
+            => TryAddItem(
+                scope,
+                itemTemplateId,
+                count,
+                ItemPlacementHint.Natural,
+                out assignedSlot);
+
+        public bool TryAddItem(
+            DbScope scope,
+            int itemTemplateId,
+            int count,
+            ItemPlacementHint placementHint,
+            out short assignedSlot)
         {
             assignedSlot = -1;
             var storage = AssetRouter.Classify(itemTemplateId);
@@ -38,6 +51,17 @@ namespace DfoServer.Game.Inventory
                     return true;
 
                 case AssetStorage.CharacterItem:
+                    if (placementHint == ItemPlacementHint.QuestInventory)
+                    {
+                        return _store.TryPickupQuestItemCore(
+                            scope.Connection,
+                            scope.Transaction,
+                            scope.CharacterId,
+                            itemTemplateId,
+                            count,
+                            out assignedSlot);
+                    }
+
                     return _store.TryPickupItemCore(
                         scope.Connection, scope.Transaction,
                         scope.CharacterId, scope.AccountId,

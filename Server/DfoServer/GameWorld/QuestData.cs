@@ -937,6 +937,12 @@ namespace DfoServer.GameWorld
             return IsSeekAndMeetNpcQuest(GetQuestFile(questId));
         }
 
+        internal static bool IsMeetNpcQuest(int questId)
+        {
+            var tag = NormalizeQuestTag(GetQuestFile(questId)?.Type);
+            return tag == "meet npc" || tag == "seek n meet npc";
+        }
+
         private static bool IsSeekAndMeetNpcQuest(QuestFile qst)
         {
             return NormalizeQuestTag(qst?.Type) == "seek n meet npc";

@@ -248,7 +248,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 await PetCreatureRuntimeService.GrantRoomClearExperienceOnceAsync(session, clearedRoomState, 1);
 
-                if ((ccType1 || endPoint) && !run.IgnoreDefaultDungeonClear)
+                if (ShouldClearDungeon(
+                    ccType1,
+                    endPoint,
+                    run.IgnoreDefaultDungeonClear))
                     await _settlement.TryClearDungeon(session, $"prepare_dungeon_clear ccType1={ccType1} endPoint={endPoint}", killedMonsterCode);
 
                 FileLogger.Log($"[DungeonHandler] ROOM CLEARED: dungeon={run.DungeonId} room=({run.RoomKey.X},{run.RoomKey.Y}) map={currentMapId} killedBlocking={killedBlockingCount}/{blockingCount} killedTotal={run.RoomKilledSeqIds.Count}");
@@ -283,9 +286,31 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (run.ClearCondition != null)
             {
                 int ccType = IsBossActorType(killedMonsterType) ? 4 : (killedMonsterType >= 5 ? 3 : 2);
-                if (run.ClearCondition.Check(ccType, killedMonsterCode)
-                    && !run.IgnoreDefaultDungeonClear)
+                if (ShouldClearDungeon(
+                    run.ClearCondition.Check(ccType, killedMonsterCode),
+                    false,
+                    run.IgnoreDefaultDungeonClear))
                     await _settlement.TryClearDungeon(session, $"ClearCondition type={ccType} target={killedMonsterCode}", killedMonsterCode);
+            }
+
+            if (TryGetCurrentRoomState(session, out var timeSpiralRoomState)
+                && TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
+                    run,
+                    timeSpiralRoomState,
+                    req.LocalIndex,
+                    killedMonsterCode))
+            {
+                FileLogger.Log(
+                    $"[TimeSpiral] hidden boss killed: " +
+                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                    $"room=({timeSpiralRoomState.Maze.X},{timeSpiralRoomState.Maze.Y}) " +
+                    $"map={timeSpiralRoomState.Maze.Index} seq={req.LocalIndex} " +
+                    $"code={killedMonsterCode} path={run.TimeSpiralHiddenBossSource}");
+                await _settlement.TryClearDungeon(
+                    session,
+                    $"TimeSpiral hidden boss seq={run.TimeSpiralHiddenBossSeqId} " +
+                    $"code={run.TimeSpiralHiddenBossCode}",
+                    killedMonsterCode);
             }
 
             // 诊断(组队通关排查): boss 类怪被杀却仍未 Cleared 时, 打印全量决策输入。
@@ -381,7 +406,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             var run = bs.Player?.CurrentRun;
             if (run == null || run.Phase != DungeonRunPhase.InProgress) return;
 
-            bool doPrepareClear = false, doCondClear = false;
+            bool doPrepareClear = false;
+            bool doCondClear = false;
+            bool doTimeSpiralClear = false;
             bool endPoint = false; bool ccType1 = false; int ccType = 0; int kCode = 0;
             lock (run.SyncRoot)
             {
@@ -402,23 +429,35 @@ namespace DfoServer.Network.Handlers.Dungeon
                     kCode = monsters[roomLocalIndex].Code;
                 }
 
+                TryGetCurrentRoomState(bs, out var currentRoomState);
+                doTimeSpiralClear =
+                    TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
+                        run,
+                        currentRoomState,
+                        seqId,
+                        kCode);
+
                 if (roomCleared)
                 {
-                    TryGetCurrentRoomState(bs, out var roomState);   // 读 run.RoomStates, 必须在锁内(与 bs 换房写互斥)
+                    var roomState = currentRoomState;
                     if (roomState != null && run.BossMapPos != null && run.BossMapPos.Length >= 2)
                         endPoint = roomState.Maze.X == run.BossMapPos[0] && roomState.Maze.Y == run.BossMapPos[1];
                     int currentMapId = roomState != null ? roomState.Maze.Index : 0;
                     ccType1 = run.ClearCondition != null && run.ClearCondition.Check(1, currentMapId);
-                    doPrepareClear =
-                        (ccType1 || endPoint) && !run.IgnoreDefaultDungeonClear;
+                    doPrepareClear = ShouldClearDungeon(
+                        ccType1,
+                        endPoint,
+                        run.IgnoreDefaultDungeonClear);
                     FileLogger.Log($"[DungeonHandler] PARTY_RELAY_CLEAR cid={bs.Player.CharacterId} seqId={seqId} roomCleared={roomCleared} blocking={killedBlockingCount}/{blockingCount} endPoint={endPoint} ccType1={ccType1} phase={run.Phase}");
                 }
 
                 if (run.ClearCondition != null && run.Phase == DungeonRunPhase.InProgress)
                 {
                     ccType = IsBossActorType(kType) ? 4 : (kType >= 5 ? 3 : 2);
-                    doCondClear = run.ClearCondition.Check(ccType, kCode)
-                        && !run.IgnoreDefaultDungeonClear;
+                    doCondClear = ShouldClearDungeon(
+                        run.ClearCondition.Check(ccType, kCode),
+                        false,
+                        run.IgnoreDefaultDungeonClear);
                 }
             }
 
@@ -427,6 +466,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 await _settlement.TryClearDungeon(bs, $"party-relayed roomCleared endPoint={endPoint} ccType1={ccType1}", kCode);
             if (doCondClear)
                 await _settlement.TryClearDungeon(bs, $"party-relayed ClearCondition type={ccType} target={kCode}", kCode);
+            if (doTimeSpiralClear)
+                await _settlement.TryClearDungeon(
+                    bs,
+                    $"party-relayed TimeSpiral hidden boss " +
+                    $"seq={run.TimeSpiralHiddenBossSeqId} " +
+                    $"code={run.TimeSpiralHiddenBossCode}",
+                    kCode);
         }
 
         // 组队击杀经验: exp=raw gainedExp(纯怪物量), 每个队友用【自己等级 vs monsterLevel】各自缩放
@@ -474,6 +520,15 @@ namespace DfoServer.Network.Handlers.Dungeon
         private static bool IsBossActorType(byte monsterType)
         {
             return monsterType == 3 || monsterType == 8;
+        }
+
+        internal static bool ShouldClearDungeon(
+            bool explicitClearConditionMatched,
+            bool reachedBossEndpoint,
+            bool ignoreDefaultDungeonClear)
+        {
+            return explicitClearConditionMatched
+                || (reachedBossEndpoint && !ignoreDefaultDungeonClear);
         }
 
         private static int GetRewardMonsterType(byte monsterType)

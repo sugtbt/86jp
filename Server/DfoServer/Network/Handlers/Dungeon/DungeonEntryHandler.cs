@@ -84,9 +84,29 @@ namespace DfoServer.Network.Handlers.Dungeon
                         FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ENTER_SELECT_DUNGEON ERROR: record={record != null} addition={addition != null}, USERINFO not sent (no fallback)");
                     }
                 }
+
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0003, EnterSelectDungeonStateBuilder.BuildUserState(session.Player)));
+
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x001A, UdpHostBuilder.BuildUnavailable()));
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x001B, EnterSelectDungeonStateBuilder.BuildEnterSelectDungeon(session.Player)));
+                var towerOfDespairFloor = 1;
+                if (!_svc.TowerOfDespairProgress.TryGetNextFloor(
+                        session.Player.CharacterId,
+                        out towerOfDespairFloor,
+                        out var towerProgressError))
+                {
+                    FileLogger.Log(
+                        $"[{DungeonSharedServices.ProtocolLogName}] " +
+                        $"ENTER_SELECT_DUNGEON tower floor fallback: " +
+                        $"cid={session.Player.CharacterId} " +
+                        $"error={towerProgressError?.Message}");
+                }
+                await _svc.AntonNormal.RestoreBeforeSelectAsync(session);
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    0x001B,
+                    EnterSelectDungeonStateBuilder.BuildEnterSelectDungeon(
+                        session.Player,
+                        towerOfDespairFloor)));
                 await _svc.GrowthCapsuleSync.SendExpProgressAsync(
                     session, "enter-select-dungeon", honor: honorSummary);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ENTER_SELECT_DUNGEON: state packets and account EXP progress sent OK");
@@ -100,6 +120,25 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal async Task HandleSelectDungeon(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var req = Network.Parsers.Dungeon.SelectDungeonRequest.Parse(body);
+            try
+            {
+                var resolvedDungeonId = _svc.TowerOfDespairProgress.ResolveEntryDungeonId(
+                    session.Player.CharacterId,
+                    req.DungeonId);
+                if (resolvedDungeonId != req.DungeonId)
+                {
+                    FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] TOWER_OF_DESPAIR_ENTRY: cid={session.Player.CharacterId} requested={req.DungeonId} resolved={resolvedDungeonId}");
+                    req = new Network.Parsers.Dungeon.SelectDungeonRequest(
+                        (ushort)resolvedDungeonId,
+                        req.Difficulty,
+                        req.Flag1,
+                        req.Flag2);
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] TOWER_OF_DESPAIR_ENTRY ERROR: cid={session.Player.CharacterId} requested={req.DungeonId}: {ex.Message}");
+            }
 
             // 塔类副本分流: dungeonKind==1 走专属流程(NOTI 142+143, 非普通副本的 START_MAP)
             if (_svc.DeathTower.TryCreateSession(req.DungeonId, out var tower))
@@ -162,6 +201,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 selection.Maze,
                 bossPos,
                 activeQuests);
+            ConfigureLinkedDungeonRunState(req.DungeonId, run);
             DungeonRunLifecycle.StartSpecialDungeonTimer(
                 session,
                 "select_dungeon");
@@ -176,6 +216,47 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             // ★组队副本联机: 队长进本时把整队队员也驱动进【同一实例】。⚠️待真机验证(见 DFO_PARTY_DUNGEON_COOP)。
             await TryFanOutDungeonEntryToPartyAsync(session, header, req, bossPos, (byte)selection.Index);
+        }
+
+        internal async Task EnterLinkedDungeonAsync(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            int dungeonId,
+            byte difficulty)
+        {
+            if (session?.Player == null
+                || dungeonId <= 0
+                || dungeonId > ushort.MaxValue)
+            {
+                return;
+            }
+
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] " +
+                $"LINKED_DUNGEON enter next: " +
+                $"cid={session.Player.CharacterId} " +
+                $"dungeon={dungeonId} diff={difficulty}");
+            await HandleSelectDungeon(
+                session,
+                header,
+                BuildLinkedDungeonSelectBody(dungeonId, difficulty));
+        }
+
+        internal static byte[] BuildLinkedDungeonSelectBody(
+            int dungeonId,
+            byte difficulty)
+        {
+            if (dungeonId <= 0 || dungeonId > ushort.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(dungeonId));
+
+            return new[]
+            {
+                (byte)(dungeonId & 0xFF),
+                (byte)((dungeonId >> 8) & 0xFF),
+                difficulty,
+                (byte)0,
+                (byte)0,
+            };
         }
 
         // 给指定会话发送 SELECT_DUNGEON 出站序列；秘密商店 NPC 上下文只在通关后发送。
@@ -280,6 +361,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                     br.HellMapX = lr.HellMapX;
                     br.HellMapY = lr.HellMapY;
                     br.HellRoomInfo = lr.HellRoomInfo;
+                    br.LinkedDungeonNextId = lr.LinkedDungeonNextId;
+                    br.LinkedDungeonNextRate = lr.LinkedDungeonNextRate;
+                    br.LinkedDungeonNextCondition =
+                        lr.LinkedDungeonNextCondition;
                     SpecialDungeonRunCoordinator.CloneSelectionState(lr, br);
                     bs.Player.UserState = 0x01;
                     DungeonRunLifecycle.StartSpecialDungeonTimer(
@@ -312,6 +397,34 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return requestFlag;
 
             return HellPartyData.PickManualHellPartyMode();
+        }
+
+        private static void ConfigureLinkedDungeonRunState(
+            int dungeonId,
+            DungeonRun run)
+        {
+            if (run == null)
+                return;
+
+            run.LinkedDungeonNextId = 0;
+            run.LinkedDungeonNextRate = 0;
+            run.LinkedDungeonNextCondition = 0;
+
+            if (!DungeonData.IsSpecialLinkedDungeon(dungeonId))
+                return;
+
+            var next = DungeonData.PickLinkedDungeonNext(dungeonId);
+            if (next == null)
+                return;
+
+            run.LinkedDungeonNextId = next.DungeonId;
+            run.LinkedDungeonNextRate = next.Rate;
+            run.LinkedDungeonNextCondition = next.Condition;
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] " +
+                $"LINKED_DUNGEON next selected: dungeon={dungeonId} " +
+                $"next={next.DungeonId} rate={next.Rate} " +
+                $"condition={next.Condition}");
         }
 
         private static bool ParseGorgeousChallengeEnabled(byte[] body)

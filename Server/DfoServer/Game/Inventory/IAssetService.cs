@@ -2,11 +2,28 @@ using DfoServer.Game.Currency;
 
 namespace DfoServer.Game.Inventory
 {
+    public enum ItemPlacementHint
+    {
+        Natural,
+        QuestInventory,
+    }
+
     public interface IAssetService
     {
         DbScope OpenScope(int characterId, int accountId);
 
         bool TryAddItem(DbScope scope, int itemTemplateId, int count, out short assignedSlot);
+        bool TryAddItem(
+            DbScope scope,
+            int itemTemplateId,
+            int count,
+            ItemPlacementHint placementHint,
+            out short assignedSlot)
+            => TryAddItem(
+                scope,
+                itemTemplateId,
+                count,
+                out assignedSlot);
         bool TryRemoveItem(DbScope scope, int itemTemplateId, int count, out short slot, out int remaining);
         int CountItem(DbScope scope, int itemTemplateId);
 

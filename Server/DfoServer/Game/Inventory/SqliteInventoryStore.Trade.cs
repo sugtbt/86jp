@@ -36,6 +36,8 @@ namespace DfoServer.Game.Inventory
             => slot >= QuickSlotStart && slot <= QuickSlotEnd;
         internal const int RentalBagSlotStart = 9;
         internal const int RentalBagSlotEnd = 64;
+        internal const int QuestBagSlotStart = 177;
+        internal const int QuestBagSlotEnd = 232;
 
         // 宠物栏(list 7)"宠物"本体分页槽段(category 5): slot 0..139 共 140 格(实测计数)。
         // 其后 宠物装备=140..188(cat6)、宠物耗品=189..237(cat7)。新购宠物从本页首格开始填。
@@ -163,6 +165,64 @@ namespace DfoServer.Game.Inventory
                 _db, connection, transaction, characterId, placement,
                 itemTemplateId, metadata, stackCount,
                 out assignedSlot, out _, out _);
+        }
+
+        internal bool TryPickupQuestItemCore(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int itemTemplateId,
+            int stackCount,
+            out short assignedSlot)
+        {
+            assignedSlot = -1;
+            var metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+            if (metadata.ItemKind == "special" || !metadata.IsStackable)
+                return false;
+
+            var existing = _db.FindItemByTemplateIdInRange(
+                connection,
+                transaction,
+                characterId,
+                InventoryListType.Main,
+                itemTemplateId,
+                QuestBagSlotStart,
+                QuestBagSlotEnd);
+            if (existing != null
+                && (metadata.StackLimit <= 0
+                    || existing.StackCount + stackCount <= metadata.StackLimit))
+            {
+                _db.UpdateStackCount(
+                    connection,
+                    transaction,
+                    existing.ItemUid,
+                    existing.StackCount + stackCount);
+                assignedSlot = existing.SlotIndex;
+                return true;
+            }
+
+            var placement = ItemIntake.ResolvePlacement(
+                itemTemplateId,
+                metadata);
+            placement.ListType = InventoryListType.Main;
+            placement.SlotStart = QuestBagSlotStart;
+            placement.SlotEnd = QuestBagSlotEnd;
+            placement.IsCreature = false;
+            placement.IsPetArtifact = false;
+            placement.IsPetConsumable = false;
+
+            return ItemIntake.TryInsertNewRow(
+                _db,
+                connection,
+                transaction,
+                characterId,
+                placement,
+                itemTemplateId,
+                metadata,
+                stackCount,
+                out assignedSlot,
+                out _,
+                out _);
         }
 
         public bool TrySellItem(int characterId, int accountId, InventoryListType listType, short slotIndex, short sellCount, out InventoryMutationResult result)

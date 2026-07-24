@@ -74,21 +74,24 @@ namespace DfoServer.Game.Quests
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildGiveup(result));
         }
 
-        public async Task HandleSetTriggerAsync(ushort wireType, byte[] body)
+        public async Task<QuestSetTriggerResult> HandleSetTriggerAsync(
+            ushort wireType,
+            byte[] body)
         {
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
-            if (cid <= 0) return;
+            if (cid <= 0) return null;
 
             QuestSetTriggerResult deferred;
             if (TryBuildDeferredClearMapSetTrigger(cid, qBody, out deferred))
             {
                 await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildSetTrigger(deferred));
-                return;
+                return deferred;
             }
 
             var result = _service.HandleSetTrigger(cid, qBody);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildSetTrigger(result));
+            return result;
         }
 
         public async Task HandleFinishQuestAsync(ushort wireType, byte[] body)
@@ -310,7 +313,12 @@ namespace DfoServer.Game.Quests
             if (quest == null || quest.TriggerValue == 0)
                 return false;
 
-            result = new QuestSetTriggerResult { QuestId = questId, TriggerValue = quest.TriggerValue };
+            result = new QuestSetTriggerResult
+            {
+                QuestId = questId,
+                PreviousTriggerValue = quest.TriggerValue,
+                TriggerValue = quest.TriggerValue,
+            };
             FileLogger.Log($"[QuestManager] SET_TRIGGER deferred clear-map start target: cid={characterId} quest={questId} trigger={quest.TriggerValue} dungeon={run.DungeonId} maze={run.MazeIndex} map={run.MazeStartMapId}");
             return true;
         }

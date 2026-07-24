@@ -28,6 +28,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal Game.ReviveCoin.ReviveCoinService ReviveCoin { get; }
         internal Game.DeathTower.DeathTowerHandler DeathTower { get; }
         internal Game.Quests.QuestDropService QuestDrops { get; }
+        internal AntonNormalConquestNotifier AntonNormal { get; }
 
         // 副本域用到的仓储集中在这里构造一次, 各方法不再就地 new。
         internal SqliteCharacterRepository CharacterRepository { get; }
@@ -39,6 +40,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal AccountExperienceProgressService AccountExperience { get; }
         internal GrowthCapsuleSyncService GrowthCapsuleSync { get; }
         internal CharacterExperienceService CharacterExperience { get; }
+        internal Game.Dungeon.TowerOfDespairProgressService TowerOfDespairProgress { get; }
 
         // 组队副本联机用: 检测队伍 + 定位队员会话(可空; 未接线时副本 fan-out 优雅跳过=单人不回归)。
         internal Game.Party.PartyManager PartyManager { get; }
@@ -67,6 +69,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             QuestDrops = questDropService ?? new Game.Quests.QuestDropService(assetService, inventoryRefresh);
             Subtype1Repository = new SqliteSubtype1Repository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             CharacterStateRepository = new SqliteCharacterStateRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
+            AntonNormal = new AntonNormalConquestNotifier(
+                CharacterStateRepository);
             ProgressRepository = new SqliteCharacterProgressRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             Subtype0FieldsRepository = new SqliteSubtype0FieldsRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             HonorLevel = new HonorLevelSyncService(CharacterRepository);
@@ -81,6 +85,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 accountExperience: AccountExperience,
                 sendInDungeonLevelUpFollowups: SendInDungeonLevelUpFollowups,
                 inventoryRefresh: inventoryRefresh);
+            TowerOfDespairProgress = new Game.Dungeon.TowerOfDespairProgressService(
+                new Game.Dungeon.TowerOfDespairProgressRepository(
+                    ServerPaths.DatabasePath,
+                    ServerPaths.SchemaFilePath));
             CardRewards = new Game.Dungeon.CardRewardService(this, assetService);
             Drops = new Game.Dungeon.DropService(assetService, inventoryStore);
             EntryCost = new Game.Dungeon.DungeonEntryCostService(assetService);

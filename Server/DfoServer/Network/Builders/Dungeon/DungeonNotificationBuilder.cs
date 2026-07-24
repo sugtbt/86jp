@@ -246,6 +246,50 @@ namespace DfoServer.Network.Builders
             return new byte[] { 0x00 };
         }
 
+        public static byte[] BuildLinkedDungeonInfo(
+            int nextDungeonId,
+            int difficulty)
+        {
+            var writer = new GamePacketWriter();
+            writer.WriteInt32(nextDungeonId);
+            writer.WriteInt32(difficulty);
+            return writer.ToArray();
+        }
+
+        public static byte[] BuildTowerOfDespairClearReward(
+            uint clearTimeMilliseconds,
+            int floor,
+            int itemId,
+            int itemCount)
+        {
+            var writer = new GamePacketWriter();
+            writer.WriteUInt32(clearTimeMilliseconds);
+            writer.WriteUInt16((ushort)Math.Clamp(floor, 1, 100));
+
+            var hasItemReward = itemId > 0 && itemCount > 0;
+            writer.WriteByte(hasItemReward ? (byte)1 : (byte)0);
+            if (hasItemReward)
+            {
+                writer.WriteUInt32((uint)itemId);
+                writer.WriteUInt32((uint)itemCount);
+            }
+
+            return writer.ToArray();
+        }
+
+        // A14 SEQUENTIAL_DUNGEON_INFO reads int32 + byte + int32.
+        internal static byte[] BuildSequentialDungeonInfo(
+            int configKey,
+            byte progressIndex,
+            int routeMask)
+        {
+            var writer = new GamePacketWriter();
+            writer.WriteInt32(configKey);
+            writer.WriteByte(progressIndex);
+            writer.WriteInt32(routeMask);
+            return writer.ToArray();
+        }
+
         public static byte[] BuildPlayResult(
             ushort userId,
             int clearTimeMs,

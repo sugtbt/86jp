@@ -72,6 +72,22 @@ namespace DfoServer.Game.Quests
                     QuestDropProvider.EnemyTypeAiCharacter));
         }
 
+        public Task CheckDungeonClearReward(EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run == null || run.DungeonId <= 0)
+                return Task.CompletedTask;
+
+            return CheckDrop(
+                session,
+                run.DungeonId,
+                "dungeon-clear",
+                activeQuestIds => QuestDropProvider.CheckClearReward(
+                    activeQuestIds,
+                    run.DungeonId,
+                    run.Difficulty));
+        }
+
         private async Task CheckDrop(
             EnhancedClientSession session,
             int sourceCode,
@@ -113,7 +129,16 @@ namespace DfoServer.Game.Quests
                 }
 
                 short slot;
-                if (!TryPickupItemToInventory(session.Player.CharacterId, accountId, candidate.ItemId, dropCount, out slot))
+                var placementHint = candidate.PreferQuestInventory
+                    ? ItemPlacementHint.QuestInventory
+                    : ItemPlacementHint.Natural;
+                if (!TryPickupItemToInventory(
+                        session.Player.CharacterId,
+                        accountId,
+                        candidate.ItemId,
+                        dropCount,
+                        placementHint,
+                        out slot))
                 {
                     FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: failed to insert {sourceName}={sourceCode} item={candidate.ItemId} x{dropCount} held={currentHeld}");
                     continue;
@@ -121,7 +146,12 @@ namespace DfoServer.Game.Quests
 
                 grantedItemIds.Add(candidate.ItemId);
                 grantedSlots.Add(slot);
-                FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: {sourceName}={sourceCode} -> item={candidate.ItemId} x{dropCount} slot={slot} (held={currentHeld}->{currentHeld + dropCount})");
+                FileLogger.Log(
+                    $"[{ProtocolLogName}] QUEST_DROP: " +
+                    $"quest={candidate.QuestId} {sourceName}={sourceCode} " +
+                    $"item={candidate.ItemId} x{dropCount} slot={slot} " +
+                    $"placement={placementHint} " +
+                    $"held={currentHeld}->{currentHeld + dropCount}");
             }
 
             if (grantedItemIds.Count <= 0)
@@ -163,14 +193,25 @@ namespace DfoServer.Game.Quests
             }
         }
 
-        private bool TryPickupItemToInventory(int characterId, int accountId, int itemTemplateId, int stackCount, out short assignedSlot)
+        private bool TryPickupItemToInventory(
+            int characterId,
+            int accountId,
+            int itemTemplateId,
+            int stackCount,
+            ItemPlacementHint placementHint,
+            out short assignedSlot)
         {
             assignedSlot = -1;
             try
             {
                 using (var scope = _assetService.OpenScope(characterId, accountId))
                 {
-                    var result = _assetService.TryAddItem(scope, itemTemplateId, stackCount, out assignedSlot);
+                    var result = _assetService.TryAddItem(
+                        scope,
+                        itemTemplateId,
+                        stackCount,
+                        placementHint,
+                        out assignedSlot);
                     if (result) scope.Commit();
                     return result;
                 }

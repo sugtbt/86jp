@@ -214,7 +214,12 @@ namespace DfoServer.Game.Quests
             _repo.UpdateTriggerValue(characterId, q.Slot, newTrigger);
 
             FileLogger.Log($"[QuestService] SET_TRIGGER quest={questId} type=0x{triggerType:X2} inc={isIncrement} trigger={oldTrigger}→{newTrigger}");
-            return new QuestSetTriggerResult { QuestId = questId, TriggerValue = newTrigger };
+            return new QuestSetTriggerResult
+            {
+                QuestId = questId,
+                PreviousTriggerValue = oldTrigger,
+                TriggerValue = newTrigger,
+            };
         }
 
         public bool SyncMonsterRewardItemProgress(int characterId, int accountId, ICollection<int> itemFilter)

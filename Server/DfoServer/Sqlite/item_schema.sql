@@ -640,6 +640,15 @@ CREATE TABLE IF NOT EXISTS character_daily_counters (
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
 
+-- 绝望之塔永久楼层进度。客户端始终请求第一层入口，服务端按最高通关层重定向到下一层。
+CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
+    character_id INTEGER PRIMARY KEY,
+    highest_cleared_floor INTEGER NOT NULL DEFAULT 0
+        CHECK (highest_cleared_floor >= 0 AND highest_cleared_floor <= 100),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS account_settings (
     account_id INTEGER PRIMARY KEY,
     main_game_option BLOB,

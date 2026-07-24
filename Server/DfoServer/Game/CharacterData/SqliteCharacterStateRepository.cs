@@ -236,6 +236,41 @@ VALUES (@cid, (SELECT COALESCE(MAX(sort_order),0)+1 FROM character_dungeon_permi
             }
         }
 
+        public List<DungeonPermissionEntrySnapshot> LoadDungeonPermissions(
+            int characterId)
+        {
+            var result = new List<DungeonPermissionEntrySnapshot>();
+            if (characterId <= 0)
+                return result;
+
+            using (var conn = new SqliteConnection(_connectionString))
+            {
+                conn.Open();
+                using (var cmd = new SqliteCommand(
+                    @"SELECT dungeon_id, clear_state
+                      FROM character_dungeon_permissions
+                      WHERE character_id = @cid
+                      ORDER BY sort_order",
+                    conn))
+                {
+                    cmd.Parameters.AddWithValue("@cid", characterId);
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            result.Add(new DungeonPermissionEntrySnapshot
+                            {
+                                DungeonId = (ushort)reader.GetInt32(0),
+                                ClearState = (byte)reader.GetInt32(1),
+                            });
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
         public void SaveFlags(int characterId, SelectCharacterInitializationSnapshot snapshot)
         {
             using (var conn = new SqliteConnection(_connectionString))

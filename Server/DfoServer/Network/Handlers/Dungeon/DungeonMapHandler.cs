@@ -60,6 +60,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (moveTarget.X != req.NextX || moveTarget.Y != req.NextY)
                 FileLogger.Log($"[DungeonHandler] MOVE_MAP normalized: current=({run.RoomKey.X},{run.RoomKey.Y}) requested=({req.NextX},{req.NextY}) target=({moveTarget.X},{moveTarget.Y}) reason={targetReason}");
 
+            var timeSpiralTeleport =
+                TimeSpiralDungeonCoordinator.ApplyTeleportOverride(
+                    session,
+                    req.NextX,
+                    req.NextY,
+                    ref moveTarget);
+
             int overrideMapId = -1;
 
             if (req.Unknown23 == 1)
@@ -85,13 +92,27 @@ namespace DfoServer.Network.Handlers.Dungeon
                 moveTarget,
                 ref overrideMapId);
             await SendStartMapAsync(session, moveTarget.X, moveTarget.Y, overrideMapId);
+            TimeSpiralDungeonCoordinator.LogDeferredBuff(
+                session,
+                timeSpiralTeleport,
+                "leader_START_MAP");
 
             // ★组队副本联机: 队长移动到下一房间时, 带同队队员一起换图(队员是follower、不自发MOVE_MAP)。
-            await BroadcastMoveMapToPartyAsync(session, moveTarget.X, moveTarget.Y, overrideMapId);
+            await BroadcastMoveMapToPartyAsync(
+                session,
+                moveTarget.X,
+                moveTarget.Y,
+                overrideMapId,
+                timeSpiralTeleport);
         }
 
         // 队长换图时把同队【在副本里】的成员也移到同一房间(服务端驱动, 队员副本=队长迷宫拷贝)。⚠️待真机验证。
-        private async Task BroadcastMoveMapToPartyAsync(EnhancedClientSession leader, int nextX, int nextY, int overrideMapId)
+        private async Task BroadcastMoveMapToPartyAsync(
+            EnhancedClientSession leader,
+            int nextX,
+            int nextY,
+            int overrideMapId,
+            TimeSpiralDungeonCoordinator.TeleportMoveContext timeSpiralTeleport)
         {
             var pm = _svc.PartyManager;
             var sessions = _svc.Sessions;
@@ -108,7 +129,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                 try
                 {
                     bs.Player.CurrentRun.LayeredMapIndex = leader.Player.CurrentRun.LayeredMapIndex;
+                    TimeSpiralDungeonCoordinator.CopyTeleportStateForPartyMove(
+                        leader.Player.CurrentRun,
+                        bs.Player.CurrentRun);
                     await SendStartMapAsync(bs, nextX, nextY, overrideMapId);
+                    TimeSpiralDungeonCoordinator.LogDeferredBuff(
+                        bs,
+                        timeSpiralTeleport,
+                        $"party_START_MAP leader={leader.Player.CharacterId}");
                     FileLogger.Log($"[DungeonHandler] PARTY_MOVE_MAP: 带队员 cid={bs.Player.CharacterId} 到 ({nextX},{nextY})");
                 }
                 catch (System.Exception ex)
@@ -169,6 +197,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 run.RoomLcg = cached.Lcg;
                 run.Seed = cached.Seed;
                 run.RoomKey = roomKey;
+                TimeSpiralDungeonCoordinator.RestoreHiddenBoss(run, cached);
 
                 startMapBody = DungeonNotificationBuilder.BuildStartMapRevisit(cached.Maze, cached.Seed);
                 FileLogger.Log($"[DungeonHandler] START_MAP revisit: room=({maze.X},{maze.Y}) killed={cached.KilledSeqIds.Count}/{cached.MonsterCount} cleared={cached.IsCleared}");
@@ -206,7 +235,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 run.RoomMonsters = startMapMaze.Monsters;
 
-                run.RoomStates[roomKey] = new RoomState
+                var roomState = new RoomState
                 {
                     Maze = startMapMaze,
                     FirstSeqId = run.RoomStartSequence,
@@ -215,6 +244,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                     Seed = seed,
                     Lcg = lcg,
                 };
+                run.RoomStates[roomKey] = roomState;
+                TimeSpiralDungeonCoordinator.RegisterHiddenBossAfterStartMap(
+                    session,
+                    roomState);
 
                 byte layeredFlag = (byte)(effectiveOverrideMapId > 0 ? 1 : 0);
 

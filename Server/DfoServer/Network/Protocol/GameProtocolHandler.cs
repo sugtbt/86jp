@@ -432,6 +432,7 @@ namespace DfoServer.Network
             d[0x0270] = _dungeonHandler.Handle_SPECIAL_SEA_CHASE_OBSERVE;
             d[0x0312] = PremiumQueryHandler.Handle_PREMIUM_SERVICE;                //786
             d[0x03B6] = _dungeonHandler.Handle_ENUM_CMDPACKET_GORGEOUS_CHALLENGE_TOGGLE;
+            d[0x03AB] = _dungeonHandler.Handle_BREAK_TRAP_RESULT;                  //939
             d[0x009F] = _dungeonHandler.Handle_ENUM_CMDPACKET_DEATH_TOWER_STAGE_CMD; // 159
         }
 
@@ -481,7 +482,13 @@ namespace DfoServer.Network
             d[0x0021] = async (s, h, b) => //33
             {
                 if (s.GameSession != null)
-                    await s.GameSession.QuestManager.HandleSetTriggerAsync(h.type, b);
+                {
+                    var result =
+                        await s.GameSession.QuestManager
+                            .HandleSetTriggerAsync(h.type, b);
+                    await _dungeonHandler
+                        .HandleQuestSetTriggerResultAsync(s, result);
+                }
             };
             d[0x0022] = async (s, h, b) => //34
             {

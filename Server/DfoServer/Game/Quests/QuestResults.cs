@@ -40,6 +40,7 @@ namespace DfoServer.Game.Quests
     {
         public byte ErrorCode;
         public ushort QuestId;
+        public uint PreviousTriggerValue;
         public uint TriggerValue;
 
         public bool Success => ErrorCode == 0;

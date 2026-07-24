@@ -434,7 +434,9 @@ namespace PvfLib
                     case "adjust mob exp by level": dgn.AdjustMobExpByLevel = ParseInt(data); break;
                     case "blood max round": dgn.BloodMaxRound = ParseInt(data); break;
                     case "mob level charac level replace flag": dgn.MobLevelCharacLevelReplaceFlag = ParseInt(data); break;
-                    case "tower of despair": dgn.TowerOfDespair = ParseInt(data); break;
+                    case "tower of despair":
+                        dgn.TowerOfDespair = string.IsNullOrWhiteSpace(data) ? 1 : ParseInt(data);
+                        break;
                     case "tower fp cubepiece": dgn.TowerFpCubepiece = ParseInt(data); break;
                     case "tower limit of stackable item": dgn.TowerLimitOfStackableItem = ParseInt(data); break;
                     case "tower max clear item num": dgn.TowerMaxClearItemNum = ParseInt(data); break;
@@ -527,7 +529,7 @@ namespace PvfLib
                     case "common passive object": dgn.CommonPassiveObject = data; break;
                     case "on clear add passive object": dgn.OnClearAddPassiveObject = data; break;
                     case "appendage destory object": dgn.AppendageDestoryObject = data; break;
-                    case "linked dungeon": dgn.LinkedDungeon = data; break;
+                    case "linked dungeon": dgn.LinkedDungeon = ReadRawNodeData(node, text, data); break;
                     case "clear action": dgn.ClearAction = data; break;
                     case "point by type": dgn.PointByType = data; break;
                     case "dungeon exp bonus monster": dgn.DungeonExpBonusMonster = data; break;
@@ -604,6 +606,9 @@ namespace PvfLib
             // Multi-group format: levelOverride flag count [itemId dropRate]... repeated
             // Each group = one stDungeonAssignItem_t entry
             var vals = ParseIntArray(data);
+            if (vals == null || vals.Length < 3)
+                return;
+
             int pos = 0;
             int idx = 0;
             while (pos + 2 < vals.Length)

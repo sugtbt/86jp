@@ -266,10 +266,12 @@ namespace DfoServer.Network.Handlers
             var existing = _characterRepository.GetByName(name);
             if (existing != null)
             {
+                // 20/24 公告 已存在的角色名
+                // 159 公告 包含无法使用的文字
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01,
                     0x02B5,
-                    CommonPacketBodyBuilder.BuildCmdError(0x00)));
+                    CommonPacketBodyBuilder.BuildCmdError(24)));
                 return;
             }
 
@@ -324,7 +326,11 @@ namespace DfoServer.Network.Handlers
 
             if (_characterRepository.GetByName(nameStr) != null)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0005, new byte[] { 0x00 }));
+                // 与 CHECK_DOUBLE_CHARACTER_NAME 一致：24 = 已存在的角色名
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x0005,
+                    CommonPacketBodyBuilder.BuildCmdError(24)));
                 return;
             }
 

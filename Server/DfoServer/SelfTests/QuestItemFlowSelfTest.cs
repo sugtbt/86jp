@@ -33,6 +33,12 @@ namespace DfoServer.SelfTests
         private const int GreenStonePassiveObjectCode = 52853;
         private const int ChessboardDespairDungeonId = 160;
         private const int GreenLightStoneFragmentItemId = 10099811;
+        private const ushort HelixMechanicalFragmentQuestId = 8402;
+        private const ushort HelixMv002QuestId = 8404;
+        private const ushort HelixEnergyDebrisQuestId = 8406;
+        private const int HelixLabDungeonId = 3900;
+        private const int MechanicalFragmentItemId = 10092628;
+        private const int Mv002PartItemId = 10092629;
 
         public static int Run()
         {
@@ -147,6 +153,79 @@ namespace DfoServer.SelfTests
                 greenStoneMonsterCandidates == null,
                 ref failures);
 
+            var mechanicalFragmentQuest =
+                QuestData.GetQuestFile(HelixMechanicalFragmentQuestId);
+            Check(
+                "Helix mechanical fragment clear reward parses",
+                mechanicalFragmentQuest != null
+                    && mechanicalFragmentQuest.ClearRewardItems.Exists(
+                        entry =>
+                            entry.DungeonId == HelixLabDungeonId
+                            && entry.Difficulty == -1
+                            && entry.ItemId == MechanicalFragmentItemId
+                            && entry.Count == 10
+                            && entry.DropRate == 170
+                            && entry.MaxStack == -1),
+                ref failures);
+            Check(
+                "Helix mechanical fragment quest has no per-monster source",
+                mechanicalFragmentQuest != null
+                    && mechanicalFragmentQuest.MonsterRewardItems.Count == 0,
+                ref failures);
+
+            var energyDebrisQuest =
+                QuestData.GetQuestFile(HelixEnergyDebrisQuestId);
+            Check(
+                "Helix energy debris quest owns the per-monster source",
+                energyDebrisQuest != null
+                    && energyDebrisQuest.MonsterRewardItems.Count == 33
+                    && energyDebrisQuest.MonsterRewardItems.TrueForAll(
+                        entry =>
+                            entry.MonsterCode >= 64900
+                            && entry.MonsterCode <= 64932
+                            && entry.DungeonId == HelixLabDungeonId
+                            && entry.Difficulty == -1
+                            && entry.ItemId == MechanicalFragmentItemId
+                            && entry.Count == 1
+                            && entry.DropRate == 50
+                            && entry.MaxStack == 10),
+                ref failures);
+
+            var mv002Candidates = QuestDropProvider.CheckClearReward(
+                new[] { (int)HelixMv002QuestId },
+                HelixLabDungeonId,
+                0);
+            Check(
+                "MV-002 clear reward targets quest inventory",
+                mv002Candidates != null
+                    && mv002Candidates.Count == 1
+                    && mv002Candidates[0].QuestId == HelixMv002QuestId
+                    && mv002Candidates[0].ItemId == Mv002PartItemId
+                    && mv002Candidates[0].Count == 1
+                    && mv002Candidates[0].PreferQuestInventory,
+                ref failures);
+
+            using (var scope = assetService.OpenScope(
+                CharacterId,
+                AccountId))
+            {
+                Check(
+                    "quest reward placement uses quest inventory slots",
+                    assetService.TryAddItem(
+                        scope,
+                        Mv002PartItemId,
+                        1,
+                        ItemPlacementHint.QuestInventory,
+                        out var questSlot)
+                        && questSlot >=
+                            SqliteInventoryStore.QuestBagSlotStart
+                        && questSlot <=
+                            SqliteInventoryStore.QuestBagSlotEnd,
+                    ref failures);
+                scope.Commit();
+            }
+            RemoveItem(assetService, Mv002PartItemId, 1);
+
             QuestService.SaveActiveQuests(connStr, CharacterId, new List<ActiveQuest>
             {
                 new ActiveQuest { Slot = 0, QuestId = GiveLetterQuestId, TriggerValue = 0 },
@@ -195,6 +274,11 @@ namespace DfoServer.SelfTests
 
             var setNpcTrigger = questService.HandleSetTrigger(CharacterId, BuildSetTriggerBody(UseLetterQuestId, 0x20, false));
             Check("npc trigger ack succeeds", IsSuccessAck(setNpcTrigger), ref failures);
+            Check(
+                "set-trigger result preserves previous trigger",
+                setNpcTrigger.PreviousTriggerValue == 512
+                    && setNpcTrigger.TriggerValue == 0,
+                ref failures);
             Check("npc trigger clears remaining channel", LoadTrigger(connStr, UseLetterQuestId) == 0, ref failures);
 
             var finish2043 = questService.HandleFinishQuest(CharacterId,

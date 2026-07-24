@@ -1,5 +1,6 @@
 using System;
 using System.Net.Sockets;
+using System.Reflection;
 using DfoServer.Game.Dungeon;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
@@ -54,6 +55,7 @@ namespace DfoServer.SelfTests
                 && fresh.Tower == null,
                 ref failures);
 
+            CheckTowerSettlementPolicy(ref failures);
             // 3. BeginRun 建立新局
             DungeonRunLifecycle.BeginRun(session, 1002, 1);
             var run = player.CurrentRun;
@@ -230,6 +232,52 @@ namespace DfoServer.SelfTests
             if (!tower.TryPickupGroundItem(11, out _))
                 throw new InvalidOperationException("tower lifecycle fixture pickup failed");
             return tower;
+        }
+
+        private static void CheckTowerSettlementPolicy(ref int failures)
+        {
+            var paidPolicy = typeof(DungeonSettlementHandler).GetMethod(
+                "ShouldGeneratePaidCardRewards",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Check("tower settlement has a dedicated paid-card policy",
+                paidPolicy != null, ref failures);
+            if (paidPolicy != null)
+            {
+                Check("tower of despair does not generate an invisible paid-card reward",
+                    !(bool)paidPolicy.Invoke(null, new object[] { 11008 }), ref failures);
+                Check("ordinary dungeons retain paid-card rewards",
+                    (bool)paidPolicy.Invoke(null, new object[] { 1002 }), ref failures);
+            }
+
+            var builder = typeof(DungeonSettlementHandler).GetMethod(
+                "TryBuildTowerOfDespairClearRewardWithTime",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[]
+                {
+                    typeof(int), typeof(uint), typeof(int), typeof(int),
+                    typeof(byte[]).MakeByRefType()
+                },
+                null);
+            Check("tower settlement derives the displayed floor from the cleared dungeon",
+                builder != null, ref failures);
+            if (builder == null)
+                return;
+
+            const int rewardItemId = 2600001;
+            var args = new object[] { 11013, 15750u, rewardItemId, 1, null };
+            var built = (bool)builder.Invoke(null, args);
+            var body = args[4] as byte[];
+            Check("tower clear packet matches the client 015C wire layout",
+                built
+                && body != null
+                && body.Length == 15
+                && BitConverter.ToUInt32(body, 0) == 15750u
+                && BitConverter.ToUInt16(body, 4) == 6
+                && body[6] == 1
+                && BitConverter.ToUInt32(body, 7) == rewardItemId
+                && BitConverter.ToUInt32(body, 11) == 1u,
+                ref failures);
         }
 
         private static void Check(string name, bool ok, ref int failures)

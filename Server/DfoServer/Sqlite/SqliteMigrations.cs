@@ -551,6 +551,24 @@ SET emotion_index = 0,
     action_byte = 0
 WHERE emotion_index BETWEEN 1 AND 9
   AND action_byte = emotion_index;")),
+
+            // 旧绝望之塔工作树曾占用 v20；幂等补齐主线 v20 列后再创建楼层进度表，
+            // 可保留已有楼层数据，并让旧运行库安全追上当前迁移序列。
+            (29, "绝望之塔楼层进度 + 旧 v20 冲突兼容", conn =>
+            {
+                SqliteSchemaMigrator.EnsureColumns(conn, "accounts", new[]
+                {
+                    ("growth_capsule_exp", "INTEGER NOT NULL DEFAULT 0"),
+                });
+                ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
+    character_id INTEGER PRIMARY KEY,
+    highest_cleared_floor INTEGER NOT NULL DEFAULT 0
+        CHECK (highest_cleared_floor >= 0 AND highest_cleared_floor <= 100),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);");
+            }),
         };
 
         private static void MigrateKnightShieldDeck(SqliteConnection connection)
