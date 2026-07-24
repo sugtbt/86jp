@@ -140,6 +140,12 @@ namespace DfoServer.SelfTests
                 && inventory.GetItem(InventoryListType.Main, FragmentSlot).Count == 94,
                 "normal growth mutates ItemCore and consumes atomically");
 
+            var roundTrip = ItemCore.FromBytes(
+                inventory.GetItem(InventoryListType.Main, TargetSlot).ToBytes());
+            Check(roundTrip.EmancipateEquipmentLevel == 3
+                && roundTrip.GenuineUpgrade == 8,
+                "growth level survives ItemCore persistence codec");
+
             var advanced = CreateCommand(AdvancedTicketSlot, AdvancedTicketId);
             Check(ChronicleGrowthService.TryGrow(inventory, advanced, out var advancedResult)
                 && advancedResult.GrowthSucceeded
@@ -161,6 +167,20 @@ namespace DfoServer.SelfTests
                 && maximumResult.ErrorCode == ChronicleGrowthResult.ErrorMaximumLevel
                 && inventory.GetItem(InventoryListType.Main, AdvancedTicketSlot).Count == 1,
                 "maximum level rejects without consuming");
+
+            target = inventory.GetItem(InventoryListType.Main, TargetSlot).Copy();
+            target.EmancipateEquipmentLevel = 0;
+            inventory.SetItem(InventoryListType.Main, TargetSlot, target);
+            inventory.SetItem(InventoryListType.Main, FragmentSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = ChronicleGrowthCostCalculator.FragmentItemTemplateId,
+                Uid = 100,
+            });
+            Check(!ChronicleGrowthService.TryGrow(inventory, advanced, out var invalidMaterialResult)
+                && invalidMaterialResult.ErrorCode == ChronicleGrowthResult.ErrorInsufficientMaterial
+                && inventory.GetItem(InventoryListType.Main, AdvancedTicketSlot).Count == 1,
+                "equipment-shaped fragment row is rejected without consuming ticket");
         }
 
         private static ChronicleGrowthCommand CreateCommand(short ticketSlot, int ticketId)

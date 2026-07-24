@@ -34,6 +34,7 @@ namespace DfoServer.Game.Inventory
             if (ticket == null
                 || ticket.ItemId != command.TicketItemTemplateId
                 || ticket.Count <= 0
+                || !InventoryStackRuleService.IsStackable(ticket)
                 || !TryResolveTicket(ticket.ItemId, out var ticketFile, out var growth))
             {
                 result = ChronicleGrowthResult.Error(command, ChronicleGrowthResult.ErrorInsufficientMaterial);
@@ -82,6 +83,7 @@ namespace DfoServer.Game.Inventory
             var fragments = inventory.GetItem(InventoryListType.Main, requestedMaterial.SlotIndex);
             if (fragments == null
                 || fragments.ItemId != requestedMaterial.ItemTemplateId
+                || !InventoryStackRuleService.IsStackable(fragments)
                 || fragments.Count < requiredFragments)
             {
                 result = ChronicleGrowthResult.Error(command, ChronicleGrowthResult.ErrorInsufficientMaterial);
@@ -169,6 +171,7 @@ namespace DfoServer.Game.Inventory
             if (!ItemMetadataResolver.TryLoadStackableFile(itemTemplateId, out ticket)
                 || ticket.EmancipateTicket < 0
                 || ticket.EquipmentLevelEmancipate == null
+                || ticket.EquipmentLevelEmancipate.Condition == null
                 || ticket.EquipmentLevelEmancipate.UpgradeLevel <= 0)
                 return false;
 
