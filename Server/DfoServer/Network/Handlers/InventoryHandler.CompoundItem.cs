@@ -38,6 +38,12 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
+            if (result.GoldSpent > 0)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
+                    ItemListUpdateBuilder.BuildGoldUpdate(result.UpdatedGold)));
+            }
+
             FileLogger.Log(
                 $"[{ProtocolName}] COMPOUND_ITEM ok cid={cid} ackLen={ackBody.Length} " +
                 $"recipe=0x{result.SourceItemTemplateId:X8} slot={result.SourceSlotIndex} count={result.RequestedCount} " +

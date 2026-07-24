@@ -32,6 +32,10 @@ namespace DfoServer.Game.Inventory
 
         public string RecipeType { get; set; } = string.Empty;
 
+        public int GoldSpent { get; set; }
+
+        public int UpdatedGold { get; set; }
+
         public string PvfPath { get; set; } = string.Empty;
     }
 
@@ -55,6 +59,9 @@ namespace DfoServer.Game.Inventory
         public IReadOnlyList<CompoundItemRecipeEntry> Materials { get; set; } = Array.Empty<CompoundItemRecipeEntry>();
 
         public IReadOnlyList<CompoundItemRecipeEntry> Outputs { get; set; } = Array.Empty<CompoundItemRecipeEntry>();
+
+        /// <summary>金币费用（来自 [input item] 中的 goldId=0 / goldAmount），设计图 IntData 路径为 0。</summary>
+        public int GoldCost { get; set; }
     }
 
     internal sealed class CompoundItemRecipeEntry
