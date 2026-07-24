@@ -115,11 +115,12 @@ namespace DfoServer.Game.Lottery
                 }
             }
 
+            var sourceItemTemplateId = source.Core.ItemId;
             if (!InventoryDeleteService.TryConsumeFromSlot(
                     inventory,
                     InventoryListType.Main,
                     source.SlotIndex,
-                    source.Core.ItemId,
+                    sourceItemTemplateId,
                     1,
                     out var sourceDelete))
                 return false;
@@ -141,7 +142,7 @@ namespace DfoServer.Game.Lottery
             var openResult = new LotteryOpenResult
             {
                 SourceSlotIndex = source.SlotIndex,
-                SourceItemTemplateId = source.Core.ItemId,
+                SourceItemTemplateId = sourceItemTemplateId,
                 SourceRemainingStackCount = sourceDelete.RemainingCount,
                 ConsumedGold = definition.GoldCost,
                 UpdatedGold = updatedGold,

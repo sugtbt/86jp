@@ -39,6 +39,8 @@ namespace DfoServer.Game.Inventory
                 return Fail(result, 21);
 
             var rewardRequests = BuildRewardRequests(outputs);
+            var goldCost = recipe.GoldCost * (int)request.RequestedCount;
+
             var planningInventory = InventoryCompoundPlanning.CloneInventory(inventory);
             if (!DeleteMaterials(planningInventory, materials, null))
                 return Fail(result, 17);
@@ -61,6 +63,14 @@ namespace DfoServer.Game.Inventory
                 return Fail(result, 4);
 
             var deleted = new List<CompoundItemDeletedEntry>();
+            if (goldCost > 0)
+            {
+                if (!inventory.TryConsumeMainItem(0, goldCost, out var goldConsume) || !goldConsume.Success)
+                    return Fail(result, 22);
+                result.GoldSpent = goldCost;
+                result.UpdatedGold = goldConsume.RemainingCount;
+            }
+
             if (!DeleteMaterials(inventory, materials, deleted))
                 return Fail(result, 17);
             if (!request.SourceIsItemId)
@@ -140,27 +150,38 @@ namespace DfoServer.Game.Inventory
                 return false;
 
             var values = ParseRecipeIntList(stackable.IntData);
-            if (values.Count < 1)
-                return false;
-
-            var pos = 0;
-            var materialCount = values[pos++];
-            if (materialCount < 0 || values.Count < pos + materialCount * 2)
-                return false;
-
             var materials = new List<CompoundItemRecipeEntry>();
-            for (var index = 0; index < materialCount; index++)
-                materials.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
-
             var outputs = new List<CompoundItemRecipeEntry>();
-            if (pos < values.Count)
+            var goldCost = 0;
+
+            if (values.Count >= 1)
             {
-                var outputCount = values[pos++];
-                if (outputCount < 0 || values.Count < pos + outputCount * 2)
+                var pos = 0;
+                var materialCount = values[pos++];
+                if (materialCount < 0 || values.Count < pos + materialCount * 2)
                     return false;
 
-                for (var index = 0; index < outputCount; index++)
-                    outputs.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+                for (var index = 0; index < materialCount; index++)
+                    materials.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+
+                if (pos < values.Count)
+                {
+                    var outputCount = values[pos++];
+                    if (outputCount < 0 || values.Count < pos + outputCount * 2)
+                        return false;
+
+                    for (var index = 0; index < outputCount; index++)
+                        outputs.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+                }
+            }
+            else
+            {
+                // IntData 为空，回退解析 [input item]/[output item]（生产 stk）
+                materials = ParseInputOutputEntries(stackable.InputItem);
+                outputs = ParseInputOutputEntries(stackable.OutputItem);
+                goldCost = ParseGoldCostFromInputItem(stackable.InputItem);
+                if (materials.Count == 0 || outputs.Count == 0)
+                    return false;
             }
 
             var entry = ItemMetadataResolver.GetStackableEntry(itemTemplateId);
@@ -170,6 +191,7 @@ namespace DfoServer.Game.Inventory
                 RecipeType = ResolveRecipeType(stackable),
                 Materials = materials,
                 Outputs = outputs,
+                GoldCost = goldCost,
             };
             return true;
         }
@@ -366,6 +388,48 @@ namespace DfoServer.Game.Inventory
             if (result != null)
                 result.ErrorCode = errorCode;
             return false;
+        }
+
+        /// <summary>
+        /// 从 [input item]/[output item] 文本解析 (itemId, count) 对列表。
+        /// 输入格式：空格分隔的整数列表，每两个为一对。
+        /// </summary>
+        private static List<CompoundItemRecipeEntry> ParseInputOutputEntries(string text)
+        {
+            var entries = new List<CompoundItemRecipeEntry>();
+            if (string.IsNullOrWhiteSpace(text))
+                return entries;
+
+            var values = ParseRecipeIntList(text);
+            for (var i = 0; i + 1 < values.Count; i += 2)
+            {
+                var itemId = values[i];
+                var count = values[i + 1];
+                if (itemId > 0 && count > 0)
+                    entries.Add(new CompoundItemRecipeEntry(itemId, count));
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// 从 [input item] 文本的第 3-4 个值提取金币费用（goldId=0 的 goldAmount）。
+        /// 文本格式：itemId0 count0 goldId0 goldAmount0 itemId1 count1 goldId1 goldAmount1 ...
+        /// stride=4，遍历检测 goldId==0 时提取 goldAmount。
+        /// </summary>
+        private static int ParseGoldCostFromInputItem(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return 0;
+
+            var values = ParseRecipeIntList(text);
+            for (var i = 2; i + 1 < values.Count; i += 4)
+            {
+                if (values[i] == 0)
+                    return values[i + 1];
+            }
+
+            return 0;
         }
     }
 }
