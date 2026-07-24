@@ -13,6 +13,19 @@ namespace DfoServer.Game.Inventory
             ChronicleRefineCommand command,
             out ChronicleRefineResult result)
         {
+            return TryRefine(
+                inventory,
+                command,
+                () => Infrastructure.ServerRandom.Next(101),
+                out result);
+        }
+
+        internal static bool TryRefine(
+            InventoryService inventory,
+            ChronicleRefineCommand command,
+            Func<int> rollProvider,
+            out ChronicleRefineResult result)
+        {
             result = ChronicleRefineResult.Error(command, ChronicleRefineResult.ErrorInvalidMaterial);
             if (inventory == null || command == null
                 || command.MaterialSlotIndex == command.TargetSlotIndex)
@@ -22,7 +35,7 @@ namespace DfoServer.Game.Inventory
             if (material == null
                 || material.ItemId != command.MaterialItemTemplateId
                 || material.Count <= 0
-                || material.ItemKind == ItemCore.KindEquipment)
+                || !InventoryStackRuleService.IsStackable(material))
                 return false;
 
             if (!ChronicleRefineMaterialResolver.TryResolveMaterial(material.ItemId, out var materialDefinition))
@@ -120,7 +133,7 @@ namespace DfoServer.Game.Inventory
             var probability = current.Count < materialDefinition.ThreeChronicleEnchant.Probabilities.Count
                 ? materialDefinition.ThreeChronicleEnchant.Probabilities[current.Count]
                 : 0;
-            var roll = Infrastructure.ServerRandom.Next(101);
+            var roll = Math.Max(0, Math.Min(100, rollProvider != null ? rollProvider() : 100));
             var refineSucceeded = ChronicleRefineProbability.IsSuccess(probability, roll);
             var failureRewards = new List<DisjointMaterialResult>();
             List<InventoryRewardGrantRequest> rewardRequests = null;
@@ -243,7 +256,7 @@ namespace DfoServer.Game.Inventory
             return null;
         }
 
-        private static List<ChronicleOption> NormalizeOptions(
+        internal static List<ChronicleOption> NormalizeOptions(
             IReadOnlyList<ChronicleOption> source,
             EquipmentType targetType)
         {
@@ -257,9 +270,16 @@ namespace DfoServer.Game.Inventory
                     continue;
 
                 var option = raw.Copy();
-                if (!ChronicleRefineMaterialResolver.TryGetAuraType(option.OptionId, out var auraType)
-                    && option.EquipmentType <= 2)
+                if (!ChronicleRefineMaterialResolver.TryGetAuraType(option.OptionId, out var auraType))
+                {
+                    if (option.EquipmentType > 2)
+                    {
+                        result.Add(option);
+                        continue;
+                    }
+
                     auraType = option.EquipmentType;
+                }
 
                 if (ChronicleRefineMaterialResolver.TryGetPacketAuraItemId(auraType, out var auraItemId))
                     option.OptionId = auraItemId;

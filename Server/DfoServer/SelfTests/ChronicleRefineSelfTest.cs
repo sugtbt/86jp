@@ -152,6 +152,21 @@ namespace DfoServer.SelfTests
             Check(Hex(migratedMiddle) == "01-E8-04-00-00-00-00-00-00-00-00-03-00-0D-00-06-00",
                 "captured coat refine entry matches legacy packet layout", ref failures);
 
+            var unknownOptions = ChronicleRefineService.NormalizeOptions(new[]
+            {
+                new ChronicleOption
+                {
+                    OptionId = 99999999,
+                    CharacJob = 0,
+                    FirstGrowType = 3,
+                    EquipmentType = (byte)EquipmentType.Coat,
+                    OptionNo = 6,
+                },
+            }, EquipmentType.Coat);
+            Check(unknownOptions.Count == 1
+                && unknownOptions[0].OptionId == 99999999
+                && unknownOptions[0].EquipmentType == (byte)EquipmentType.Coat,
+                "unknown chronicle option is not remapped to red aura", ref failures);
             var successAck = ChronicleRefineAckBuilder.BuildSuccess(new ChronicleRefineResult
             {
                 Command = new ChronicleRefineCommand { MaterialSlotIndex = 105, TargetSlotIndex = 13 },
@@ -392,6 +407,79 @@ namespace DfoServer.SelfTests
                 && persistedOptions[0].OptionId == expectedGreenAuraItemId
                 && persistedOptions[0].EquipmentType == (byte)EquipmentType.Coat,
                 "real first refine stores target option in ItemCore", ref failures);
+
+            var roundTrip = refined == null ? null : ItemCore.FromBytes(refined.ToBytes());
+            Check(roundTrip?.ChronicleOptions.Count == 1
+                && ChronicleRefineMaterialResolver.TryGetPacketAuraItemId(2, out var roundTripAuraItemId)
+                && roundTrip.ChronicleOptions[0].OptionId == roundTripAuraItemId
+                && roundTrip.ChronicleOptions[0].OptionNo == (byte)skill.OptionNo,
+                "refine option survives ItemCore persistence codec", ref failures);
+
+            const int failureMaterialId = 1256;
+            var failureInventory = new InventoryService(characterId + 1, accountId);
+            failureInventory.SetItem(InventoryListType.Main, materialSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindConsumable,
+                ItemId = failureMaterialId,
+                Count = 1,
+            });
+            var failureTarget = new ItemCore
+            {
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = targetId,
+                Uid = 10002,
+                Durability = metadata.Durability,
+                Upgrade = 3,
+            };
+            ChronicleRefineMaterialResolver.TryGetPacketAuraItemId(0, out var redAuraItemId);
+            failureTarget.SetChronicleOptions(new[]
+            {
+                new ChronicleOption
+                {
+                    OptionId = redAuraItemId,
+                    CharacJob = (byte)selectedCheck.Values[0],
+                    FirstGrowType = (byte)selectedCheck.Values[1],
+                    EquipmentType = (byte)EquipmentType.Coat,
+                    OptionNo = (byte)skill.OptionNo,
+                },
+            });
+            failureInventory.SetItem(InventoryListType.Main, targetSlot, failureTarget);
+            var failureCommand = new ChronicleRefineCommand
+            {
+                MaterialSlotIndex = materialSlot,
+                MaterialItemTemplateId = failureMaterialId,
+                TargetSlotIndex = targetSlot,
+                TargetItemTemplateId = targetId,
+                OptionNo = (byte)skill.OptionNo,
+                CharacterJob = (byte)selectedCheck.Values[0],
+                FirstGrowType = (byte)selectedCheck.Values[1],
+            };
+            var failedAsExpected = ChronicleRefineService.TryRefine(
+                failureInventory, failureCommand, () => 100, out var failureResult);
+            var failureRewardsGranted = failureResult.FailureRewards.Count == 3;
+            foreach (var reward in failureResult.FailureRewards)
+            {
+                var granted = failureInventory.GetItem(InventoryListType.Main, reward.SlotIndex);
+                var virtualGrant = failureInventory.GetMainVirtualCount(reward.SlotIndex);
+                failureRewardsGranted = failureRewardsGranted
+                    && ((granted != null
+                            && granted.ItemId == reward.ItemTemplateId
+                            && granted.Count == reward.Count)
+                        || (virtualGrant != null
+                            && virtualGrant.ItemId == reward.ItemTemplateId
+                            && virtualGrant.Count == reward.Count));
+            }
+            var failureFragment = failureResult.FailureRewards.Find(
+                reward => reward.ItemTemplateId == fragmentItemId);
+            Check(failedAsExpected
+                && !failureResult.RefineSucceeded
+                && failureResult.TargetDestroyed
+                && failureInventory.GetItem(InventoryListType.Main, materialSlot) == null
+                && failureInventory.GetItem(InventoryListType.Main, targetSlot) == null
+                && failureRewardsGranted
+                && failureFragment?.Count == 4,
+                "forced second refine failure destroys target and grants all three rewards",
+                ref failures);
         }
         private static void ValidateFighterChroniclePvf(ref int failures)
         {
