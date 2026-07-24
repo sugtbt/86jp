@@ -2,6 +2,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.ReviveCoin;
 using DfoServer.Game.Skills;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
@@ -66,6 +67,52 @@ namespace DfoServer.Game.Inventory
 
                     sourceSnapshot = source.Copy();
                     resolvedItemId = sourceSnapshot.ItemId;
+
+                    // 道具42(复活币礼盒): 消耗1个礼盒 → 复活币+1
+                    if (resolvedItemId == ReviveCoinService.ConsumableItemId)
+                    {
+                        if (!InventoryDeleteService.TryConsumeFromSlot(
+                                inventory,
+                                listType,
+                                slotIndex,
+                                resolvedItemId,
+                                1,
+                                out var deleteResult)
+                            || !deleteResult.Success
+                            || deleteResult.DeletedCount != 1)
+                        {
+                            return Reject(
+                                ExperienceItemUseStatus.ConsumeFailed,
+                                resolvedItemId,
+                                "inventory deduction failed");
+                        }
+
+                        var current = inventory.CountMainItem(ReviveCoinService.ItemId);
+                        if (!inventory.SetMainVirtualCount(
+                                ReviveCoinService.WalletSlot,
+                                ReviveCoinService.ItemId,
+                                current + 1))
+                        {
+                            RestoreConsumedSource(inventory, listType, slotIndex, sourceSnapshot);
+                            return Reject(
+                                ExperienceItemUseStatus.PersistenceFailed,
+                                resolvedItemId,
+                                "failed to grant revive coin");
+                        }
+
+                        InventoryPersistenceService.SaveDirty(lease);
+                        inventory.ClearDirtyState();
+
+                        return new ExperienceItemUseResult
+                        {
+                            Status = ExperienceItemUseStatus.Success,
+                            AccountId = accountId,
+                            ItemTemplateId = resolvedItemId,
+                            ConsumedItem = BuildConsumedMutation(
+                                listType, slotIndex, sourceSnapshot, deleteResult),
+                        };
+                    }
+
                     var definition = ExperienceItemDataProvider.Resolve(resolvedItemId);
                     if (!definition.IsExperienceLike)
                     {
