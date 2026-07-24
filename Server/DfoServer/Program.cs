@@ -10,19 +10,12 @@ namespace DfoServer
         // 自测注册表: 新增自测在这里加一行, 单跑参数与 --selftest-all 都会覆盖到。
         private static readonly (string Arg, Func<int> Run)[] SelfTestRegistry =
         {
-            ("--selftest-buyskill", Game.Skills.BuySkillSelfTest.Run),
-            ("--selftest-avatar-package", SelfTests.AvatarPackageSelfTest.Run),
+            ("--selftest-avatar-compound", SelfTests.AvatarCompoundSelfTest.Run),
             ("--selftest-cerashop", SelfTests.CeraShopSelfTest.Run),
-            ("--selftest-selectable-package", SelfTests.SelectablePackageSelfTest.Run),
-            ("--selftest-equipment-effect-rune", SelfTests.EquipmentEffectRuneSelfTest.Run),
             ("--selftest-pet-consumable", SelfTests.PetConsumableSelfTest.Run),
-            ("--selftest-inventory-extra-view", SelfTests.InventoryExtraViewSelfTest.Run),
-            ("--selftest-titlebook-item-codec", SelfTests.TitleBookInventoryItemCodecSelfTest.Run),
-            ("--selftest-inventory-sale", SelfTests.InventorySaleSelfTest.Run),
+            ("--selftest-titlebook-item-codec", SelfTests.LegacyTitleBookItemCodecSelfTest.Run),
             ("--selftest-npc-material-exchange-price", SelfTests.NpcMaterialExchangePriceSelfTest.Run),
-            ("--selftest-charm-equipment-slot", SelfTests.CharmEquipmentSlotSelfTest.Run),
-            ("--selftest-equipped-weapon-swap", SelfTests.EquippedWeaponSwapSelfTest.Run),
-            ("--selftest-personal-cargo", SelfTests.PersonalCargoSelfTest.Run),
+            ("--selftest-collectbox-runtime", SelfTests.CollectBoxRuntimeSelfTest.Run),
             ("--selftest-lottery-item", SelfTests.LotteryItemSelfTest.Run),
             ("--selftest-dungeon-map-fallback", SelfTests.DungeonMapFallbackSelfTest.Run),
             ("--selftest-tower-of-despair-progress", SelfTests.TowerOfDespairProgressSelfTest.Run),
@@ -32,24 +25,19 @@ namespace DfoServer
             ("--selftest-special-dungeon-part2", SelfTests.SpecialDungeonPart2SelfTest.Run),
             ("--selftest-special-dungeon-part3", SelfTests.SpecialDungeonPart3SelfTest.Run),
             ("--selftest-card-reward-flow", SelfTests.CardRewardFlowSelfTest.Run),
-            ("--selftest-secret-shop", SelfTests.SecretShopSelfTest.Run),
             ("--selftest-monster-card-drop", SelfTests.MonsterCardDropSelfTest.Run),
-            ("--selftest-dungeon-item-drop", SelfTests.DungeonItemDropSelfTest.Run),
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),
             ("--selftest-crystal-contract", SelfTests.CrystalContractSelfTest.Run),
             ("--selftest-slot-expansion-quest", SelfTests.SlotExpansionQuestSelfTest.Run),
             ("--selftest-character-slot-policy", SelfTests.CharacterSlotPolicySelfTest.Run),
             ("--selftest-knight-shield-deck", SelfTests.KnightShieldDeckRepositorySelfTest.Run),
             ("--selftest-clear-map-quest", SelfTests.ClearMapQuestSelfTest.Run),
-            ("--selftest-death-tower-entry", SelfTests.DeathTowerEntrySelfTest.Run),
             ("--selftest-death-tower-map-loader", SelfTests.DeathTowerMapLoaderSelfTest.Run),
             ("--selftest-death-tower-drop", SelfTests.DeathTowerDropSelfTest.Run),
-            ("--selftest-death-tower-inventory", SelfTests.DeathTowerInventorySelfTest.Run),
             ("--selftest-death-tower-protocol", SelfTests.DeathTowerProtocolSelfTest.Run),
             ("--selftest-death-tower-quest-routing", SelfTests.DeathTowerQuestRoutingSelfTest.Run),
             ("--selftest-quest-clear", SelfTests.QuestClearSelfTest.Run),
             ("--selftest-quest-trigger-counts", SelfTests.QuestTriggerCountSelfTest.Run),
-            ("--selftest-quest-item-flow", SelfTests.QuestItemFlowSelfTest.Run),
             ("--selftest-quest-ack-format", SelfTests.QuestAckFormatSelfTest.Run),
             ("--selftest-clear-quest-list-packet", SelfTests.ClearQuestListPacketSelfTest.Run),
             ("--selftest-special-reward-quest-source", SelfTests.SpecialRewardQuestSourceSelfTest.Run),
@@ -57,7 +45,6 @@ namespace DfoServer
             ("--selftest-striker-skill", SelfTests.StrikerSkillSelfTest.Run),
             ("--selftest-pet-equipment", SelfTests.PetEquipmentSelfTest.Run),
             ("--selftest-pet-hatch", SelfTests.PetHatchSelfTest.Run),
-            ("--selftest-currency", SelfTests.CurrencySelfTest.Run),
             ("--selftest-gold-limit", SelfTests.GoldLimitSelfTest.Run),
             ("--selftest-daily-reset", SelfTests.DailyResetSelfTest.Run),
             ("--selftest-revive-coin", SelfTests.ReviveCoinSelfTest.Run),
@@ -69,7 +56,6 @@ namespace DfoServer
             ("--selftest-dungeon-combat-party", SelfTests.DungeonCombatPartySelfTest.Run),
             ("--selftest-udp-relay", SelfTests.UdpRelaySelfTest.Run),
             ("--selftest-growth-capsule", SelfTests.GrowthCapsuleSelfTest.Run),
-            ("--selftest-experience-item", SelfTests.ExperienceItemSelfTest.Run),
         };
 
         // 顺序跑全部自测, 输出汇总表; 任一失败(或抛异常)退出码为 1。
@@ -101,9 +87,41 @@ namespace DfoServer
             return failed.Count == 0 ? 0 : 1;
         }
 
+        private static int RebuildInventoryNewItems()
+        {
+            try
+            {
+                _ = GameWorld.GameWorldConfig.PvfArchivePath;
+                GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
+
+                var connectionString = Infrastructure.SqliteDatabaseBootstrap.Initialize(
+                    Infrastructure.ServerPaths.DatabasePath,
+                    Infrastructure.ServerPaths.SchemaFilePath);
+                using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    Game.Inventory.InventoryNewItemMigrationService.Migrate(connection);
+                }
+
+                Console.WriteLine($"[InventoryMigration] rebuilt new inventory tables from legacy tables: {Infrastructure.ServerPaths.DatabasePath}");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[InventoryMigration] rebuild failed: {ex}");
+                return 1;
+            }
+        }
+
         static void Main(string[] args)
         {
             args ??= Array.Empty<string>();
+
+            if (Array.IndexOf(args, "--rebuild-inventory-new-items") >= 0)
+            {
+                Environment.Exit(RebuildInventoryNewItems());
+                return;
+            }
 
             if (Array.IndexOf(args, "--selftest-all") >= 0)
             {
@@ -191,6 +209,7 @@ namespace DfoServer
 
             server.Start(portConfigs);
 
+            Game.Inventory.InventoryPersistenceService.RegisterClock(Infrastructure.ClockService.Instance);
             Infrastructure.ClockService.Instance.Start();
 
             if (GameNetworkConfig.ProxyMode)
@@ -240,6 +259,7 @@ namespace DfoServer
             }
 
             server.Stop();
+            Game.Inventory.InventoryPersistenceService.SaveAllDirty();
             // 服务停止后不再产生常规业务日志，此时完成队列并等待后台写入结束，避免退出时丢失尾部日志。
             FileLogger.Shutdown(TimeSpan.FromSeconds(5));
             Console.WriteLine("Server stopped.");

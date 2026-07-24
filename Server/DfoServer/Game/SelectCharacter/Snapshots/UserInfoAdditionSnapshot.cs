@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.SelectCharacter
 {
@@ -36,7 +37,44 @@ namespace DfoServer.Game.SelectCharacter
 
         
         public List<EquippedEntrySnapshot> EquippedEntries { get; } = new List<EquippedEntrySnapshot>();
-        // subtype1 装备列表末尾的独立字段，不属于 InvenItem；0 会清空克隆称号动画。
+
+        internal Dictionary<int, AvatarDetail> AvatarDetails { get; } = new Dictionary<int, AvatarDetail>();
+
+        internal Dictionary<int, CreatureDetail> CreatureDetails { get; } = new Dictionary<int, CreatureDetail>();
+
+        internal void SetAvatarDetail(int itemUid, AvatarDetail detail)
+        {
+            if (itemUid <= 0 || detail == null)
+                return;
+
+            AvatarDetails[itemUid] = detail;
+        }
+
+        internal AvatarDetail GetAvatarDetail(ItemCore core)
+        {
+            if (core == null || core.ItemKind != ItemCore.KindAvatar || core.Value <= 0)
+                return null;
+
+            AvatarDetails.TryGetValue(core.Value, out var detail);
+            return detail;
+        }
+
+        internal void SetCreatureDetail(int creatureKey, CreatureDetail detail)
+        {
+            if (creatureKey <= 0 || detail == null)
+                return;
+
+            CreatureDetails[creatureKey] = detail;
+        }
+
+        internal CreatureDetail GetCreatureDetail(ItemCore core)
+        {
+            if (core == null || core.ItemKind != ItemCore.KindCreature || core.Value <= 0)
+                return null;
+
+            CreatureDetails.TryGetValue(core.Value, out var detail);
+            return detail;
+        }
         public uint CloneTitleItemId { get; set; }
 
         
@@ -74,12 +112,9 @@ namespace DfoServer.Game.SelectCharacter
 
     public sealed class EquippedEntrySnapshot
     {
-        public int Slot { get; set; }
-        public int ItemId { get; set; }
-        
-        public byte[] RawEntry { get; set; }
-        
-        public Game.Inventory.InvenItem Item { get; set; }
+        public short Slot { get; set; }
+
+        internal ItemCore Core { get; set; }
     }
 
     public sealed class DimensionEntrySnapshot

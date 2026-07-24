@@ -16,18 +16,15 @@ namespace DfoServer.Game.Quests
     {
         private const string ProtocolLogName = "GameProtocol";
 
-        private readonly IAssetService _assetService;
         private readonly InventoryRefreshSender _inventoryRefresh;
         private readonly string _connectionString;
         private readonly Func<QuestDropCandidate, int, int> _rollDrop;
 
         public QuestDropService(
-            IAssetService assetService,
             InventoryRefreshSender inventoryRefresh,
             string connectionString = null,
             Func<QuestDropCandidate, int, int> rollDrop = null)
         {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
             _inventoryRefresh = inventoryRefresh ?? throw new ArgumentNullException(nameof(inventoryRefresh));
             _connectionString = connectionString;
             _rollDrop = rollDrop ?? QuestDropProvider.RollDrop;
@@ -101,57 +98,55 @@ namespace DfoServer.Game.Quests
             var candidates = getCandidates(activeQuestIds);
             if (candidates == null) return;
 
-            var accountId = session.Account?.AccountId ?? 1;
+            if (!InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+            {
+                FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped because online inventory is missing cid={session.Player.CharacterId}");
+                return;
+            }
+
             var grantedItemIds = new HashSet<int>();
             var grantedSlots = new HashSet<short>();
 
-            foreach (var candidate in candidates)
+            lock (lease.SyncRoot)
             {
-                int currentHeld = 0;
-                try
+                var inventory = lease.Inventory;
+                foreach (var candidate in candidates)
                 {
-                    using (var scope = _assetService.OpenScope(session.Player.CharacterId, accountId))
-                        currentHeld = _assetService.CountItem(scope, candidate.ItemId);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP ERROR: held count read failed, assuming 0: item={candidate.ItemId}: {ex.Message}");
-                }
+                    int currentHeld = inventory.CountMainItem(candidate.ItemId);
 
-                int dropCount = _rollDrop(candidate, currentHeld);
-                if (dropCount <= 0)
-                {
-                    if (candidate.MaxStack != -1 && currentHeld >= candidate.MaxStack)
-                        FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped maxStack {sourceName}={sourceCode} item={candidate.ItemId} held={currentHeld} max={candidate.MaxStack}");
-                    else if (candidate.DropRate >= 100)
-                        FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped despite guaranteed rate {sourceName}={sourceCode} item={candidate.ItemId} held={currentHeld} count={candidate.Count}");
-                    continue;
-                }
+                    int dropCount = _rollDrop(candidate, currentHeld);
+                    if (dropCount <= 0)
+                    {
+                        if (candidate.MaxStack != -1 && currentHeld >= candidate.MaxStack)
+                            FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped maxStack {sourceName}={sourceCode} item={candidate.ItemId} held={currentHeld} max={candidate.MaxStack}");
+                        else if (candidate.DropRate >= 100)
+                            FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped despite guaranteed rate {sourceName}={sourceCode} item={candidate.ItemId} held={currentHeld} count={candidate.Count}");
+                        continue;
+                    }
 
-                short slot;
-                var placementHint = candidate.PreferQuestInventory
-                    ? ItemPlacementHint.QuestInventory
-                    : ItemPlacementHint.Natural;
-                if (!TryPickupItemToInventory(
-                        session.Player.CharacterId,
-                        accountId,
-                        candidate.ItemId,
-                        dropCount,
-                        placementHint,
-                        out slot))
-                {
-                    FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: failed to insert {sourceName}={sourceCode} item={candidate.ItemId} x{dropCount} held={currentHeld}");
-                    continue;
-                }
+                    if (!InventoryRewardGrantService.TryCreateAndInsert(
+                            inventory,
+                            candidate.ItemId,
+                            ItemCreateReason.QuestReward,
+                            dropCount,
+                            out var grant)
+                        || !grant.Success
+                        || grant.SlotIndex < 0)
+                    {
+                        FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: failed to insert {sourceName}={sourceCode} item={candidate.ItemId} x{dropCount} held={currentHeld}");
+                        continue;
+                    }
 
-                grantedItemIds.Add(candidate.ItemId);
-                grantedSlots.Add(slot);
-                FileLogger.Log(
-                    $"[{ProtocolLogName}] QUEST_DROP: " +
-                    $"quest={candidate.QuestId} {sourceName}={sourceCode} " +
-                    $"item={candidate.ItemId} x{dropCount} slot={slot} " +
-                    $"placement={placementHint} " +
-                    $"held={currentHeld}->{currentHeld + dropCount}");
+                    grantedItemIds.Add(candidate.ItemId);
+                    grantedSlots.Add(grant.SlotIndex);
+                    FileLogger.Log(
+                        $"[{ProtocolLogName}] QUEST_DROP: " +
+                        $"quest={candidate.QuestId} {sourceName}={sourceCode} " +
+                        $"item={candidate.ItemId} x{dropCount} slot={grant.SlotIndex} " +
+                        $"preferQuestInventory={candidate.PreferQuestInventory} " +
+                        $"held={currentHeld}->{currentHeld + dropCount}");
+                }
             }
 
             if (grantedItemIds.Count <= 0)
@@ -193,34 +188,5 @@ namespace DfoServer.Game.Quests
             }
         }
 
-        private bool TryPickupItemToInventory(
-            int characterId,
-            int accountId,
-            int itemTemplateId,
-            int stackCount,
-            ItemPlacementHint placementHint,
-            out short assignedSlot)
-        {
-            assignedSlot = -1;
-            try
-            {
-                using (var scope = _assetService.OpenScope(characterId, accountId))
-                {
-                    var result = _assetService.TryAddItem(
-                        scope,
-                        itemTemplateId,
-                        stackCount,
-                        placementHint,
-                        out assignedSlot);
-                    if (result) scope.Commit();
-                    return result;
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[QuestDropService] TryPickupItemToInventory ERROR: {ex.Message}");
-                return false;
-            }
-        }
     }
 }

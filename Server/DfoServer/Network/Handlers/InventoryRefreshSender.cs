@@ -1,9 +1,10 @@
-using DfoServer.Game.Appearance;
 using DfoServer.Game.Accounts;
+using DfoServer.Game.Appearance;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using System;
@@ -14,24 +15,18 @@ using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers
 {
-    // 背包刷新通知的唯一实现点(0x000D 全量 / 0x000E 增量 / 0x02CA 排列锁 / 0x00FB 装备锁 / 0x0002 外观)。
-    // 各 handler 经此发送刷新, 不再把 InventoryHandler 当服务拽引用;
-    // 将来做多人可见性广播, 只在本类扩展。
     public sealed class InventoryRefreshSender
     {
         private const string ProtocolName = "GameProtocol";
 
-        private readonly IInventoryStore _inventoryStore;
-        private readonly SqliteSelectCharacterDataSource _dataSource;   // 仅外观重建(AppearanceService)使用
+        private readonly SqliteSelectCharacterDataSource _dataSource;
         private readonly ICharacterRepository _characterRepository;
         private readonly HonorLevelSyncService _honorLevel;
 
         public InventoryRefreshSender(
-            IInventoryStore inventoryStore,
             SqliteSelectCharacterDataSource dataSource,
             ICharacterRepository characterRepository)
         {
-            _inventoryStore = inventoryStore ?? throw new ArgumentNullException(nameof(inventoryStore));
             _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
             _characterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
             _honorLevel = new HonorLevelSyncService(characterRepository);
@@ -63,7 +58,7 @@ namespace DfoServer.Network.Handlers
         public async Task SendCreatureItemListRefresh(EnhancedClientSession session)
         {
             var (cid, _) = SessionOwnerResolver.Resolve(session);
-            var list = _dataSource.LoadCreatureItemListSnapshot(cid);
+            var list = LoadCreatureItemListSnapshot(session, cid);
             var writer = new GamePacketWriter();
             writer.WriteByte((byte)(list?.Entries.Count ?? 0));
             if (list != null)
@@ -78,11 +73,10 @@ namespace DfoServer.Network.Handlers
         public async Task SendItemListRefresh(EnhancedClientSession session, params InventoryListType[] listTypes)
         {
             var (cid, aid) = SessionOwnerResolver.Resolve(session);
-            var snapshot = _inventoryStore.LoadCharacterItemListSnapshot(cid, aid);
 
             foreach (var listType in listTypes.Distinct().Select(MapToNotiListType).Distinct())
             {
-                var itemBody = ItemListPacketBuilder.BuildBody(snapshot, listType);
+                var itemBody = ItemListPacketBuilder.BuildBody(cid, aid, listType);
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000D, itemBody));
             }
         }
@@ -92,143 +86,40 @@ namespace DfoServer.Network.Handlers
             return SendUpdateItemList(session, itemSpace, new[] { slotIndex });
         }
 
-        public async Task SendUpdateItemList(EnhancedClientSession session, InventoryListType itemSpace, IEnumerable<short> slotIndexes)
+        public Task SendGoldUpdate(EnhancedClientSession session)
         {
-            if (slotIndexes == null)
-                return;
-
-            var slots = slotIndexes.Distinct().ToList();
-            if (slots.Count == 0)
-                return;
-
-            if (ItemListUpdateBuilder.IsCommonUpdateItemSpace(itemSpace))
-            {
-                var (cid, aid) = SessionOwnerResolver.Resolve(session);
-                var updates = new List<CommonInventoryItem>();
-                foreach (var slotIndex in slots)
-                {
-                    var item = _inventoryStore.LoadCommonItemForRefresh(cid, aid, itemSpace, slotIndex)
-                        ?? ItemListUpdateBuilder.CreateEmptyCommonItem(slotIndex);
-                    updates.Add(item);
-                }
-
-                await SendCommonItemUpdates(session, itemSpace, updates);
-                return;
-            }
-
-            if (itemSpace == InventoryListType.Avatar)
-            {
-                var (cid, aid) = SessionOwnerResolver.Resolve(session);
-                var updates = new List<AvatarInventoryItem>();
-                var emptySlots = new List<short>();
-                foreach (var slotIndex in slots)
-                {
-                    var item = _inventoryStore.LoadAvatarItemForRefresh(cid, slotIndex);
-                    if (item != null)
-                        updates.Add(item);
-                    else
-                        emptySlots.Add(slotIndex);
-                }
-
-                if (updates.Count > 0)
-                {
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        ItemListUpdateBuilder.BuildAvatarUpdates(itemSpace, updates)));
-                }
-
-                if (emptySlots.Count > 0)
-                {
-                    // 时装/穿戴栏空槽刷新先按通用空 entry 测试，若客户端不消费再回退完整 0x0D。
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        ItemListUpdateBuilder.BuildEmptyUpdates(itemSpace, emptySlots)));
-                }
-                return;
-            }
-
-            if (itemSpace == InventoryListType.Equipment)
-            {
-                var (cid, aid) = SessionOwnerResolver.Resolve(session);
-                var updates = new List<CommonInventoryItem>();
-                var emptySlots = new List<short>();
-                foreach (var slotIndex in slots)
-                {
-                    var item = _inventoryStore.LoadEquipmentCommonItemForRefresh(cid, slotIndex);
-                    if (item != null)
-                        updates.Add(item);
-                    else
-                        emptySlots.Add(slotIndex);
-                }
-
-                if (updates.Count > 0)
-                {
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        ItemListUpdateBuilder.BuildEquipmentUpdates(updates)));
-                }
-
-                if (emptySlots.Count > 0)
-                {
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        ItemListUpdateBuilder.BuildEmptyUpdates(itemSpace, emptySlots)));
-                }
-                return;
-            }
-
-            if (itemSpace == InventoryListType.Pet)
-            {
-                var (cid, aid) = SessionOwnerResolver.Resolve(session);
-                var updates = new List<PetInventoryItem>();
-                var emptySlots = new List<short>();
-                foreach (var slotIndex in slots)
-                {
-                    var item = _inventoryStore.LoadPetItemForRefresh(cid, slotIndex);
-                    if (item != null)
-                        updates.Add(item);
-                    else
-                        emptySlots.Add(slotIndex);
-                }
-
-                if (updates.Count > 0)
-                {
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        ItemListUpdateBuilder.BuildPetUpdates(updates)));
-                }
-
-                if (emptySlots.Count > 0)
-                {
-                    // 宠物空槽刷新先按通用空 entry 测试，若客户端不消费再回退完整 0x0D。
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        ItemListUpdateBuilder.BuildEmptyUpdates(itemSpace, emptySlots)));
-                }
-                return;
-            }
-
+            return SendUpdateItemList(session, InventoryListType.Main, InventoryService.MainVirtualCurrencySlotStart);
         }
 
-        public static Task SendCommonItemUpdates(
-            EnhancedClientSession session,
-            InventoryListType itemSpace,
-            IReadOnlyList<CommonInventoryItem> updates)
+        public Task SendGoldUpdate(EnhancedClientSession session, int updatedGold)
         {
-            if (session == null) throw new ArgumentNullException(nameof(session));
-            if (updates == null || updates.Count == 0)
+            var (cid, _) = SessionOwnerResolver.Resolve(session);
+            if (InventoryContext.TryGetLease(cid, out var lease)
+                && lease.IsOwnedBy(session.SessionId))
+            {
+                lock (lease.SyncRoot)
+                    lease.Inventory.SetMainVirtualCount(
+                        InventoryService.MainVirtualCurrencySlotStart,
+                        Math.Max(0, updatedGold));
+            }
+
+            return SendGoldUpdate(session);
+        }
+
+        public async Task SendUpdateItemList(EnhancedClientSession session, InventoryListType itemSpace, IEnumerable<short> slotIndexes)
+        {
+            await SendOnlineUpdateItemList(session, itemSpace, slotIndexes);
+        }
+
+        public Task SendEmptyUpdateItemList(EnhancedClientSession session, InventoryListType itemSpace, short slotIndex)
+        {
+            if (session == null || !IsNewItemListUpdateSpace(itemSpace))
                 return Task.CompletedTask;
 
             return session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x00,
                 0x000E,
-                ItemListUpdateBuilder.BuildCommonUpdates(itemSpace, updates)));
+                ItemListUpdateBuilder.BuildEmptyUpdates(itemSpace, new[] { slotIndex })));
         }
 
         public async Task SendSortItemLockSlotRefresh(EnhancedClientSession session, InventoryListType listType, short slotIndex)
@@ -238,17 +129,17 @@ namespace DfoServer.Network.Handlers
 
         public async Task SendSortItemLockRefresh(EnhancedClientSession session, InventoryListType listType)
         {
-            var (cid, aid) = SessionOwnerResolver.Resolve(session);
+            var (cid, _) = SessionOwnerResolver.Resolve(session);
             var refreshListType = MapToSortLockListType(listType);
-            var locks = _inventoryStore.LoadSortItemLocks(cid, refreshListType);
+            var locks = LoadOnlineSortItemLocks(session, cid, refreshListType);
             foreach (var entry in locks)
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x02CA, SortItemLockBuilder.BuildLock(entry)));
         }
 
         public async Task SendAllSortItemLockRefresh(EnhancedClientSession session)
         {
-            var (cid, aid) = SessionOwnerResolver.Resolve(session);
-            var locks = _inventoryStore.LoadSortItemLocks(cid);
+            var (cid, _) = SessionOwnerResolver.Resolve(session);
+            var locks = LoadOnlineSortItemLocks(session, cid, null);
             foreach (var entry in locks)
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x02CA, SortItemLockBuilder.BuildLock(entry)));
         }
@@ -258,8 +149,8 @@ namespace DfoServer.Network.Handlers
             if (!IsEquipmentItemLockListType(listType))
                 return;
 
-            var (cid, aid) = SessionOwnerResolver.Resolve(session);
-            var locks = _inventoryStore.LoadEquipmentItemLocks(cid);
+            var (cid, _) = SessionOwnerResolver.Resolve(session);
+            var locks = LoadOnlineEquipmentItemLocks(session, cid, listType);
             LogEquipmentItemLockList("ITEM_LOCK_LIST_REFRESH", locks);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00FB,
                 EquipmentItemLockBuilder.BuildLockList(locks)));
@@ -267,16 +158,92 @@ namespace DfoServer.Network.Handlers
 
         public async Task SendAllEquipmentItemLockListRefresh(EnhancedClientSession session)
         {
-            var (cid, aid) = SessionOwnerResolver.Resolve(session);
-            var locks = _inventoryStore.LoadEquipmentItemLocks(cid);
+            var (cid, _) = SessionOwnerResolver.Resolve(session);
+            var locks = LoadOnlineEquipmentItemLocks(session, cid, null);
             LogEquipmentItemLockList("ITEM_LOCK_LIST_ALL", locks);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00FB,
                 EquipmentItemLockBuilder.BuildLockList(locks)));
         }
 
+        private static IReadOnlyList<SortItemLockEntry> LoadOnlineSortItemLocks(
+            EnhancedClientSession session,
+            int characterId,
+            InventoryListType? listType)
+        {
+            if (!InventoryContext.TryGetLease(characterId, out var lease) || !lease.IsOwnedBy(session.SessionId))
+                return Array.Empty<SortItemLockEntry>();
+
+            lock (lease.SyncRoot)
+                return InventoryLockService.LoadSortItemLocks(lease.Inventory, listType);
+        }
+
+        private static IReadOnlyList<EquipmentItemLockEntry> LoadOnlineEquipmentItemLocks(
+            EnhancedClientSession session,
+            int characterId,
+            InventoryListType? listType)
+        {
+            if (!InventoryContext.TryGetLease(characterId, out var lease) || !lease.IsOwnedBy(session.SessionId))
+                return Array.Empty<EquipmentItemLockEntry>();
+
+            lock (lease.SyncRoot)
+                return InventoryLockService.LoadEquipmentItemLocks(lease.Inventory, listType);
+        }
+
         internal static InventoryListType MapToSortLockListType(InventoryListType listType)
         {
             return MapToNotiListType(listType);
+        }
+
+        internal static Task SendOnlineUpdateItemList(
+            EnhancedClientSession session,
+            InventoryListType itemSpace,
+            short slotIndex)
+        {
+            return SendOnlineUpdateItemList(session, itemSpace, new[] { slotIndex });
+        }
+
+        internal static async Task SendOnlineUpdateItemList(
+            EnhancedClientSession session,
+            InventoryListType itemSpace,
+            IEnumerable<short> slotIndexes)
+        {
+            if (session == null || slotIndexes == null || !IsNewItemListUpdateSpace(itemSpace))
+                return;
+
+            var slots = slotIndexes.Distinct().ToList();
+            if (slots.Count == 0)
+                return;
+
+            var (cid, aid) = SessionOwnerResolver.Resolve(session);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x000E,
+                ItemListUpdateBuilder.BuildUpdateBody(cid, aid, itemSpace, slots)));
+        }
+
+        internal static Task SendOnlineUpdateItemList(
+            ISessionPacketSender sender,
+            InventoryListType itemSpace,
+            short slotIndex)
+        {
+            return SendOnlineUpdateItemList(sender, itemSpace, new[] { slotIndex });
+        }
+
+        internal static async Task SendOnlineUpdateItemList(
+            ISessionPacketSender sender,
+            InventoryListType itemSpace,
+            IEnumerable<short> slotIndexes)
+        {
+            if (sender == null || slotIndexes == null || !IsNewItemListUpdateSpace(itemSpace))
+                return;
+
+            var slots = slotIndexes.Distinct().ToList();
+            if (slots.Count == 0)
+                return;
+
+            await sender.SendNotiAsync(
+                0x000E,
+                ItemListUpdateBuilder.BuildUpdateBody(sender.CharacterId, sender.AccountId, itemSpace, slots));
         }
 
         internal static InventoryListType MapToNotiListType(InventoryListType moveListType)
@@ -293,6 +260,30 @@ namespace DfoServer.Network.Handlers
                 || listType == InventoryListType.Equipment
                 || listType == InventoryListType.Avatar
                 || listType == InventoryListType.Pet;
+        }
+
+        private static bool IsNewItemListUpdateSpace(InventoryListType itemSpace)
+        {
+            return itemSpace == InventoryListType.Main
+                || itemSpace == InventoryListType.PersonalCargo
+                || itemSpace == InventoryListType.AccountCargo
+                || itemSpace == InventoryListType.QuickSlot
+                || itemSpace == InventoryListType.Avatar
+                || itemSpace == InventoryListType.Equipment
+                || itemSpace == InventoryListType.Pet;
+        }
+
+        private CreatureItemListSnapshot LoadCreatureItemListSnapshot(EnhancedClientSession session, int characterId)
+        {
+            if (session != null
+                && InventoryContext.TryGetLease(characterId, out var lease)
+                && lease.IsOwnedBy(session.SessionId))
+            {
+                lock (lease.SyncRoot)
+                    return PetInventoryAccessor.BuildCreatureItemListSnapshot(lease.Inventory);
+            }
+
+            return _dataSource.LoadCreatureItemListSnapshot(characterId);
         }
 
         internal static void LogEquipmentItemLockList(string tag, IReadOnlyList<EquipmentItemLockEntry> locks)

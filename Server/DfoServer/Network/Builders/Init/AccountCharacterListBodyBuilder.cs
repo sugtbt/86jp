@@ -13,11 +13,15 @@ namespace DfoServer.Network.Builders
             IReadOnlyList<CharacterRecord> characters,
             GetUserInfoTemplate template,
             out AdventureGroupSummary adventureGroup,
-            HonorLevelSummary honorLevel = null)
+            HonorLevelSummary honorLevel = null,
+            int accountId = 0)
         {
             characters = characters ?? Array.Empty<CharacterRecord>();
             adventureGroup = AdventureGroupDataProvider.Calculate(characters);
             honorLevel = honorLevel ?? HonorLevelDataProvider.CalculateFromHonorExp(0, characters);
+            var rosterAppearances = accountId > 0
+                ? AppearanceService.LoadRosterAppearancesFromDb(accountId)
+                : new Dictionary<int, CharacterAppearanceEntry[]>();
 
             var writer = new GamePacketWriter();
             var slotLimit = CharacterSlotPolicy.ResolveSlotLimit(template?.GateOrCount1, template?.GateOrCount2);
@@ -45,7 +49,10 @@ namespace DfoServer.Network.Builders
                 writer.WriteByte(ch.Level);
                 WriteHonorRosterFields(writer, honorLevel);
 
-                var appearances = AppearanceService.LoadAppearanceFromEquipEntries(ch.CharacterId);
+                var appearances = Array.Empty<CharacterAppearanceEntry>();
+                if (ch.CharacterId > 0)
+                    rosterAppearances.TryGetValue(ch.CharacterId, out appearances);
+                appearances = appearances ?? Array.Empty<CharacterAppearanceEntry>();
                 writer.WriteByte((byte)Math.Min(byte.MaxValue, appearances.Length));
                 for (var j = 0; j < appearances.Length && j < byte.MaxValue; j++)
                     UserInfoSubtype0Builder.WriteAppearanceEntry(writer, appearances[j]);

@@ -74,29 +74,29 @@ namespace DfoServer.SelfTests
             Check("phase start hides preview", BitConverter.ToInt32(phaseStart, 5) == 0
                 && BitConverter.ToInt32(phaseStart, 9) == 0, ref failures);
 
-            var rewardItem = new CommonInventoryItem
-            {
-                SlotIndex = RewardSlot,
-                ItemTemplateId = SampleRewardItemId,
-                CountOrInstanceValue = 0x13572468,
-                Durability = 100,
-                ExtData0 = 7,
-                PrefixData0E = new byte[] { 0, 0, 0, 0, 0, 3, 0x34, 0x12 },
-            };
+            var rewardItem = ItemCore.Create(ItemCore.KindEquipment, SampleRewardItemId);
+            rewardItem.Value = 0x13572468;
+            rewardItem.Durability = 100;
+            rewardItem.Attr = 7;
+            rewardItem.AmplifyType = 3;
+            rewardItem.AmplifyValue = 0x1234;
+            rewardItem.ExpireTime = 0x12345678;
             var nativeResult = LotteryItemAckBuilder.BuildCommonItemResult(
                 LotterySlot,
+                RewardSlot,
                 rewardItem,
                 2);
-            Check("common result body length", nativeResult.Length == 52, ref failures);
+            Check("common result body length", nativeResult.Length == 56, ref failures);
             Check("common result source and reward", nativeResult[0] == 1
                 && BitConverter.ToInt16(nativeResult, 1) == LotterySlot
                 && BitConverter.ToInt16(nativeResult, 3) == RewardSlot
                 && BitConverter.ToInt32(nativeResult, 5) == SampleRewardItemId, ref failures);
             Check("common result x2 display", BitConverter.ToInt32(nativeResult, 9) == 2, ref failures);
-            Check("common result native tail", nativeResult[19] == 0xEF
-                && BitConverter.ToInt32(nativeResult, 20) == 25
-                && nativeResult.Skip(24).Take(25).All(value => value == 0)
-                && nativeResult.Skip(49).All(value => value == 0), ref failures);
+            Check("common result expire time", BitConverter.ToInt32(nativeResult, 19) == rewardItem.ExpireTime, ref failures);
+            Check("common result native tail", nativeResult[23] == 0xEF
+                && BitConverter.ToInt32(nativeResult, 24) == 25
+                && nativeResult.Skip(28).Take(25).All(value => value == 0)
+                && nativeResult.Skip(53).All(value => value == 0), ref failures);
 
             var duplicateEquipmentRewards = new[]
             {
@@ -131,24 +131,25 @@ namespace DfoServer.SelfTests
                 duplicateEquipmentRewards[0],
                 duplicateEquipmentRewards), ref failures);
 
-            var avatarReward = new LotteryRewardGrant
+            var singleReward = new LotteryRewardGrant
             {
-                ListType = InventoryListType.Avatar,
-                SlotIndex = 3,
-                ItemTemplateId = CannedAvatarItemId,
+                ListType = InventoryListType.Main,
+                SlotIndex = RewardSlot,
+                ItemTemplateId = SampleLotteryItemId,
                 GrantedCount = 1,
             };
-            var avatarSnapshot = new CharacterItemListSnapshot();
-            avatarSnapshot.AvatarItems.Add(new AvatarInventoryItem
-            {
-                SlotIndex = avatarReward.SlotIndex,
-                AvatarItemId = avatarReward.ItemTemplateId,
-                UnknownFixed30 = 0x1E00,
-                UnknownFixed4 = 4,
-            });
+            Check("single lottery reward keeps native result only", LotteryItemResponseSender.ResolveMainRewardUpdatesAfterNativeResult(
+                singleReward,
+                new[] { singleReward },
+                false).Count == 0, ref failures);
+
+            var avatarReward = ItemCore.Create(ItemCore.KindAvatar, CannedAvatarItemId);
+            avatarReward.Value = 1;
             var avatarBody = LotteryItemAckBuilder.BuildAvatarItemResult(
                 LotterySlot,
-                LotteryPresentationPolicy.ResolveAvatarResultItem(avatarSnapshot, avatarReward));
+                3,
+                avatarReward,
+                new AvatarDetail { AvatarUid = 1, JewelSocket = new byte[30] });
             Check("avatar result body length", avatarBody.Length == 129, ref failures);
             Check("avatar result success", avatarBody[0] == 1
                 && BitConverter.ToInt16(avatarBody, 1) == LotterySlot, ref failures);
@@ -160,11 +161,27 @@ namespace DfoServer.SelfTests
             Check("stackable reward announcement excluded", !LotteryPresentationPolicy.IsNoticeEligible(
                 ItemMetadataResolver.Resolve(SampleLotteryItemId)), ref failures);
 
-            var goldUpdate = ItemListUpdateBuilder.BuildGoldUpdate(123456);
+            var goldInventory = new InventoryService(CharacterId, AccountId);
+            goldInventory.SetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart, 123456);
+            var goldUpdate = ItemListUpdateBuilder.BuildItemSpaceUpdateBody(
+                goldInventory,
+                InventoryListType.Main,
+                new[] { InventoryService.MainVirtualCurrencySlotStart });
             Check("gold refresh payload", goldUpdate[0] == 0
                 && BitConverter.ToUInt16(goldUpdate, 1) == 1
                 && BitConverter.ToInt16(goldUpdate, 3) == 0
                 && BitConverter.ToInt32(goldUpdate, 9) == 123456, ref failures);
+
+            var buyAck = BuyItemAckBuilder.Build(new InventoryMutationResult
+            {
+                SlotIndex = RewardSlot,
+                ItemTemplateId = SampleLotteryItemId,
+                InstanceValue = 1,
+                UpdatedCoin = 0x12345678,
+                ExpireTime = 0x01020304,
+            });
+            Check("buy ACK carries coin balance", BitConverter.ToInt32(buyAck, 13) == 0x12345678, ref failures);
+            Check("buy ACK carries item expire time", BitConverter.ToInt32(buyAck, 32) == 0x01020304, ref failures);
         }
 
         private static void TestDefinitionAndSession(ref int failures)
@@ -248,18 +265,14 @@ namespace DfoServer.SelfTests
             Seed(databasePath);
 
             var dailyReset = new DailyResetService(databasePath, ServerPaths.SchemaFilePath);
-            var inventoryStore = new SqliteInventoryStore(databasePath, ServerPaths.SchemaFilePath);
-            var assetService = new SqliteAssetService(
-                databasePath,
-                ServerPaths.SchemaFilePath,
-                inventoryStore);
             var doublePolicy = new LotteryDoubleRewardPolicy(dailyReset, connectionString);
             var definitions = new LotteryItemDefinitionProvider();
             var service = new LotteryItemOpenService(
-                new LotteryItemRepository(inventoryStore, assetService),
+                connectionString,
                 definitions,
                 doublePolicy);
             var planner = new LotteryOpenPlanner(doublePolicy);
+            var inventory = CreateLotteryInventory();
             var hasHeroDefinition = definitions.TryGet(
                 HeroLotteryItemId,
                 out var heroDefinition);
@@ -273,31 +286,31 @@ namespace DfoServer.SelfTests
             var heroGoldCost = heroDefinition?.GoldCost ?? 0;
             var ancientGoldCost = ancientDefinition?.GoldCost ?? 0;
 
-            Check("generic booster path rejects lottery type", !inventoryStore.TryUseBoosterItem(
-                CharacterId,
-                AccountId,
+            Check("generic booster path rejects lottery type", !InventorySpecialConsumableService.TryUseBoosterItem(
+                inventory,
                 new BoosterUseRequest
                 {
                     SlotIndex = LotterySlot,
                     SelectedItemTemplateIds = Array.Empty<int>(),
                 },
+                null,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out _), ref failures);
             Check("generic rejection does not consume pot", LoadStackCount(
-                connectionString,
+                inventory,
                 LotterySlot,
                 SampleLotteryItemId) == 1, ref failures);
 
             Check("normal lottery precheck", service.CanOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 LotterySlot,
                 out var source)
                 && source.ItemTemplateId == SampleLotteryItemId, ref failures);
             Check("normal lottery opens through dedicated service", service.TryOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 LotterySlot,
                 false,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out var normalResult), ref failures);
             Check("normal lottery consumes one and grants reward", normalResult != null
                 && normalResult.SourceRemainingStackCount == 0
@@ -306,16 +319,20 @@ namespace DfoServer.SelfTests
 
             var startConcurrentOpen = new ManualResetEventSlim(false);
             var concurrentResults = new bool[2];
+            var concurrentSync = new object();
             var concurrentTasks = Enumerable.Range(0, concurrentResults.Length)
                 .Select(index => Task.Run(() =>
                 {
                     startConcurrentOpen.Wait();
-                    concurrentResults[index] = service.TryOpen(
-                        CharacterId,
-                        AccountId,
-                        ConcurrentLotterySlot,
-                        false,
-                        out _);
+                    lock (concurrentSync)
+                    {
+                        concurrentResults[index] = service.TryOpen(
+                            inventory,
+                            ConcurrentLotterySlot,
+                            false,
+                            RejectingInventoryOverflowRewardSink.Instance,
+                            out _);
+                    }
                 }))
                 .ToArray();
             startConcurrentOpen.Set();
@@ -324,45 +341,43 @@ namespace DfoServer.SelfTests
             Check("concurrent open consumes a single source exactly once",
                 concurrentResults.Count(value => value) == 1
                 && LoadStackCount(
-                    connectionString,
+                    inventory,
                     ConcurrentLotterySlot,
                     SampleLotteryItemId) == -1,
                 ref failures);
 
             Check("upgradable legacy opens through dedicated service", service.TryOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 UpgradableLegacySlot,
                 false,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out var legacyResult)
                 && legacyResult.Rewards.Count > 0, ref failures);
 
             Check("hero pot rejects insufficient gold", !service.CanOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 HeroLotterySlot,
                 out _), ref failures);
-            SetGold(connectionString, heroGoldCost);
+            SetGold(inventory, heroGoldCost);
             Check("hero pot accepts exact PVF gold cost", service.CanOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 HeroLotterySlot,
                 out _), ref failures);
             Check("hero pot deducts gold without exchange material", service.TryOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 HeroLotterySlot,
                 false,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out var heroResult)
                 && heroResult.ConsumedGold == heroGoldCost
                 && heroResult.UpdatedGold == 0, ref failures);
 
-            SetGold(connectionString, ancientGoldCost);
+            SetGold(inventory, ancientGoldCost);
             Check("ancient hero pot deducts PVF gold cost", service.TryOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 AncientHeroLotterySlot,
                 false,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out var ancientResult)
                 && ancientResult.ConsumedGold == ancientGoldCost
                 && ancientResult.UpdatedGold == 0, ref failures);
@@ -370,10 +385,10 @@ namespace DfoServer.SelfTests
             var firstDoublePlan = planner.Resolve(CharacterId, AccountId, true);
             Check("active contract plans double open", firstDoublePlan.UseDoubleReward, ref failures);
             Check("double open grants two result units", service.TryOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 DoubleLotterySlot,
                 firstDoublePlan.UseDoubleReward,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out var doubleResult)
                 && doubleResult.UsedDoubleReward
                 && doubleResult.Rewards.Sum(reward => Math.Max(1, reward.GrantedCount)) == 2, ref failures);
@@ -384,29 +399,29 @@ namespace DfoServer.SelfTests
                 var plan = planner.Resolve(CharacterId, AccountId, true);
                 Check($"double plan remains active #{index + 1}", plan.UseDoubleReward, ref failures);
                 Check($"double open succeeds #{index + 1}", service.TryOpen(
-                    CharacterId,
-                    AccountId,
+                    inventory,
                     DoubleLotterySlot,
                     plan.UseDoubleReward,
+                    RejectingInventoryOverflowRewardSink.Instance,
                     out _), ref failures);
             }
 
             Check("daily double count reaches cap", doublePolicy.GetUsedCount(CharacterId)
                 == LotteryDoubleRewardPolicy.DailyLimit, ref failures);
             var remainingBeforeRejectedDouble = LoadStackCount(
-                connectionString,
+                inventory,
                 DoubleLotterySlot,
                 SampleLotteryItemId);
             Check("stale double plan above cap falls back atomically", service.TryOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 DoubleLotterySlot,
                 true,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out var staleDoubleResult)
                 && staleDoubleResult != null
                 && !staleDoubleResult.UsedDoubleReward
                 && staleDoubleResult.Rewards.Sum(reward => Math.Max(1, reward.GrantedCount)) == 1
-                && LoadStackCount(connectionString, DoubleLotterySlot, SampleLotteryItemId)
+                && LoadStackCount(inventory, DoubleLotterySlot, SampleLotteryItemId)
                     == remainingBeforeRejectedDouble - 1
                 && doublePolicy.GetUsedCount(CharacterId) == LotteryDoubleRewardPolicy.DailyLimit,
                 ref failures);
@@ -415,10 +430,10 @@ namespace DfoServer.SelfTests
             Check("planner falls back to regular phase after cap", cappedPlan.ShouldSendRegularPhaseStart
                 && !cappedPlan.UseDoubleReward, ref failures);
             Check("regular open still succeeds after cap", service.TryOpen(
-                CharacterId,
-                AccountId,
+                inventory,
                 DoubleLotterySlot,
                 false,
+                RejectingInventoryOverflowRewardSink.Instance,
                 out var cappedRegularResult)
                 && cappedRegularResult.Rewards.Sum(reward => Math.Max(1, reward.GrantedCount)) == 1, ref failures);
 
@@ -479,26 +494,7 @@ VALUES (@characterId, 0, 24);
 
 INSERT OR REPLACE INTO account_premiums (account_id, premium_type, end_time)
 VALUES (@accountId, @premiumType, @endTime);
-
-INSERT OR REPLACE INTO character_items (
-    owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind,
-    stack_count, instance_value, durability, seal_flag, option_value, expire_time, marker_16,
-    pet_serial_or_handle, extra_json)
-VALUES
-    ('character', @characterId, @characterId, 0, 0, 0, 'special',
-     0, 0, 0, 0, 0, 0, 0, 0, '{}'),
-    ('character', @characterId, @characterId, 0, @lotterySlot, @lotteryItemId, 'stackable',
-     1, 1, 0, 0, 0, 0, 0, 0, '{}'),
-    ('character', @characterId, @characterId, 0, @doubleLotterySlot, @lotteryItemId, 'stackable',
-     12, 12, 0, 0, 0, 0, 0, 0, '{}'),
-    ('character', @characterId, @characterId, 0, @legacySlot, @legacyItemId, 'stackable',
-     1, 1, 0, 0, 0, 0, 0, 0, '{}'),
-    ('character', @characterId, @characterId, 0, @heroSlot, @heroItemId, 'stackable',
-     1, 1, 0, 0, 0, 0, 0, 0, '{}'),
-    ('character', @characterId, @characterId, 0, @ancientSlot, @ancientItemId, 'stackable',
-     1, 1, 0, 0, 0, 0, 0, 0, '{}'),
-    ('character', @characterId, @characterId, 0, @concurrentSlot, @lotteryItemId, 'stackable',
-     1, 1, 0, 0, 0, 0, 0, 0, '{}');";
+";
                     command.Parameters.AddWithValue("@accountId", AccountId);
                     command.Parameters.AddWithValue("@characterId", CharacterId);
                     command.Parameters.AddWithValue(
@@ -508,65 +504,54 @@ VALUES
                     command.Parameters.AddWithValue(
                         "@endTime",
                         DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 86400);
-                    command.Parameters.AddWithValue("@lotterySlot", LotterySlot);
-                    command.Parameters.AddWithValue("@doubleLotterySlot", DoubleLotterySlot);
-                    command.Parameters.AddWithValue("@legacySlot", UpgradableLegacySlot);
-                    command.Parameters.AddWithValue("@heroSlot", HeroLotterySlot);
-                    command.Parameters.AddWithValue("@ancientSlot", AncientHeroLotterySlot);
-                    command.Parameters.AddWithValue("@concurrentSlot", ConcurrentLotterySlot);
-                    command.Parameters.AddWithValue("@lotteryItemId", SampleLotteryItemId);
-                    command.Parameters.AddWithValue("@legacyItemId", SampleLotteryItemId);
-                    command.Parameters.AddWithValue("@heroItemId", HeroLotteryItemId);
-                    command.Parameters.AddWithValue("@ancientItemId", AncientHeroLotteryItemId);
                     command.ExecuteNonQuery();
                 }
             }
         }
 
-        private static void SetGold(string connectionString, int gold)
+        private static InventoryService CreateLotteryInventory()
         {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using (var command = connection.CreateCommand())
-                {
-                    command.CommandText = @"
-UPDATE character_items
-SET stack_count=@gold, instance_value=@gold
-WHERE character_id=@characterId AND list_type=0 AND slot_index=0;";
-                    command.Parameters.AddWithValue("@characterId", CharacterId);
-                    command.Parameters.AddWithValue("@gold", gold);
-                    command.ExecuteNonQuery();
-                }
-            }
+            var inventory = new InventoryService(CharacterId, AccountId);
+            inventory.SetListParam16(InventoryListType.Main, 24);
+            AttachStackable(inventory, LotterySlot, SampleLotteryItemId, 1);
+            AttachStackable(inventory, DoubleLotterySlot, SampleLotteryItemId, 12);
+            AttachStackable(inventory, UpgradableLegacySlot, SampleLotteryItemId, 1);
+            AttachStackable(inventory, HeroLotterySlot, HeroLotteryItemId, 1);
+            AttachStackable(inventory, AncientHeroLotterySlot, AncientHeroLotteryItemId, 1);
+            AttachStackable(inventory, ConcurrentLotterySlot, SampleLotteryItemId, 1);
+            inventory.ClearDirtyState();
+            return inventory;
+        }
+
+        private static void AttachStackable(
+            InventoryService inventory,
+            short slotIndex,
+            int itemTemplateId,
+            int count)
+        {
+            var core = InventoryCreateService.CreateCore(
+                ItemCore.KindConsumable,
+                itemTemplateId,
+                ItemCreateReason.Unknown,
+                count);
+            core.Count = count;
+            inventory.AttachItem(InventoryListType.Main, slotIndex, core);
+        }
+
+        private static void SetGold(InventoryService inventory, int gold)
+        {
+            inventory.SetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart, gold);
         }
 
         private static int LoadStackCount(
-            string connectionString,
+            InventoryService inventory,
             short slotIndex,
             int itemTemplateId)
         {
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using (var command = connection.CreateCommand())
-                {
-                    command.CommandText = @"
-SELECT stack_count
-FROM character_items
-WHERE character_id=@characterId
-  AND list_type=0
-  AND slot_index=@slotIndex
-  AND item_template_id=@itemTemplateId;";
-                    command.Parameters.AddWithValue("@characterId", CharacterId);
-                    command.Parameters.AddWithValue("@slotIndex", slotIndex);
-                    command.Parameters.AddWithValue("@itemTemplateId", itemTemplateId);
-                    var value = command.ExecuteScalar();
-                    return value == null || value == DBNull.Value
-                        ? -1
-                        : Convert.ToInt32(value);
-                }
-            }
+            var item = inventory.GetItem(InventoryListType.Main, slotIndex);
+            return item != null && item.ItemId == itemTemplateId
+                ? item.Count
+                : -1;
         }
 
         private static void DeleteTempDatabase(string path)

@@ -51,8 +51,8 @@ namespace DfoServer.Game.DeathTower
             {
                 AppendRange(
                     result,
-                    SqliteInventoryStore.QuickSlotStart,
-                    SqliteInventoryStore.QuickSlotEnd);
+                    ItemSlotBoundService.MainQuickSlotStart,
+                    ItemSlotBoundService.MainQuickSlotEnd);
                 GetSlotRange(metadata, out var overflowStart, out var overflowEnd);
                 AppendRange(result, overflowStart, overflowEnd);
                 return result;
@@ -68,7 +68,7 @@ namespace DfoServer.Game.DeathTower
             if (IsWaste(metadata))
             {
                 GetSlotRange(metadata, out var overflowStart, out var overflowEnd);
-                return SqliteInventoryStore.IsQuickSlot(slot)
+                return ItemSlotBoundService.IsMainQuickSlot(slot)
                     || (slot >= overflowStart && slot <= overflowEnd);
             }
 

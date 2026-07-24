@@ -70,7 +70,7 @@ namespace DfoServer.Network.Builders
 
                 if (template.Kind == SelectCharacterPacketTemplateKind.ItemList)
                 {
-                    var body = ItemListPacketBuilder.BuildBody(snapshot.ItemListSnapshot, template.ItemListType);
+                    var body = ItemListPacketBuilder.BuildBody(characterId, accountId, template.ItemListType);
                     yield return GamePacketEnvelopeBuilder.Build(template.Command, template.Type, body);
                     continue;
                 }

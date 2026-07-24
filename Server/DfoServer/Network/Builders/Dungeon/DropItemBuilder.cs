@@ -23,14 +23,12 @@ namespace DfoServer.Network.Builders
             w.WriteUInt32(drop.PacketValue);
             w.WriteUInt16(drop.Endurance);
 
-            var item = drop.InventoryPayload?.PacketItem;
-            var prefix = item?.PrefixData0E ?? System.Array.Empty<byte>();
-            var tail = item?.TailData2F ?? System.Array.Empty<byte>();
-            w.WriteUInt32(item != null ? item.SealFlag : 0u);
-            w.WriteByte(ReadByte(tail, 27));
-            w.WriteByte(ReadByte(tail, 29));
-            w.WriteUInt16(ReadUInt16(prefix, 6));
-            w.WriteUInt32(unchecked((uint)ReadInt32(prefix, 0)));
+            var core = drop.Core;
+            w.WriteUInt32(core != null ? core.SealFlag : 0u);
+            w.WriteByte(core != null ? core.GenuineUpgrade : (byte)0);
+            w.WriteByte(core != null ? core.TradeRestriction : (byte)0);
+            w.WriteUInt16(core != null ? core.AmplifyValue : (ushort)0);
+            w.WriteUInt32(core != null ? unchecked((uint)core.Marker16) : 0u);
 
             
             w.WriteByte(0);
@@ -76,21 +74,6 @@ namespace DfoServer.Network.Builders
             return w.ToArray();
         }
 
-        private static byte ReadByte(byte[] source, int offset)
-            => source != null && offset >= 0 && offset < source.Length ? source[offset] : (byte)0;
-
-        private static ushort ReadUInt16(byte[] source, int offset)
-            => source != null && offset >= 0 && offset + 2 <= source.Length
-                ? System.BitConverter.ToUInt16(source, offset)
-                : (ushort)0;
-
-        private static int ReadInt32(byte[] source, int offset)
-            => source != null && offset >= 0 && offset + 4 <= source.Length
-                ? System.BitConverter.ToInt32(source, offset)
-                : 0;
-
-        
-        
         public static byte[] BuildPickupItem(ushort srcSlot, ushort pickerActorId, ushort dstInvSlot, byte moveFlag)
         {
             var w = new GamePacketWriter();

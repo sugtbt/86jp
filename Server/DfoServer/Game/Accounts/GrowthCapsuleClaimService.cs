@@ -1,5 +1,7 @@
-using DfoServer.Game.Inventory;
 using System;
+using DfoServer.Game.Inventory;
+using DfoServer.Infrastructure;
+using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.Accounts
 {
@@ -23,15 +25,17 @@ namespace DfoServer.Game.Accounts
 
     public sealed class GrowthCapsuleClaimService
     {
-        private readonly IAssetService _assetService;
+        private readonly string _connectionString;
 
-        public GrowthCapsuleClaimService(IAssetService assetService)
+        public GrowthCapsuleClaimService(string databasePath, string schemaFilePath)
         {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
+            _connectionString = SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
         }
 
-        public GrowthCapsuleClaimResult Claim(int characterId, int accountId)
+        internal GrowthCapsuleClaimResult Claim(InventoryLease lease)
         {
+            var characterId = lease != null ? lease.CharacterId : 0;
+            var accountId = lease != null ? lease.AccountId : 0;
             if (characterId <= 0 || accountId <= 0)
             {
                 return new GrowthCapsuleClaimResult
@@ -41,67 +45,76 @@ namespace DfoServer.Game.Accounts
                 };
             }
 
-            using (var scope = _assetService.OpenScope(characterId, accountId))
+            using (var connection = new SqliteConnection(_connectionString))
             {
-                if (!IsCharacterOwnedByAccount(scope))
+                connection.Open();
+                using (var transaction = connection.BeginTransaction())
                 {
+                    if (!IsCharacterOwnedByAccount(connection, transaction, characterId, accountId))
+                    {
+                        return new GrowthCapsuleClaimResult
+                        {
+                            Status = GrowthCapsuleClaimStatus.InvalidOwner,
+                            Summary = GrowthCapsuleDataProvider.Calculate(0),
+                        };
+                    }
+
+                    var totalExp = GrowthCapsuleProgressRepository.LoadTotalExp(
+                        connection, transaction, accountId);
+                    var summary = GrowthCapsuleDataProvider.Calculate(totalExp);
+                    if (totalExp < summary.RequiredExp)
+                    {
+                        return new GrowthCapsuleClaimResult
+                        {
+                            Status = GrowthCapsuleClaimStatus.InsufficientExp,
+                            Summary = summary,
+                        };
+                    }
+
+                    if (!InventoryRewardGrantService.TryCreateAndInsert(
+                            lease,
+                            GrowthCapsuleDataProvider.RewardItemId,
+                            ItemCreateReason.AdminGrant,
+                            GrowthCapsuleDataProvider.RewardItemCount,
+                            out var grant))
+                    {
+                        return new GrowthCapsuleClaimResult
+                        {
+                            Status = GrowthCapsuleClaimStatus.InventoryFull,
+                            Summary = summary,
+                        };
+                    }
+
+                    GrowthCapsuleProgressRepository.UpdateTotalExpInTransaction(
+                        connection, transaction, accountId, 0);
+                    transaction.Commit();
                     return new GrowthCapsuleClaimResult
                     {
-                        Status = GrowthCapsuleClaimStatus.InvalidOwner,
+                        Status = GrowthCapsuleClaimStatus.Success,
+                        AssignedSlot = grant.SlotIndex,
+                        ItemId = GrowthCapsuleDataProvider.RewardItemId,
+                        ItemCount = GrowthCapsuleDataProvider.RewardItemCount,
                         Summary = GrowthCapsuleDataProvider.Calculate(0),
                     };
                 }
-
-                var totalExp = GrowthCapsuleProgressRepository.LoadTotalExp(
-                    scope.Connection, scope.Transaction, accountId);
-                var summary = GrowthCapsuleDataProvider.Calculate(totalExp);
-                if (totalExp < summary.RequiredExp)
-                {
-                    return new GrowthCapsuleClaimResult
-                    {
-                        Status = GrowthCapsuleClaimStatus.InsufficientExp,
-                        Summary = summary,
-                    };
-                }
-
-                if (!_assetService.TryAddItem(
-                        scope,
-                        GrowthCapsuleDataProvider.RewardItemId,
-                        GrowthCapsuleDataProvider.RewardItemCount,
-                        out var assignedSlot))
-                {
-                    return new GrowthCapsuleClaimResult
-                    {
-                        Status = GrowthCapsuleClaimStatus.InventoryFull,
-                        Summary = summary,
-                    };
-                }
-
-                GrowthCapsuleProgressRepository.UpdateTotalExpInTransaction(
-                    scope.Connection, scope.Transaction, accountId, 0);
-                scope.Commit();
-                return new GrowthCapsuleClaimResult
-                {
-                    Status = GrowthCapsuleClaimStatus.Success,
-                    AssignedSlot = assignedSlot,
-                    ItemId = GrowthCapsuleDataProvider.RewardItemId,
-                    ItemCount = GrowthCapsuleDataProvider.RewardItemCount,
-                    Summary = GrowthCapsuleDataProvider.Calculate(0),
-                };
             }
         }
 
-        private static bool IsCharacterOwnedByAccount(DbScope scope)
+        private static bool IsCharacterOwnedByAccount(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int accountId)
         {
-            using (var command = scope.Connection.CreateCommand())
+            using (var command = connection.CreateCommand())
             {
-                command.Transaction = scope.Transaction;
+                command.Transaction = transaction;
                 command.CommandText = @"
 SELECT 1
 FROM characters
 WHERE character_id=@cid AND account_id=@aid AND delete_flag=0;";
-                command.Parameters.AddWithValue("@cid", scope.CharacterId);
-                command.Parameters.AddWithValue("@aid", scope.AccountId);
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@aid", accountId);
                 return command.ExecuteScalar() != null;
             }
         }

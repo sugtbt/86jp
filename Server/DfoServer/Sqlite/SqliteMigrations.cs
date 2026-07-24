@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using DfoServer.Game.Currency;
+using DfoServer.Game.Inventory;
+using DfoServer.Game.TitleBook;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Sqlite
@@ -552,23 +555,24 @@ SET emotion_index = 0,
 WHERE emotion_index BETWEEN 1 AND 9
   AND action_byte = emotion_index;")),
 
-            // 旧绝望之塔工作树曾占用 v20；幂等补齐主线 v20 列后再创建楼层进度表，
-            // 可保留已有楼层数据，并让旧运行库安全追上当前迁移序列。
-            (29, "绝望之塔楼层进度 + 旧 v20 冲突兼容", conn =>
-            {
-                SqliteSchemaMigrator.EnsureColumns(conn, "accounts", new[]
-                {
-                    ("growth_capsule_exp", "INTEGER NOT NULL DEFAULT 0"),
-                });
-                ExecuteBatch(conn, @"
+            (29, "character_new_items/character_avatar_detail ItemCore 迁移", InventoryNewItemMigrationService.Migrate),
+            (30, "account_cargo_new_items ItemCore 迁移", InventoryNewItemMigrationService.MigrateAccountCargo),
+            (31, "character_avatar_detail 时装 UID 独立", MigrateAvatarDetailIndependentUid),
+            (32, "ItemCore charm 归并为 equipment", NormalizeLegacyCharmItemKind),
+            (33, "character_avatar_uid_sequence", EnsureAvatarUidSequence),
+            (34, "character_creature_uid_sequence", EnsureCreatureUidSequence),
+            (35, "character_new_titlebook ItemCore 迁移", CharacterTitleBookRepository.MigrateLegacyToNewTable),
+            (36, "character_new_items 主背包虚拟槽0-2迁移", InventoryNewItemMigrationService.MigrateMainVirtualCurrencySlots),
+            (37, "inventory_audit_log_v2 新背包审计日志", EnsureInventoryAuditLogV2),
+            (38, "character_name_tag_state", NameTagStateRepository.EnsureTableAndMigrateLegacy),
+            (39, "character_tower_of_despair_progress", conn => ExecuteBatch(conn, @"
 CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
     character_id INTEGER PRIMARY KEY,
     highest_cleared_floor INTEGER NOT NULL DEFAULT 0
         CHECK (highest_cleared_floor >= 0 AND highest_cleared_floor <= 100),
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
-);");
-            }),
+);")),
         };
 
         private static void MigrateKnightShieldDeck(SqliteConnection connection)
@@ -581,6 +585,42 @@ CREATE TABLE IF NOT EXISTS character_knight_shield_deck (
     PRIMARY KEY (character_id, slot_index),
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );");
+        }
+
+        private static void EnsureInventoryAuditLogV2(SqliteConnection connection)
+        {
+            ExecuteBatch(connection, @"
+CREATE TABLE IF NOT EXISTS inventory_audit_log_v2 (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    session_id TEXT,
+    owner_scope TEXT NOT NULL DEFAULT 'character' CHECK(owner_scope IN ('character', 'account')),
+    owner_id INTEGER NOT NULL DEFAULT 0,
+    character_id INTEGER NOT NULL DEFAULT 0,
+    account_id INTEGER NOT NULL DEFAULT 0,
+    action_name TEXT NOT NULL,
+    list_type INTEGER,
+    slot_index INTEGER,
+    item_id INTEGER NOT NULL DEFAULT 0,
+    item_kind INTEGER NOT NULL DEFAULT 0,
+    value_before INTEGER NOT NULL DEFAULT 0,
+    value_after INTEGER NOT NULL DEFAULT 0,
+    count_before INTEGER NOT NULL DEFAULT 0,
+    count_after INTEGER NOT NULL DEFAULT 0,
+    count_delta INTEGER NOT NULL DEFAULT 0,
+    before_core_hash TEXT,
+    after_core_hash TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_audit_v2_char_time
+    ON inventory_audit_log_v2(character_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_audit_v2_account_time
+    ON inventory_audit_log_v2(account_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_audit_v2_action_time
+    ON inventory_audit_log_v2(action_name, created_at);");
         }
 
         private static void MigrateSkillTreeIndexDefault(SqliteConnection connection)
@@ -736,6 +776,146 @@ CREATE TABLE character_skills (
                 }
             }
             return false;
+        }
+
+        private static void MigrateAvatarDetailIndependentUid(SqliteConnection connection)
+        {
+            const string tableName = "character_avatar_detail";
+            if (!TableExists(connection, tableName))
+            {
+                ExecuteBatch(connection, @"
+CREATE TABLE IF NOT EXISTS character_avatar_detail (
+    item_uid INTEGER PRIMARY KEY,
+    owner_id INTEGER NOT NULL DEFAULT 0,
+    character_id INTEGER NOT NULL DEFAULT 0,
+    item_id INTEGER NOT NULL DEFAULT 0,
+    expire_date INTEGER NOT NULL DEFAULT 0,
+    clear_avatar_id INTEGER NOT NULL DEFAULT 0,
+    jewel_socket BLOB NOT NULL CHECK(length(jewel_socket) = 30),
+    color1 INTEGER NOT NULL DEFAULT 0,
+    color2 INTEGER NOT NULL DEFAULT 0,
+    delete_date INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_character_avatar_detail_character
+    ON character_avatar_detail(character_id);");
+                return;
+            }
+
+            if (!TableSqlContains(connection, tableName, "REFERENCES character_new_items"))
+                return;
+
+            bool foreignKeysEnabled;
+            using (var command = new SqliteCommand("PRAGMA foreign_keys;", connection))
+                foreignKeysEnabled = Convert.ToInt32(command.ExecuteScalar()) != 0;
+            if (foreignKeysEnabled)
+                ExecuteBatch(connection, "PRAGMA foreign_keys=OFF;");
+
+            try
+            {
+                using (var transaction = connection.BeginTransaction())
+                {
+                    ExecuteBatch(connection, transaction, @"
+CREATE TABLE IF NOT EXISTS character_avatar_detail_v31 (
+    item_uid INTEGER PRIMARY KEY,
+    owner_id INTEGER NOT NULL DEFAULT 0,
+    character_id INTEGER NOT NULL DEFAULT 0,
+    item_id INTEGER NOT NULL DEFAULT 0,
+    expire_date INTEGER NOT NULL DEFAULT 0,
+    clear_avatar_id INTEGER NOT NULL DEFAULT 0,
+    jewel_socket BLOB NOT NULL CHECK(length(jewel_socket) = 30),
+    color1 INTEGER NOT NULL DEFAULT 0,
+    color2 INTEGER NOT NULL DEFAULT 0,
+    delete_date INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR REPLACE INTO character_avatar_detail_v31 (
+    item_uid, owner_id, character_id, item_id, expire_date, clear_avatar_id,
+    jewel_socket, color1, color2, delete_date
+)
+SELECT item_uid, owner_id, character_id, item_id, expire_date, clear_avatar_id,
+       jewel_socket, color1, color2, delete_date
+FROM character_avatar_detail;
+DROP TABLE character_avatar_detail;
+ALTER TABLE character_avatar_detail_v31 RENAME TO character_avatar_detail;
+CREATE INDEX IF NOT EXISTS idx_character_avatar_detail_character
+    ON character_avatar_detail(character_id);");
+                    transaction.Commit();
+                }
+            }
+            finally
+            {
+                if (foreignKeysEnabled)
+                    ExecuteBatch(connection, "PRAGMA foreign_keys=ON;");
+            }
+        }
+
+        private static void NormalizeLegacyCharmItemKind(SqliteConnection connection)
+        {
+            using (var transaction = connection.BeginTransaction())
+            {
+                NormalizeLegacyCharmItemKind(connection, transaction, "character_new_items");
+                NormalizeLegacyCharmItemKind(connection, transaction, "account_cargo_new_items");
+                transaction.Commit();
+            }
+        }
+
+        private static void NormalizeLegacyCharmItemKind(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            string tableName)
+        {
+            const byte legacyCharmKind = 12;
+            if (!TableExists(connection, tableName))
+                return;
+
+            var updates = new List<Tuple<long, byte[]>>();
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = $"SELECT item_uid, item_core FROM {tableName};";
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        var data = reader.IsDBNull(1) ? null : (byte[])reader[1];
+                        if (data == null || data.Length < ItemCore.Size || data[ItemCore.ItemKindOffset] != legacyCharmKind)
+                            continue;
+
+                        var core = ItemCore.FromBytes(data);
+                        core.ItemKind = ItemCore.KindEquipment;
+                        updates.Add(Tuple.Create(reader.GetInt64(0), core.ToBytes()));
+                    }
+                }
+            }
+
+            foreach (var update in updates)
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = $"UPDATE {tableName} SET item_core = @itemCore, updated_at = CURRENT_TIMESTAMP WHERE item_uid = @itemUid;";
+                    command.Parameters.AddWithValue("@itemUid", update.Item1);
+                    command.Parameters.AddWithValue("@itemCore", update.Item2);
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private static void EnsureAvatarUidSequence(SqliteConnection connection)
+        {
+            using (var transaction = connection.BeginTransaction())
+            {
+                AvatarDetailRepository.EnsureAvatarUidSequence(connection, transaction);
+                transaction.Commit();
+            }
+        }
+
+        private static void EnsureCreatureUidSequence(SqliteConnection connection)
+        {
+            using (var transaction = connection.BeginTransaction())
+            {
+                CreatureDetailRepository.EnsureCreatureUidSequence(connection, transaction);
+                transaction.Commit();
+            }
         }
 
         private static bool IsPrimaryKeyColumn(SqliteConnection connection, string tableName, string columnName)

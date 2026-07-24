@@ -1,207 +1,254 @@
 ﻿using DfoServer.Game.Inventory;
 using System;
-using System.Collections.Generic;
 using DfoServer.Network;
 
 namespace DfoServer.Network.Builders
 {
     public static class ItemListPacketBuilder
     {
-        public static IEnumerable<byte[]> BuildBodies(CharacterItemListSnapshot snapshot)
+        public static byte[] BuildBody(int characterId, int accountId, InventoryListType listType)
         {
-            yield return BuildBody(snapshot, InventoryListType.Main);
-            yield return BuildBody(snapshot, InventoryListType.Avatar);
-            yield return BuildBody(snapshot, InventoryListType.PersonalCargo);
-            yield return BuildBody(snapshot, InventoryListType.Pet);
-            yield return BuildBody(snapshot, InventoryListType.AccountCargo);
+            var lease = GetOnlineInventoryLease(characterId);
+            lock (lease.SyncRoot)
+                return BuildItemSpaceListBody(lease.Inventory, listType);
         }
 
-        public static byte[] BuildBody(CharacterItemListSnapshot snapshot, InventoryListType listType)
+        internal static byte[] BuildItemSpaceListBody(InventoryService inventory, InventoryListType listType)
         {
-            return BuildBody(snapshot, listType, false);
-        }
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
 
-        public static byte[] BuildBody(CharacterItemListSnapshot snapshot, InventoryListType listType, bool includeEquipment)
-        {
             switch (listType)
             {
                 case InventoryListType.Main:
-                    return BuildCommonContainerBody(InventoryListType.Main, snapshot.MainListParam16, snapshot.MainItems);
+                    return BuildMainItemListBody(inventory);
                 case InventoryListType.Avatar:
-                    if (includeEquipment)
-                        return BuildAvatarContainerBody(snapshot.AvatarListParam16, snapshot.AvatarItems, snapshot.EquipmentItems);
-                    return BuildAvatarContainerBody(snapshot.AvatarListParam16, snapshot.AvatarItems, null);
+                    return BuildAvatarItemListBody(inventory);
                 case InventoryListType.PersonalCargo:
-                    return BuildCommonContainerBody(InventoryListType.PersonalCargo, snapshot.PersonalCargoListParam16, snapshot.PersonalCargoItems);
+                    return BuildPersonalCargoItemListBody(inventory);
+                case InventoryListType.Equipment:
+                    return BuildEquipmentItemListBody(inventory);
                 case InventoryListType.Pet:
-                    return BuildPetContainerBody(snapshot.PetItems);
+                    return BuildPetItemListBody(inventory);
                 case InventoryListType.AccountCargo:
-                    return BuildAccountCargoBody(snapshot.AccountCargoState, snapshot.AccountCargoItems);
+                    return BuildAccountCargoItemListBody(inventory);
                 default:
                     throw new ArgumentOutOfRangeException(nameof(listType), listType, "Unsupported inventory list type.");
             }
         }
 
-        private static byte[] BuildCommonContainerBody(InventoryListType listType, ushort listParam16, List<CommonInventoryItem> items)
+        internal static byte[] BuildMainItemListBody(InventoryService inventory)
+        {
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+
+            var entries = new GamePacketWriter();
+            ushort count = 0;
+            var nowUnixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            for (short slotIndex = InventoryService.MainVirtualCurrencySlotStart;
+                slotIndex <= InventoryService.MainVirtualCurrencySlotEnd;
+                slotIndex++)
+                WriteMainVirtualCountEntry(entries, inventory, slotIndex, ref count);
+
+            foreach (var item in inventory.GetItems(InventoryListType.Main))
+            {
+                if (TryWriteOnlineEntry(entries, inventory, InventoryListType.Main, item.Key, item.Value, nowUnixTime))
+                    count++;
+            }
+
+            for (short slotIndex = InventoryService.MainVirtualCubeSlotStart;
+                slotIndex <= InventoryService.MainVirtualCubeSlotEnd;
+                slotIndex++)
+                WriteMainVirtualCountEntry(entries, inventory, slotIndex, ref count);
+
+            return BuildCommonListBody(
+                InventoryListType.Main,
+                inventory.GetListParam16(InventoryListType.Main),
+                count,
+                entries);
+        }
+
+        internal static byte[] BuildAvatarItemListBody(InventoryService inventory)
+        {
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+
+            var entries = new GamePacketWriter();
+            ushort count = 0;
+            var nowUnixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            foreach (var item in inventory.GetItems(InventoryListType.Avatar))
+            {
+                if (TryWriteOnlineEntry(entries, inventory, InventoryListType.Avatar, item.Key, item.Value, nowUnixTime))
+                    count++;
+            }
+
+            return BuildCommonListBody(
+                InventoryListType.Avatar,
+                inventory.GetListParam16(InventoryListType.Avatar),
+                count,
+                entries);
+        }
+
+        internal static byte[] BuildPetItemListBody(InventoryService inventory)
+        {
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+
+            var entries = new GamePacketWriter();
+            ushort count = 0;
+            var nowUnixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            foreach (var item in inventory.GetItems(InventoryListType.Pet))
+            {
+                if (TryWriteOnlineEntry(entries, inventory, InventoryListType.Pet, item.Key, item.Value, nowUnixTime))
+                    count++;
+            }
+
+            var writer = new GamePacketWriter();
+            writer.WriteByte((byte)InventoryListType.Pet);
+            writer.WriteUInt16(count);
+            writer.WriteBytes(entries.ToArray());
+            return writer.ToArray();
+        }
+
+        internal static byte[] BuildPersonalCargoItemListBody(InventoryService inventory)
+        {
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+
+            return BuildCommonContainerFromInventory(
+                inventory,
+                InventoryListType.PersonalCargo,
+                inventory.GetListParam16(InventoryListType.PersonalCargo));
+        }
+
+        internal static byte[] BuildEquipmentItemListBody(InventoryService inventory)
+        {
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+
+            return BuildCommonContainerFromInventory(
+                inventory,
+                InventoryListType.Equipment,
+                inventory.GetListParam16(InventoryListType.Equipment));
+        }
+
+        internal static byte[] BuildAccountCargoItemListBody(InventoryService inventory)
+        {
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+
+            var entries = new GamePacketWriter();
+            ushort count = 0;
+            var nowUnixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            foreach (var item in inventory.GetItems(InventoryListType.AccountCargo))
+            {
+                if (TryWriteOnlineEntry(entries, inventory, InventoryListType.AccountCargo, item.Key, item.Value, nowUnixTime))
+                    count++;
+            }
+
+            var writer = new GamePacketWriter();
+            writer.WriteByte((byte)InventoryListType.AccountCargo);
+            writer.WriteUInt16(inventory.AccountCargo.SelectionKey);
+            writer.WriteInt32(inventory.AccountCargo.Money);
+            writer.WriteUInt16(count);
+            writer.WriteBytes(entries.ToArray());
+            return writer.ToArray();
+        }
+
+        internal static bool TryWriteOnlineEntry(
+            GamePacketWriter writer,
+            InventoryService inventory,
+            InventoryListType itemSpace,
+            short slotIndex,
+            ItemCore core,
+            long nowUnixTime)
+        {
+            if (writer == null) throw new ArgumentNullException(nameof(writer));
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+            if (core == null || core.IsEmpty)
+                return false;
+
+            AvatarDetail avatarDetail = null;
+            if (core.ItemKind == ItemCore.KindAvatar)
+                avatarDetail = inventory.AvatarDetails.GetDetail(core.Value);
+            if (InventoryItemExpirationService.IsExpired(core, avatarDetail, nowUnixTime))
+                return false;
+
+            if (core.ItemKind == ItemCore.KindAvatar)
+            {
+                ItemListProtocolWriter.WriteAvatarEntry126(writer, slotIndex, core, avatarDetail);
+                return true;
+            }
+
+            if (core.ItemKind == ItemCore.KindCreature)
+            {
+                ItemListProtocolWriter.WritePetCreatureEntry84(
+                    writer,
+                    slotIndex,
+                    core,
+                    inventory.CreatureDetails.GetDetail(core.Value));
+                return true;
+            }
+
+            ItemListProtocolWriter.WriteCommonEntry84(writer, slotIndex, core);
+            return true;
+        }
+
+        internal static InventoryLease GetOnlineInventoryLease(int characterId)
+        {
+            if (!InventoryContext.TryGetLease(characterId, out var lease))
+                throw new InvalidOperationException("Online inventory is not registered for this character.");
+
+            return lease;
+        }
+
+        private static byte[] BuildCommonContainerFromInventory(
+            InventoryService inventory,
+            InventoryListType listType,
+            ushort listParam16)
+        {
+            var entries = new GamePacketWriter();
+            ushort count = 0;
+            var nowUnixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            foreach (var item in inventory.GetItems(listType))
+            {
+                if (TryWriteOnlineEntry(entries, inventory, listType, item.Key, item.Value, nowUnixTime))
+                    count++;
+            }
+
+            return BuildCommonListBody(listType, listParam16, count, entries);
+        }
+
+        private static byte[] BuildCommonListBody(
+            InventoryListType listType,
+            ushort listParam16,
+            ushort count,
+            GamePacketWriter entries)
         {
             var writer = new GamePacketWriter();
             writer.WriteByte((byte)listType);
             writer.WriteUInt16(listParam16);
-            writer.WriteUInt16((ushort)items.Count);
-
-            foreach (var item in items)
-            {
-                WriteCommonEntry(writer, item);
-            }
-
+            writer.WriteUInt16(count);
+            writer.WriteBytes(entries.ToArray());
             return writer.ToArray();
         }
 
-        public static void WriteCommonEntry(GamePacketWriter writer, CommonInventoryItem item)
+        internal static void WriteMainVirtualCountEntry(
+            GamePacketWriter writer,
+            InventoryService inventory,
+            short slotIndex,
+            ref ushort count)
         {
             if (writer == null) throw new ArgumentNullException(nameof(writer));
-            if (item == null) throw new ArgumentNullException(nameof(item));
-
-            // 普通物品 entry 是初始化 ITEM_LIST 和 NOTI 14 增量刷新共用的 84 字节布局。
-            writer.WriteInt16(item.SlotIndex);
-            if (item.ItemTemplateId < 0)
-            {
-                writer.WriteInt32(0);
-                writer.WriteInt32(0);
-            }
-            else
-            {
-                writer.WriteInt32(item.ItemTemplateId);
-                writer.WriteInt32(item.CountOrInstanceValue);
-            }
-            writer.WriteByte(item.ExtData0);
-            writer.WriteUInt16(item.Durability);
-            writer.WriteByte(item.SealFlag);
-            WriteFixedBytes(writer, item.PrefixData0E, 8);
-            writer.WriteInt32(item.Marker16);
-            WriteFixedBytes(writer, item.MiddleData1A, 17);
-            writer.WriteInt32(item.ExpireTime);
-            WriteFixedBytes(writer, item.TailData2F, 37);
-        }
-
-        public static void WriteCommonUpdateEntry(GamePacketWriter writer, CommonInventoryItem item)
-        {
-            if (writer == null) throw new ArgumentNullException(nameof(writer));
-            if (item == null) throw new ArgumentNullException(nameof(item));
-
-            ItemListUpdateBuilder.WriteCommonUpdateEntry(writer, item);
-        }
-
-        private static void WriteFixedBytes(GamePacketWriter writer, byte[] value, int length)
-        {
-            if (value == null || value.Length == 0)
-            {
-                writer.WriteZeroBytes(length);
+            if (inventory == null) throw new ArgumentNullException(nameof(inventory));
+            if (!InventoryService.TryResolveMainVirtualItemId(slotIndex, out var itemId))
                 return;
-            }
 
-            if (value.Length == length)
-            {
-                writer.WriteBytes(value);
-                return;
-            }
-
-            var buffer = new byte[length];
-            Array.Copy(value, 0, buffer, 0, Math.Min(value.Length, length));
-            writer.WriteBytes(buffer);
-        }
-
-        private static byte[] BuildAvatarContainerBody(ushort listParam16, List<AvatarInventoryItem> items, List<AvatarInventoryItem> equipmentItems)
-        {
-            var totalCount = items.Count + (equipmentItems != null ? equipmentItems.Count : 0);
-            var writer = new GamePacketWriter();
-            writer.WriteByte((byte)InventoryListType.Avatar);
-            writer.WriteUInt16(listParam16);
-            writer.WriteUInt16((ushort)totalCount);
-
-            foreach (var item in items)
-            {
-                WriteAvatarEntry(writer, item);
-            }
-
-            if (equipmentItems != null)
-            {
-                foreach (var item in equipmentItems)
-                {
-                    WriteAvatarEntry(writer, item);
-                }
-            }
-
-            return writer.ToArray();
-        }
-
-        public static void WriteAvatarEntry(GamePacketWriter writer, AvatarInventoryItem item)
-        {
-            if (writer == null) throw new ArgumentNullException(nameof(writer));
-            if (item == null) throw new ArgumentNullException(nameof(item));
-
-            writer.WriteInt16(item.SlotIndex);
-            writer.WriteInt32(item.AvatarItemId);
-            writer.WriteInt32(item.RemainingSeconds);
-            writer.WriteByte(item.Attr);
-            writer.WriteUInt16(item.AbilityNo);
-            writer.WriteByte(item.SealFlag);
-            WriteFixedBytes(writer, item.PrefixData0E, 8);
-            writer.WriteInt32(item.Marker16);
-            WriteFixedBytes(writer, item.MiddleData1A, 17);
-            writer.WriteInt32(item.ExpireTime);
-            WriteFixedBytes(writer, item.TailData2F, 37);
-            writer.WriteInt32(item.AvatarSocketLen);
-            WriteFixedBytes(writer, item.AvatarSocketData, 30);
-            writer.WriteInt32(item.ColorDataLen);
-            writer.WriteUInt16(item.Color1);
-            writer.WriteUInt16(item.Color2);
-        }
-
-        private static byte[] BuildPetContainerBody(List<PetInventoryItem> items)
-        {
-            var writer = new GamePacketWriter();
-            writer.WriteByte((byte)InventoryListType.Pet);
-            writer.WriteUInt16((ushort)items.Count);
-
-            foreach (var item in items)
-                WritePetEntry(writer, item);
-
-            return writer.ToArray();
-        }
-
-        public static void WritePetEntry(GamePacketWriter writer, PetInventoryItem item)
-        {
-            if (writer == null) throw new ArgumentNullException(nameof(writer));
-            if (item == null) throw new ArgumentNullException(nameof(item));
-
-            writer.WriteInt16(item.SlotIndex);
-            writer.WriteInt32(item.CreatureItemId);
-            writer.WriteInt32(item.CreatureSerialOrHandle);
-            writer.WriteByte(item.Attr);
-            writer.WriteUInt16(item.Durability);
-            writer.WriteByte(item.SealFlag);
-            WriteFixedBytes(writer, item.PrefixData0E, 8);
-            writer.WriteInt32(item.Marker16);
-            WriteFixedBytes(writer, item.MiddleData1A, 17);
-            writer.WriteInt32(item.ExpireTime);
-            WriteFixedBytes(writer, item.TailData2F, 37);
-        }
-
-        private static byte[] BuildAccountCargoBody(AccountCargoStateSnapshot state, List<CommonInventoryItem> items)
-        {
-            var writer = new GamePacketWriter();
-            writer.WriteByte((byte)InventoryListType.AccountCargo);
-            writer.WriteUInt16(state.SelectionKey);          // capacity (开通槽位数)
-            writer.WriteInt32(state.Value32);                // gold (金库金币)
-            writer.WriteUInt16((ushort)items.Count);         // itemCount (物品数量)
-
-            foreach (var item in items)
-            {
-                WriteCommonEntry(writer, item);
-            }
-
-            return writer.ToArray();
+            var virtualItem = inventory.GetMainVirtualCount(slotIndex);
+            ItemListProtocolWriter.WriteVirtualCountEntry84(
+                writer,
+                slotIndex,
+                itemId,
+                virtualItem?.Count ?? 0);
+            count++;
         }
     }
 }

@@ -19,9 +19,41 @@ namespace DfoServer.Network.Handlers
             }
 
             FileLogger.Log($"[{ProtocolName}] DISJOINT_AVATAR raw({body?.Length ?? 0}B): {(body == null ? "null" : BitConverter.ToString(body))} slot={request.SlotIndex} expected=0x{request.ExpectedItemTemplateId:X8}");
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryDisjointAvatar(cid, aid, request, out var result))
+            var (cid, _) = ResolveOwner(session);
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
             {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x00CA,
+                    AvatarDisjointAckBuilder.BuildError(AvatarDisjointResult.ErrorInvalidRequest)));
+                return;
+            }
+
+            bool hasRewardSpace;
+            int freeEmblemSlots;
+            ItemSlotRange emblemRange;
+            AvatarDisjointResult result = null;
+            bool ok;
+            lock (lease.SyncRoot)
+            {
+                hasRewardSpace = InventorySpaceCheckService.HasEnoughAvatarEmblemFreeSlots(
+                    lease.Inventory,
+                    out freeEmblemSlots,
+                    out emblemRange);
+
+                ok = hasRewardSpace
+                    && InventoryAvatarDisjointService.TryDisjointAvatar(lease.Inventory, request, out result);
+            }
+
+            if (!hasRewardSpace)
+            {
+                FileLogger.Log($"[{ProtocolName}] DISJOINT_AVATAR: FAILED emblem free slots insufficient free={freeEmblemSlots} required={InventorySpaceCheckService.RequiredFreeAvatarDisjointRewardSlots} range={emblemRange.Start}-{emblemRange.End}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x00CA,
+                    AvatarDisjointAckBuilder.BuildError(AvatarDisjointResult.ErrorInventoryFull)));
+                return;
+            }
+
+            if (!ok)
+            {
+                FileLogger.Log($"[{ProtocolName}] DISJOINT_AVATAR: FAILED error=0x{(result?.ErrorCode ?? AvatarDisjointResult.ErrorInvalidRequest):X2} slot={request.SlotIndex} expected=0x{request.ExpectedItemTemplateId:X8}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x00CA,
                     AvatarDisjointAckBuilder.BuildError(result?.ErrorCode ?? AvatarDisjointResult.ErrorInvalidRequest)));
                 return;

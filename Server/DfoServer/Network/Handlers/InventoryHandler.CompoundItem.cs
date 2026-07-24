@@ -23,8 +23,19 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var (cid, aid) = ResolveOwner(session);
-            _inventoryStore.TryCompoundItemRecipe(cid, aid, request, out var result);
+            var (cid, _) = ResolveOwner(session);
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    header.type,
+                    CompoundItemAckBuilder.BuildError(17)));
+                return;
+            }
+
+            CompoundItemRecipeResult result;
+            lock (lease.SyncRoot)
+                InventoryCompoundItemRecipeService.TryCompoundItemRecipe(lease.Inventory, request, out result);
 
             var ackBody = CompoundItemAckBuilder.Build(result);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, header.type, ackBody));
@@ -37,6 +48,10 @@ namespace DfoServer.Network.Handlers
                     $"raw={BitConverter.ToString(body ?? Array.Empty<byte>())}");
                 return;
             }
+
+            var refreshSlots = result.GetMainRefreshSlots();
+            if (refreshSlots.Count > 0)
+                await _refresh.SendUpdateItemList(session, InventoryListType.Main, refreshSlots);
 
             FileLogger.Log(
                 $"[{ProtocolName}] COMPOUND_ITEM ok cid={cid} ackLen={ackBody.Length} " +

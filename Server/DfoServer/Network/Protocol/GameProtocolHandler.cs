@@ -43,7 +43,6 @@ namespace DfoServer.Network
         private readonly GoldLimitHandler _goldLimitHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
-        private readonly SqliteAssetService _assetService;
         private readonly ISessionDirectory _sessionDirectory;
         // 组队与城镇/副本共享同一个 PartyManager 实例: 副本 fan-out 与跟随退出都要看到同一份队伍状态。
         private readonly Game.Party.PartyManager _partyManager;
@@ -63,24 +62,22 @@ namespace DfoServer.Network
             var rentalTimeProvider = SystemRentalTimeProvider.Instance;
             var dailyResetService = new Game.DailyReset.DailyResetService(databasePath, schemaFilePath);
 
-            // 全程序共享一个 SqliteInventoryStore(无状态, 只持连接串): 旧版门面与 AssetService 各自 new 一个
-            var inventoryStore = new Game.Inventory.SqliteInventoryStore(
+            var connectionString = SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
+            var inventoryLifecycle = new InventoryCharacterLifecycleService(
                 databasePath,
                 schemaFilePath,
                 rentalTimeProvider);
             var experienceItemCooldowns = new ExperienceItemCooldownTracker();
             var experienceItemUseService = new ExperienceItemUseService(
-                inventoryStore,
+                databasePath,
+                schemaFilePath,
                 rentalTimeProvider,
                 experienceItemCooldowns);
-            _assetService = new SqliteAssetService(databasePath, schemaFilePath, inventoryStore);
-
             var sqliteSelectCharacterDataSource = new SqliteSelectCharacterDataSource(
                 databasePath,
                 schemaFilePath,
                 characterRepository,
-                _assetService,
-                inventoryStore,
+                inventoryLifecycle,
                 rentalTimeProvider,
                 dailyResetService);
 
@@ -92,7 +89,7 @@ namespace DfoServer.Network
             _sessionDirectory = sessionDirectory;
             _loginHandler = new LoginHandler(accountRepository, characterRepository);
             _characterSelectHandler = new CharacterSelectHandler(sqliteSelectCharacterDataSource, characterRepository, getUserInfoTemplate, sessionDirectory);
-            _inventoryRefreshSender = new InventoryRefreshSender(inventoryStore, sqliteSelectCharacterDataSource, characterRepository);
+            _inventoryRefreshSender = new InventoryRefreshSender(sqliteSelectCharacterDataSource, characterRepository);
             var knightShieldRepository = new KnightShieldDeckRepository(databasePath, schemaFilePath);
             var knightShieldService = new KnightShieldService(knightShieldRepository);
             _knightShieldHandler = new KnightShieldHandler(
@@ -103,7 +100,6 @@ namespace DfoServer.Network
                 databasePath,
                 schemaFilePath);
             _inventoryHandler = new InventoryHandler(
-                inventoryStore,
                 experienceItemUseService,
                 sqliteSelectCharacterDataSource,
                 characterRepository,
@@ -112,58 +108,53 @@ namespace DfoServer.Network
                 broadcastGamePacket);
             var lotteryDoubleRewardPolicy = new LotteryDoubleRewardPolicy(
                 dailyResetService,
-                inventoryStore.ConnectionString);
-            var lotteryRepository = new LotteryItemRepository(
-                inventoryStore,
-                _assetService);
+                connectionString);
             var lotteryOpenService = new LotteryItemOpenService(
-                lotteryRepository,
+                connectionString,
                 new LotteryItemDefinitionProvider(),
                 lotteryDoubleRewardPolicy);
             var lotteryResponses = new LotteryItemResponseSender(
-                inventoryStore,
                 lotteryDoubleRewardPolicy,
                 _inventoryRefreshSender,
-                inventoryStore.ConnectionString,
+                connectionString,
                 broadcastGamePacket);
             _lotteryItemHandler = new LotteryItemHandler(
                 lotteryOpenService,
                 new LotteryOpenPlanner(lotteryDoubleRewardPolicy),
                 new LotteryOpenSessionCoordinator(),
                 lotteryResponses);
-            _petCreatureHandler = new PetCreatureHandler(inventoryStore, sqliteSelectCharacterDataSource, _inventoryRefreshSender);
+            _petCreatureHandler = new PetCreatureHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
             // 组队与城镇/副本共享同一个 PartyManager 实例: 跟随退出/副本 fan-out 都要看到同一份队伍状态。
             _partyManager = new Game.Party.PartyManager();
-            _townHandler = new TownHandler(characterRepository, inventoryStore, sqliteSelectCharacterDataSource, _partyManager, sessionDirectory);
-            var reviveCoinService = new Game.ReviveCoin.ReviveCoinService(inventoryStore, _assetService, dailyResetService);
+            _townHandler = new TownHandler(characterRepository, sqliteSelectCharacterDataSource, _partyManager, sessionDirectory, _inventoryRefreshSender);
+            var reviveCoinService = new Game.ReviveCoin.ReviveCoinService(dailyResetService);
             _dungeonHandler = new DungeonHandler(
-                _assetService,
                 reviveCoinService,
                 characterRepository,
                 sqliteSelectCharacterDataSource,
                 rentalTimeProvider,
-                inventoryStore,
+                connectionString,
                 _inventoryRefreshSender,
                 _partyManager,
                 sessionDirectory);
-            _secretShopHandler = new SecretShopHandler(inventoryStore, _inventoryRefreshSender);
-            _staminaHandler = new StaminaHandler(_assetService);
+            _secretShopHandler = new SecretShopHandler(_inventoryRefreshSender);
+            _staminaHandler = new StaminaHandler(_inventoryRefreshSender);
             _settingsHandler = new SettingsHandler();
-            _ceraShopHandler = new CeraShopHandler(inventoryStore, sqliteSelectCharacterDataSource, _inventoryRefreshSender);
-            _skillHandler = new SkillHandler(characterRepository, inventoryStore, _inventoryRefreshSender);
-            _luckyStarHandler = new LuckyStarHandler(_assetService, sqliteSelectCharacterDataSource, rentalTimeProvider);
-            _rentalHandler = new RentalHandler(_assetService, inventoryStore, sqliteSelectCharacterDataSource, rentalTimeProvider);
+            _ceraShopHandler = new CeraShopHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
+            _skillHandler = new SkillHandler(characterRepository, _inventoryRefreshSender);
+            _luckyStarHandler = new LuckyStarHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
+            _rentalHandler = new RentalHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             _mailboxHandler = new MailboxHandler();
-            var collectBoxProgressRepository = new Game.Inventory.CollectBoxProgressRepository(databasePath, schemaFilePath);
-            _collectionBoxHandler = new CollectionBoxHandler(inventoryStore, collectBoxProgressRepository);
+            _collectionBoxHandler = new CollectionBoxHandler(_inventoryRefreshSender);
             _shopCoinEventHandler = new ShopCoinEventHandler(reviveCoinService, _inventoryRefreshSender);
             _mercenaryHandler = new MercenaryHandler(characterRepository);
             _partyHandler = new PartyHandler(_partyManager, characterRepository, sessionDirectory);
             PetCreatureRuntimeService.EnsureClockRegistered();
             _growthCapsuleHandler = new GrowthCapsuleHandler(
-                _assetService, _inventoryRefreshSender, characterRepository);
+                _inventoryRefreshSender, characterRepository);
             _goldLimitHandler = new GoldLimitHandler(
-                new Game.Currency.CharacterGoldLimitRepository(databasePath, schemaFilePath));
+                new Game.Currency.CharacterGoldLimitRepository(databasePath, schemaFilePath),
+                _inventoryRefreshSender);
 
             _cmdDispatch = new Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>>();
             RegisterLoginHandlers(_cmdDispatch);
@@ -203,6 +194,7 @@ namespace DfoServer.Network
             await _townHandler.NotifyLeaveAsync(session);
             var charId = session.Player?.CharacterId ?? 0;
             if (charId > 0) await _sessionDirectory.UnregisterAsync(charId);
+            if (charId > 0) InventoryContext.Unregister(session.SessionId, charId);
             Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(session, "disconnect");
             _townHandler.PersistPosition(session, forceImmediate: true, source: "disconnect");
             _lotteryItemHandler.ClearSession(session.SessionId);
@@ -259,11 +251,14 @@ namespace DfoServer.Network
                 if (s.Player != null && s.Player.CharacterId > 0)
                 {
                     if (prevCharId > 0 && prevCharId != s.Player.CharacterId)
+                    {
                         await _sessionDirectory.UnregisterAsync(prevCharId);
+                        InventoryContext.Unregister(s.SessionId, prevCharId);
+                    }
                     _sessionDirectory.Register(s.Player.CharacterId, s);
                     var gsConnStr = SqliteDatabaseBootstrap.Initialize(
                         ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
-                    s.GameSession = new Game.Session.GameSession(s, gsConnStr, _assetService);
+                    s.GameSession = new Game.Session.GameSession(s, gsConnStr);
                     await _inventoryRefreshSender.SendAllEquipmentItemLockListRefresh(s);
                     await s.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(null);
                     await PetCreatureRuntimeService.BeginTownAsync(s, "select_character");
@@ -275,6 +270,7 @@ namespace DfoServer.Network
             {
                 var charId = s.Player?.CharacterId ?? 0;
                 if (charId > 0) await _sessionDirectory.UnregisterAsync(charId);
+                if (charId > 0) InventoryContext.Unregister(s.SessionId, charId);
                 _townHandler.PersistPosition(s, forceImmediate: true, source: "return_select");
                 s.GameSession = null;
                 await _characterSelectHandler.Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(s, h, b);
@@ -367,7 +363,6 @@ namespace DfoServer.Network
             d[0x00AD] = _petCreatureHandler.HandleHatchCreatureEgg;
             d[0x00AE] = _petCreatureHandler.HandleRequestHatchedCreature;
             d[0x01E0] = _petCreatureHandler.HandleVerifyCreatureQuest;
-            d[0x037F] = _petCreatureHandler.HandleSealCreature;
         }
 
         private void RegisterSortItemLockHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
@@ -483,11 +478,8 @@ namespace DfoServer.Network
             {
                 if (s.GameSession != null)
                 {
-                    var result =
-                        await s.GameSession.QuestManager
-                            .HandleSetTriggerAsync(h.type, b);
-                    await _dungeonHandler
-                        .HandleQuestSetTriggerResultAsync(s, result);
+                    var result = await s.GameSession.QuestManager.HandleSetTriggerAsync(h.type, b);
+                    await _dungeonHandler.HandleQuestSetTriggerResultAsync(s, result);
                 }
             };
             d[0x0022] = async (s, h, b) => //34

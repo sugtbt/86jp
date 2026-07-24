@@ -24,15 +24,41 @@ namespace DfoServer.Network.Handlers
 
             var (cid, aid) = ResolveOwner(session);
 
-            if (_inventoryStore.TryUseAccountCargoUpgradeTool(cid, aid, listType, slotIndex, out var accountCargoToolResult)
-                && accountCargoToolResult.Handled)
+            AccountCargoUpgradeToolResult accountCargoToolResult = null;
+            bool accountCargoToolHandled = false;
+            InventoryLease lease = null;
+            if (TryGetOwnedInventoryLease(session, cid, out lease))
+            {
+                lock (lease.SyncRoot)
+                    accountCargoToolHandled = InventoryCargoRuntimeService.TryUseAccountCargoUpgradeTool(
+                        lease.Inventory,
+                        listType,
+                        slotIndex,
+                        out accountCargoToolResult)
+                        && accountCargoToolResult.Handled;
+            }
+
+            if (accountCargoToolHandled)
             {
                 await SendAccountCargoUpgradeToolResponse(session, listType, slotIndex, instanceValue, itemCode, accountCargoToolResult);
                 return;
             }
 
-            if (_inventoryStore.TryUsePersonalCargoUpgradeTicket(cid, aid, listType, slotIndex, itemCode, out var cargoTicketResult)
-                && cargoTicketResult.Handled)
+            PersonalCargoUpgradeTicketResult cargoTicketResult = null;
+            bool cargoTicketHandled = false;
+            if (lease != null)
+            {
+                lock (lease.SyncRoot)
+                    cargoTicketHandled = InventoryCargoRuntimeService.TryUsePersonalCargoUpgradeTicket(
+                        lease.Inventory,
+                        listType,
+                        slotIndex,
+                        itemCode,
+                        out cargoTicketResult)
+                        && cargoTicketResult.Handled;
+            }
+
+            if (cargoTicketHandled)
             {
                 await SendPersonalCargoUpgradeTicketResponse(session, listType, slotIndex, instanceValue, itemCode, cargoTicketResult);
                 return;
@@ -46,14 +72,26 @@ namespace DfoServer.Network.Handlers
                 ExpectedSourceItemTemplateId = itemCode,
                 RawBody = body,
             };
-            if (_inventoryStore.TryUseEquipmentEffectRune(cid, aid, runeRequest, out var runeResult)
+            if (TryUseOnlineEquipmentEffectRune(session, cid, runeRequest, out var runeResult)
                 && runeResult.Handled)
             {
                 await SendEquipmentEffectRuneResponse(session, listType, slotIndex, instanceValue, itemCode, runeResult);
                 return;
             }
 
-            var consumed = _inventoryStore.TryDeleteItem(cid, aid, listType, slotIndex, 1, out var result);
+            var consumed = false;
+            InventoryMutationResult result = null;
+            if (TryGetOwnedInventoryLease(session, cid, out lease))
+            {
+                lock (lease.SyncRoot)
+                    consumed = InventoryDeleteService.TryUseStackableForClient(
+                        lease.Inventory,
+                        listType,
+                        slotIndex,
+                        itemCode,
+                        out result);
+            }
+
             var responsePlan = BuildUseStackableResponsePlan(consumed, result, listType, slotIndex, instanceValue, itemCode);
             if (!consumed)
             {
@@ -65,8 +103,6 @@ namespace DfoServer.Network.Handlers
             }
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x002C, responsePlan.AckBody));
-            if (responsePlan.ItemListUpdateBody != null)
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, responsePlan.ItemListUpdateBody));
 
             var petSatietyLog = result.PetSatietyChanged
                 ? $" petSatiety key={result.PetCreatureKey} {result.PetSatietyBefore}->{result.PetSatietyAfter}"
@@ -85,7 +121,7 @@ namespace DfoServer.Network.Handlers
             }
 
             var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryUseEquipmentEffectRune(cid, aid, request, out var result)
+            if (!TryUseOnlineEquipmentEffectRune(session, cid, request, out var result)
                 || result == null
                 || !result.Handled)
             {
@@ -103,6 +139,38 @@ namespace DfoServer.Network.Handlers
                 result,
                 0x0342,
                 result.Success ? BuildAddEquipmentEffectAck(body) : new byte[] { 0x00, 0x04 });
+        }
+
+        private bool TryUseOnlineEquipmentEffectRune(
+            EnhancedClientSession session,
+            int characterId,
+            EquipmentEffectRuneUseRequest request,
+            out EquipmentEffectRuneUseResult result)
+        {
+            result = null;
+            if (request == null)
+                return false;
+
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+            {
+                if (InventoryEquipmentMutationService.IsEquipmentEffectRuneItem(request.ExpectedSourceItemTemplateId))
+                {
+                    result = new EquipmentEffectRuneUseResult
+                    {
+                        Status = EquipmentEffectRuneStatus.MissingSource,
+                        SourceListType = request.SourceListType,
+                        SourceSlotIndex = request.SourceSlotIndex,
+                        SourceInstanceValue = request.SourceInstanceValue,
+                        SourceItemTemplateId = request.ExpectedSourceItemTemplateId,
+                    };
+                    return true;
+                }
+
+                return false;
+            }
+
+            lock (lease.SyncRoot)
+                return InventoryEquipmentMutationService.TryUseEquipmentEffectRune(lease.Inventory, request, out result);
         }
 
         private async Task SendEquipmentEffectRuneResponse(
@@ -211,9 +279,11 @@ namespace DfoServer.Network.Handlers
             int itemCode)
         {
             var stalePetConsumable = !consumed && IsPetConsumableSlot(listType, slotIndex);
+            var responseItemCode = itemCode != 0 ? itemCode : result?.ItemTemplateId ?? 0;
+            var responseInstanceValue = instanceValue != 0 ? instanceValue : result?.InstanceValue ?? 0;
             var ackBody = consumed || stalePetConsumable
-                ? UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, instanceValue, itemCode)
-                : UseStackableAckBuilder.BuildError((byte)listType, itemCode, instanceValue);
+                ? UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, responseInstanceValue, responseItemCode)
+                : UseStackableAckBuilder.BuildError((byte)listType, responseItemCode, responseInstanceValue);
 
             return new UseStackableResponsePlan
             {
@@ -226,8 +296,8 @@ namespace DfoServer.Network.Handlers
         private static bool IsPetConsumableSlot(InventoryListType listType, short slotIndex)
         {
             return listType == InventoryListType.Pet
-                && slotIndex >= SqliteInventoryStore.PetConsumableSlotStart
-                && slotIndex <= SqliteInventoryStore.PetConsumableSlotEnd;
+                && slotIndex >= 189
+                && slotIndex <= InventoryService.CreatureSlotEnd;
         }
 
         internal sealed class UseStackableResponsePlan
@@ -250,8 +320,8 @@ namespace DfoServer.Network.Handlers
             }
             else
             {
-                var (cid, aid) = ResolveOwner(session);
-                if (_inventoryStore.TryOpenAvatarPackage(cid, aid, request, out var result))
+                var (cid, _) = ResolveOwner(session);
+                if (TryOpenOnlineAvatarPackage(session, cid, request, out var result))
                 {
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0207, AvatarPackageAckBuilder.BuildSuccess(result.SlotIndex)));
                     if (result.GrantedItems.Count > 0)
@@ -260,14 +330,7 @@ namespace DfoServer.Network.Handlers
                             SelectablePackageAckBuilder.BuildSuccess(result.SlotIndex, result.GrantedItems)));
                     }
 
-                    if (result.SourceRemainingStackCount <= 0)
-                        await SendConsumedSourceItemUpdate(session, result.SlotIndex, result.PackageItemTemplateId);
-
-                    var snapshot = _inventoryStore.LoadCharacterItemListSnapshot(cid, aid);
-                    var mainUpdateBody = BuildGrantedMainItemUpdates(snapshot, result.GrantedItems, result.SlotIndex, result.PackageItemTemplateId, result.SourceRemainingStackCount > 0);
-                    if (mainUpdateBody != null)
-                        await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, mainUpdateBody));
-
+                    await SendPackageMainItemUpdates(session, result.SlotIndex, result.SourceRemainingStackCount, result.GrantedItems);
                     await SendAvatarOrPetUpdateListForGrantedItems(session, result.GrantedItems);
 
                     if (result.ActivatedPremiums.Count > 0)
@@ -297,19 +360,12 @@ namespace DfoServer.Network.Handlers
             }
             else
             {
-                var (cid, aid) = ResolveOwner(session);
-                if (_inventoryStore.TryOpenSelectablePackage(cid, aid, request, out var result))
+                var (cid, _) = ResolveOwner(session);
+                if (TryOpenOnlineSelectablePackage(session, cid, request, out var result))
                 {
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x00A0, SelectablePackageAckBuilder.BuildSuccess(result.SlotIndex, result.GrantedItems)));
 
-                    if (result.SourceRemainingStackCount <= 0)
-                        await SendConsumedSourceItemUpdate(session, result.SlotIndex, result.PackageItemTemplateId);
-
-                    var snapshot = _inventoryStore.LoadCharacterItemListSnapshot(cid, aid);
-                    var mainUpdateBody = BuildGrantedMainItemUpdates(snapshot, result.GrantedItems, result.SlotIndex, result.PackageItemTemplateId, result.SourceRemainingStackCount > 0);
-                    if (mainUpdateBody != null)
-                        await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, mainUpdateBody));
-
+                    await SendPackageMainItemUpdates(session, result.SlotIndex, result.SourceRemainingStackCount, result.GrantedItems);
                     await SendAvatarOrPetUpdateListForGrantedItems(session, result.GrantedItems);
 
                     if (result.ActivatedPremiums.Count > 0)
@@ -362,9 +418,9 @@ namespace DfoServer.Network.Handlers
                 : 0;
 
             var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryUseBoosterItem(
+            if (!TryUseOnlineBoosterItem(
+                    session,
                     cid,
-                    aid,
                     new BoosterUseRequest
                     {
                         SlotIndex = request.SlotIndex,
@@ -410,9 +466,9 @@ namespace DfoServer.Network.Handlers
                 : 0;
 
             var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryUseBoosterItem(
+            if (!TryUseOnlineBoosterItem(
+                    session,
                     cid,
-                    aid,
                     new BoosterUseRequest
                     {
                         SlotIndex = request.SlotIndex,
@@ -472,7 +528,7 @@ namespace DfoServer.Network.Handlers
             }
 
             var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryUseBoosterItem(cid, aid, new BoosterUseRequest
+            if (!TryUseOnlineBoosterItem(session, cid, new BoosterUseRequest
             {
                 SlotIndex = slotIndex,
                 SelectedItemTemplateIds = selectedItemTemplateIds,
@@ -504,7 +560,6 @@ namespace DfoServer.Network.Handlers
             if (requestType != 0x0218 || body == null || body.Length != 2)
                 return false;
 
-            // 00 FF 表示契约已开启但不选晶体，也必须覆盖旧选择。
             if (body[0] != 0x00 || (body[1] > 0x05 && body[1] != 0xFF))
                 return false;
 
@@ -521,16 +576,8 @@ namespace DfoServer.Network.Handlers
             var selectedItemTemplateIds = Parse0207ItemIds(body);
             FileLogger.Log($"[{ProtocolName}] OPEN_PACKAGE_0207 raw({body.Length}B): {BitConverter.ToString(body)} slot={slotIndex} selected={string.Join(",", selectedItemTemplateIds.Select(id => $"0x{id:X8}"))}");
 
-            var (cid, aid) = ResolveOwner(session);
-            if (selectedItemTemplateIds.Count == 0
-                && _inventoryStore.TryOpenSealedPetCreatureCapsule(cid, aid, slotIndex, out var sealedPetResult))
-            {
-                await SendBoosterUseResult(session, header.type, sealedPetResult);
-                FileLogger.Log($"[{ProtocolName}] OPEN_PACKAGE_0207: sealed pet source=0x{sealedPetResult.SourceItemTemplateId:X8} slot={sealedPetResult.SourceSlotIndex} rewards={sealedPetResult.Rewards.Count}");
-                return true;
-            }
-
-            if (!_inventoryStore.TryOpenPackage0207(cid, aid, slotIndex, selectedItemTemplateIds, out var result))
+            var (cid, _) = ResolveOwner(session);
+            if (!TryOpenOnlinePackage0207(session, cid, slotIndex, selectedItemTemplateIds, out var result))
             {
                 FileLogger.Log($"[{ProtocolName}] OPEN_PACKAGE_0207: failed slot={slotIndex}");
                 return false;
@@ -539,6 +586,97 @@ namespace DfoServer.Network.Handlers
             await SendBoosterUseResult(session, header.type, result);
             FileLogger.Log($"[{ProtocolName}] OPEN_PACKAGE_0207: source=0x{result.SourceItemTemplateId:X8} slot={result.SourceSlotIndex} rewards={result.Rewards.Count}");
             return true;
+        }
+
+        private bool TryUseOnlineBoosterItem(
+            EnhancedClientSession session,
+            int characterId,
+            BoosterUseRequest request,
+            out BoosterUseResult result)
+        {
+            result = null;
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+                return false;
+
+            lock (lease.SyncRoot)
+            {
+                return InventorySpecialConsumableService.TryUseBoosterItem(
+                    lease.Inventory,
+                    request,
+                    ResolveCharacterJobLabel(characterId),
+                    RejectingInventoryOverflowRewardSink.Instance,
+                    out result);
+            }
+        }
+
+        private bool TryOpenOnlinePackage0207(
+            EnhancedClientSession session,
+            int characterId,
+            short slotIndex,
+            IReadOnlyList<int> selectedItemTemplateIds,
+            out BoosterUseResult result)
+        {
+            result = null;
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+                return false;
+
+            lock (lease.SyncRoot)
+            {
+                return InventorySpecialConsumableService.TryOpenPackage0207(
+                    lease.Inventory,
+                    slotIndex,
+                    selectedItemTemplateIds,
+                    RejectingInventoryOverflowRewardSink.Instance,
+                    out result);
+            }
+        }
+
+        private bool TryOpenOnlineAvatarPackage(
+            EnhancedClientSession session,
+            int characterId,
+            AvatarPackageOpenRequest request,
+            out AvatarPackageOpenResult result)
+        {
+            result = null;
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+                return false;
+
+            lock (lease.SyncRoot)
+            {
+                return InventorySpecialConsumableService.TryOpenAvatarPackage(
+                    lease.Inventory,
+                    request,
+                    RejectingInventoryOverflowRewardSink.Instance,
+                    out result);
+            }
+        }
+
+        private bool TryOpenOnlineSelectablePackage(
+            EnhancedClientSession session,
+            int characterId,
+            SelectablePackageOpenRequest request,
+            out SelectablePackageOpenResult result)
+        {
+            result = null;
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+                return false;
+
+            lock (lease.SyncRoot)
+            {
+                return InventorySpecialConsumableService.TryOpenSelectablePackage(
+                    lease.Inventory,
+                    request,
+                    RejectingInventoryOverflowRewardSink.Instance,
+                    out result);
+            }
+        }
+
+        private string ResolveCharacterJobLabel(int characterId)
+        {
+            var record = _characterRepository.GetById(characterId);
+            return record != null
+                ? InventorySpecialConsumableService.ResolveCharacterJobLabel(record.Job)
+                : null;
         }
 
         private async Task SendBoosterUseResult(EnhancedClientSession session, ushort responseType, BoosterUseResult result)
@@ -594,16 +732,10 @@ namespace DfoServer.Network.Handlers
                 }
             }
 
-            var (cid, aid) = ResolveOwner(session);
-
             if (result.SourceRemainingStackCount <= 0)
-                await SendConsumedSourceItemUpdate(session, result.SourceSlotIndex, result.SourceItemTemplateId);
+                await _refresh.SendEmptyUpdateItemList(session, InventoryListType.Main, result.SourceSlotIndex);
 
-            var snapshot = _inventoryStore.LoadCharacterItemListSnapshot(cid, aid);
-            var mainUpdateBody = BuildBoosterMainItemUpdates(snapshot, result, result.SourceRemainingStackCount > 0);
-            if (mainUpdateBody != null)
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, mainUpdateBody));
-
+            await SendBoosterMainItemUpdates(session, result, result.SourceRemainingStackCount > 0);
             await SendAvatarOrPetUpdateListForBoosterRewards(session, result);
             if (ShouldSendCreatureListRefreshForBoosterRewards(result))
                 await _refresh.SendCreatureItemListRefresh(session);
@@ -627,7 +759,6 @@ namespace DfoServer.Network.Handlers
 
         internal static byte[] BuildBoosterFailureAckBody(BoosterUseResult result)
         {
-            // 0x16 走客户端通用错误层的静默分支，避免动态材料提示后再弹固定错误。
             var errorCode = result?.ErrorCode == BoosterUseResult.ErrorMaterialNotEnough
                 ? (byte)0x16
                 : result?.ErrorCode ?? BoosterUseResult.ErrorInvalidRequest;
@@ -651,9 +782,9 @@ namespace DfoServer.Network.Handlers
                 return null;
 
             var materialName = string.IsNullOrWhiteSpace(result.RequiredMaterialName)
-                ? "指定材料"
+                ? "鎸囧畾鏉愭枡"
                 : result.RequiredMaterialName.Trim();
-            return $"材料不足：需要【{materialName}】 x{result.RequiredMaterialCount}，当前 x{Math.Max(0, result.AvailableMaterialCount)}。";
+            return $"\u6750\u6599\u4E0D\u8DB3: \u9700\u8981[{materialName}] x{result.RequiredMaterialCount}, \u5F53\u524D x{Math.Max(0, result.AvailableMaterialCount)}.";
         }
 
         private static bool ShouldSendCreatureListRefreshForBoosterRewards(BoosterUseResult result)
@@ -664,7 +795,7 @@ namespace DfoServer.Network.Handlers
             return result.Rewards.Any(x =>
                 x != null
                 && x.ListType == InventoryListType.Pet
-                && SqliteInventoryStore.IsCreatureItem(x.ItemTemplateId));
+                && ItemMetadataResolver.IsCreatureItem(x.ItemTemplateId));
         }
 
         internal static bool ShouldSendSourceAckForBoosterResponse(ushort responseType)
@@ -714,91 +845,66 @@ namespace DfoServer.Network.Handlers
             return state + $" seriaLuck={result.SeriaLuckValueBefore}->{result.SeriaLuckValueAfter}/{result.SeriaLuckValueMax} doubleTriggered={result.SeriaLuckDoubleTriggered}";
         }
 
-        private async Task SendConsumedSourceItemUpdate(EnhancedClientSession session, short sourceSlotIndex, int sourceItemTemplateId)
+        private async Task SendGrantedMainItemUpdates(
+            EnhancedClientSession session,
+            IReadOnlyList<PackageGrantedItem> grantedItems,
+            short? sourceSlotIndex)
         {
-            var body = ItemListUpdateBuilder.BuildCommonUpdates(new[]
-            {
-                CreateConsumedSourceItem(sourceSlotIndex, sourceItemTemplateId)
-            });
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, body));
-        }
-
-        private static byte[] BuildBoosterMainItemUpdates(CharacterItemListSnapshot snapshot, BoosterUseResult result, bool includeSourceUpdate)
-        {
-            if (snapshot == null || result == null)
-                return null;
-
             var slots = new HashSet<short>();
-            foreach (var reward in result.Rewards)
+            if (sourceSlotIndex.HasValue)
+                slots.Add(sourceSlotIndex.Value);
+
+            if (grantedItems != null)
             {
-                if (reward.ListType == InventoryListType.Main)
-                    slots.Add(reward.SlotIndex);
+                foreach (var reward in grantedItems)
+                {
+                    if (reward != null && reward.ListType == InventoryListType.Main)
+                        slots.Add(reward.SlotIndex);
+                }
             }
 
+            if (slots.Count > 0)
+                await _refresh.SendUpdateItemList(session, InventoryListType.Main, slots);
+        }
+
+        private async Task SendPackageMainItemUpdates(
+            EnhancedClientSession session,
+            short sourceSlotIndex,
+            int sourceRemainingStackCount,
+            IReadOnlyList<PackageGrantedItem> grantedItems)
+        {
+            if (sourceRemainingStackCount <= 0)
+            {
+                await _refresh.SendEmptyUpdateItemList(session, InventoryListType.Main, sourceSlotIndex);
+                await SendGrantedMainItemUpdates(session, grantedItems, null);
+                return;
+            }
+
+            await SendGrantedMainItemUpdates(session, grantedItems, sourceSlotIndex);
+        }
+
+        private async Task SendBoosterMainItemUpdates(
+            EnhancedClientSession session,
+            BoosterUseResult result,
+            bool includeSourceUpdate)
+        {
+            if (result == null)
+                return;
+
+            var slots = new HashSet<short>();
             if (includeSourceUpdate)
                 slots.Add(result.SourceSlotIndex);
             if (result.ConsumedMaterialItemTemplateId > 0)
                 slots.Add(result.ConsumedMaterialSlotIndex);
 
-            var updates = new List<CommonInventoryItem>();
-            foreach (var slot in slots)
+            foreach (var reward in result.Rewards)
             {
-                var item = snapshot.MainItems.FirstOrDefault(x => x.SlotIndex == slot);
-                if (item != null)
-                {
-                    updates.Add(item);
-                    continue;
-                }
-
-                if (slot == result.SourceSlotIndex)
-                    updates.Add(CreateConsumedSourceItem(result));
-                else if (slot == result.ConsumedMaterialSlotIndex && result.ConsumedMaterialItemTemplateId > 0)
-                    updates.Add(CreateConsumedSourceItem(result.ConsumedMaterialSlotIndex, result.ConsumedMaterialItemTemplateId));
-            }
-
-            if (updates.Count == 0)
-                return null;
-
-            return ItemListUpdateBuilder.BuildCommonUpdates(updates);
-        }
-
-        private static byte[] BuildGrantedMainItemUpdates(
-            CharacterItemListSnapshot snapshot,
-            IReadOnlyList<PackageGrantedItem> grantedItems,
-            short sourceSlotIndex,
-            int sourceItemTemplateId,
-            bool includeSourceUpdate)
-        {
-            if (snapshot == null || grantedItems == null)
-                return null;
-
-            var slots = new HashSet<short>();
-            if (includeSourceUpdate)
-                slots.Add(sourceSlotIndex);
-            foreach (var reward in grantedItems)
-            {
-                if (reward.ListType == InventoryListType.Main)
+                if (reward != null && reward.ListType == InventoryListType.Main)
                     slots.Add(reward.SlotIndex);
             }
 
-            var updates = new List<CommonInventoryItem>();
-            foreach (var slot in slots)
-            {
-                var item = snapshot.MainItems.FirstOrDefault(x => x.SlotIndex == slot);
-                if (item != null)
-                {
-                    updates.Add(item);
-                    continue;
-                }
-
-                if (slot == sourceSlotIndex)
-                    updates.Add(CreateConsumedSourceItem(sourceSlotIndex, sourceItemTemplateId));
-            }
-
-            if (updates.Count == 0)
-                return null;
-
-            return ItemListUpdateBuilder.BuildCommonUpdates(updates);
+            if (slots.Count > 0)
+                await _refresh.SendUpdateItemList(session, InventoryListType.Main, slots);
         }
 
         private async Task SendAvatarOrPetUpdateListForGrantedItems(EnhancedClientSession session, IReadOnlyList<PackageGrantedItem> grantedItems)
@@ -841,21 +947,6 @@ namespace DfoServer.Network.Handlers
                 await _refresh.SendUpdateItemList(session, InventoryListType.Avatar, avatarSlots);
             if (petSlots.Count > 0)
                 await _refresh.SendUpdateItemList(session, InventoryListType.Pet, petSlots);
-        }
-
-        private static CommonInventoryItem CreateConsumedSourceItem(BoosterUseResult result)
-        {
-            return CreateConsumedSourceItem(result.SourceSlotIndex, result.SourceItemTemplateId);
-        }
-
-        private static CommonInventoryItem CreateConsumedSourceItem(short slotIndex, int itemTemplateId)
-        {
-            return new CommonInventoryItem
-            {
-                SlotIndex = slotIndex,
-                ItemTemplateId = -1,
-                CountOrInstanceValue = 0,
-            };
         }
 
         private static string FormatBoosterRows(BoosterUseResult result, bool singleAckRows)
@@ -981,26 +1072,44 @@ namespace DfoServer.Network.Handlers
             short slot1 = BitConverter.ToInt16(body, 2);
             short slot2 = BitConverter.ToInt16(body, 8);
             int reqItemId = BitConverter.ToInt32(body, 14);
+            ushort abilityNo = ReadCompoundAvatarAbilityNo(body, 18);
 
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
             var job = _characterRepository.GetById(cid)?.Job ?? 0;
-            byte newOption = 0;
 
-            if (!_inventoryStore.TryCompoundAvatar(cid, aid, slot1, slot2, consumeSlot,
+            var request = new InventoryAvatarCompoundRequest
+            {
+                ConsumeSlot = consumeSlot,
+                Slot1 = slot1,
+                Slot2 = slot2,
+                RequestedItemId = reqItemId,
+                AbilityNo = abilityNo,
+            };
+
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0063, BuildCompoundAvatarErrorBody(includeTailByte: true)));
+                return;
+            }
+
+            InventoryAvatarCompoundResult result;
+            lock (lease.SyncRoot)
+            {
+                InventoryAvatarCompoundService.TryCompoundAvatar(
+                    lease.Inventory,
+                    request,
                     (old1, old2, materialId) =>
                     {
                         var prob = CompoundAvatarProbabilityService.Resolve(job, old1, old2, materialId, reqItemId);
                         return prob.Success ? prob.NewItemIds : new List<int> { reqItemId };
                     },
-                    newOption,
-                    out List<int> newSlots, out int oldItemId1, out int oldItemId2, out List<int> newItemIds,
-                    out int consumedItemTemplateId, out int consumedItemRemainingCount))
+                    out result);
+            }
+
+            if (result == null || !result.Success)
             {
-                var err = new GamePacketWriter();
-                err.WriteByte(0x00);
-                err.WriteByte(0x16);
-                err.WriteByte(0x00);
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0063, err.ToArray()));
+                FileLogger.Log($"  [CompoundAvatar] REJECT: error={result?.Error} slot1={slot1} slot2={slot2} consumeSlot={consumeSlot} abilityNo={abilityNo}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0063, BuildCompoundAvatarErrorBody(includeTailByte: true)));
                 return;
             }
 
@@ -1018,11 +1127,11 @@ namespace DfoServer.Network.Handlers
             w.WriteInt32(1);
             for (int i = 0; i < 2; i++)
             {
-                bool hasItem = i < newItemIds.Count;
-                w.WriteInt16(hasItem ? (short)newSlots[i] : (short)-1);
-                w.WriteInt32(hasItem ? newItemIds[i] : 0);
+                bool hasItem = i < result.NewItemIds.Count;
+                w.WriteInt16(hasItem ? result.NewSlots[i] : (short)-1);
+                w.WriteInt32(hasItem ? result.NewItemIds[i] : 0);
                 w.WriteInt32(0);
-                w.WriteInt16(newOption);
+                w.WriteUInt16(abilityNo);
                 w.WriteInt32(30);
                 w.WriteZeroBytes(30);
                 w.WriteInt32(4);
@@ -1031,6 +1140,9 @@ namespace DfoServer.Network.Handlers
 
             var respBody = w.ToArray();
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0063, respBody));
+            FileLogger.Log($"  [CompoundAvatar] OK: deleted slot{slot1}(item {result.OldItemId1}) + slot{slot2}(item {result.OldItemId2}) + " +
+                           $"1x slot{consumeSlot}(template {result.ConsumedItemTemplateId}, remain {result.ConsumedItemRemainingCount}), " +
+                           $"abilityNo={abilityNo}, added items [{string.Join(",", result.NewItemIds)}] at slots [{string.Join(",", result.NewSlots)}]");
         }
 
 
@@ -1041,7 +1153,7 @@ namespace DfoServer.Network.Handlers
 
             short consumeStackableSlot = body[13];
             int requestedItemId = BitConverter.ToInt32(body, 16);
-            short option = BitConverter.ToInt16(body, 20);
+            ushort option = BitConverter.ToUInt16(body, 20);
 
             var consumeSlots = new short[8];
             var consumeSlotItemIds = new int[8];
@@ -1062,7 +1174,7 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
             var job = _characterRepository.GetById(cid)?.Job ?? 0;
 
             int ResolveNewItemId(int consumeMaterialId)
@@ -1081,13 +1193,29 @@ namespace DfoServer.Network.Handlers
                 return -1;
             }
 
-            if (!_inventoryStore.TryCompoundAvatarSet(cid, aid, consumeSlots, consumeSlotItemIds, ResolveNewItemId, (byte)option,
-                    consumeStackableSlot, out int newSlot, out _, out int newItemId, out _, out _))
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
             {
-                var err = new GamePacketWriter();
-                err.WriteByte(0x00);
-                err.WriteByte(0x16);
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x03EA, err.ToArray()));
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x03EA, BuildCompoundAvatarErrorBody(includeTailByte: false)));
+                return;
+            }
+
+            var request = new InventoryAvatarCompoundSetRequest
+            {
+                ConsumeSlot = consumeStackableSlot,
+                ConsumeSlots = consumeSlots,
+                ExpectedItemIds = consumeSlotItemIds,
+                RequestedItemId = requestedItemId,
+                AbilityNo = option,
+            };
+
+            InventoryAvatarCompoundResult result;
+            lock (lease.SyncRoot)
+                InventoryAvatarCompoundService.TryCompoundAvatarSet(lease.Inventory, request, ResolveNewItemId, out result);
+
+            if (result == null || !result.Success)
+            {
+                FileLogger.Log($"  [CompoundAvatarSet] REJECT: error={result?.Error} consumeSlot={consumeStackableSlot} requested=0x{requestedItemId:X8} abilityNo={option}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x03EA, BuildCompoundAvatarErrorBody(includeTailByte: false)));
                 return;
             }
 
@@ -1095,9 +1223,9 @@ namespace DfoServer.Network.Handlers
             w2.WriteByte(0x01);
             w2.WriteByte(0x01); w2.WriteByte(0x00); w2.WriteByte(0x03); w2.WriteByte(0x00);
             w2.WriteByte(0x01); w2.WriteByte(0x00); w2.WriteByte(0x00); w2.WriteByte(0x00);
-            w2.WriteInt16((short)newSlot);
-            w2.WriteInt32(newItemId);
-            w2.WriteInt16((short)option);
+            w2.WriteInt16(result.NewSlots[0]);
+            w2.WriteInt32(result.NewItemIds[0]);
+            w2.WriteUInt16(option);
             w2.WriteInt16(1);
             for (int i = 0; i < 8; i++)
                 w2.WriteInt16(consumeSlots[i]);
@@ -1105,7 +1233,29 @@ namespace DfoServer.Network.Handlers
 
             var respBody2 = w2.ToArray();
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x03EA, respBody2));
+            FileLogger.Log($"  [CompoundAvatarSet] OK: consumed {consumeSlots.Length} avatar items + 1x slot {consumeStackableSlot}(template {result.ConsumedItemTemplateId}), abilityNo={option}, added item {result.NewItemIds[0]} at slot {result.NewSlots[0]}");
 
+        }
+
+        private static ushort ReadCompoundAvatarAbilityNo(byte[] body, int offset)
+        {
+            if (body == null || body.Length < offset + 4)
+                return 0;
+
+            var value = BitConverter.ToInt32(body, offset);
+            if (value <= 0)
+                return 0;
+            return value > ushort.MaxValue ? ushort.MaxValue : (ushort)value;
+        }
+
+        private static byte[] BuildCompoundAvatarErrorBody(bool includeTailByte)
+        {
+            var writer = new GamePacketWriter();
+            writer.WriteByte(0x00);
+            writer.WriteByte(0x16);
+            if (includeTailByte)
+                writer.WriteByte(0x00);
+            return writer.ToArray();
         }
     }
 }

@@ -41,9 +41,8 @@ namespace DfoServer.SelfTests
                 Level = 23,
             });
 
-            var assetService = new SqliteAssetService(dbPath, schemaPath);
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
-            var questService = new QuestService(connStr, assetService);
+            var questService = new QuestService(connStr);
             var failures = 0;
 
             Check("1826 is quest-clear parent", GameWorld.QuestData.IsQuestClearQuest(ParentQuestId), ref failures);

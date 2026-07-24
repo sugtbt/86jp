@@ -19,7 +19,7 @@ namespace DfoServer.SelfTests
         private const int CharacterId = 136001;
         private const int AccountId = 136001;
 
-        // 复用 QuestItemFlowSelfTest 验证过的任务样本:
+        // 使用固定任务样本:
         // 2042(交信任务, 完成发放事件道具 10089292), 前置 2041。
         private const ushort LetterQuestId = 2042;
         private const ushort PrerequisiteQuestId = 2041;
@@ -47,9 +47,8 @@ namespace DfoServer.SelfTests
                 Level = 49,
             });
 
-            var assetService = new SqliteAssetService(dbPath, schemaPath);
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
-            var questService = new QuestService(connStr, assetService);
+            var questService = new QuestService(connStr);
             var failures = 0;
 
             // --- 接取: 前置未完成 -> 失败 ACK ---

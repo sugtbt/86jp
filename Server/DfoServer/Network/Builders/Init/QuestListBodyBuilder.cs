@@ -26,12 +26,11 @@ namespace DfoServer.Network.Builders
                     clearedFlags[entry.SlotIndex] = entry.FlagValue;
             }
 
-            var allowedCreatureKinds = character != null && character.CharacterId > 0
-                ? SqliteInventoryStore.LoadEligiblePetCreatureEvolutionQuestKinds(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    character.CharacterId)
-                : null;
+            var allowedCreatureKinds = character != null
+                && character.CharacterId > 0
+                && InventoryContext.TryGetLease(character.CharacterId, out var lease)
+                    ? PetCreatureEvolutionRuntimeService.LoadEligiblePetCreatureEvolutionQuestKinds(lease.Inventory)
+                    : null;
 
             body = BuildBody(level, job, growType, clearedFlags, allowedCreatureKinds);
             return true;

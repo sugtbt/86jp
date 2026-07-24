@@ -1,5 +1,7 @@
 using PvfLib;
 using System;
+using System.Collections.Generic;
+using System.IO;
 
 namespace DfoServer.Game.Inventory
 {
@@ -7,11 +9,37 @@ namespace DfoServer.Game.Inventory
     {
         internal const string UpgradableLegacyType = "[upgradable legacy]";
         internal const string RandomUpgradableLegacyType = "[random upgradable legacy]";
+        private static readonly object CacheLock = new object();
+        private static readonly Dictionary<int, StackableItemFile> Cache = new Dictionary<int, StackableItemFile>();
 
         internal static StackableItemFile Load(int itemTemplateId)
-            => itemTemplateId > 0
-                ? InventoryDbPrimitives.LoadStackableItem(itemTemplateId)
-                : null;
+        {
+            if (itemTemplateId <= 0)
+                return null;
+
+            lock (CacheLock)
+            {
+                if (Cache.TryGetValue(itemTemplateId, out var cached))
+                    return cached;
+            }
+
+            try
+            {
+                var entry = ItemMetadataResolver.GetStackableEntry(itemTemplateId);
+                if (entry == null)
+                    return null;
+
+                var parsed = StackableItemFile.Parse(GameWorld.PvfArchiveAccessor.ReadText(Path.Combine("stackable", entry.FilePath)));
+                lock (CacheLock)
+                    Cache[itemTemplateId] = parsed;
+                return parsed;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"  [StackableItemProvider] failed to load item=0x{itemTemplateId:X8}: {ex.Message}");
+                return null;
+            }
+        }
 
         internal static bool IsLegacyContainer(int itemTemplateId)
         {
