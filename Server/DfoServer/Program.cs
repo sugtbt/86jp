@@ -169,6 +169,7 @@ namespace DfoServer
             try
             {
                 GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
+                Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();
                 Game.Mercenary.StrikerDefaultAvatarDataProvider.Warmup();
                 Console.WriteLine("OK");
