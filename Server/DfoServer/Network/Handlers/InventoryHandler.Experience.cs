@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.ReviveCoin;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Inventory;
 using System;
@@ -67,8 +68,11 @@ namespace DfoServer.Network.Handlers
 
             if (result.Success)
             {
-                session.Player.Level = result.NewLevel;
-                session.Player.Exp = result.NewExp;
+                if (result.ItemTemplateId != ReviveCoinService.ConsumableItemId)
+                {
+                    session.Player.Level = result.NewLevel;
+                    session.Player.Exp = result.NewExp;
+                }
             }
 
             var ackBody = result.Success
@@ -104,7 +108,18 @@ namespace DfoServer.Network.Handlers
                 characterId,
                 request.SlotIndex,
                 "post-commit");
-            await _experienceItemNotifications.SendAsync(session, result);
+
+            if (result.ItemTemplateId == ReviveCoinService.ConsumableItemId)
+            {
+                await _refresh.SendUpdateItemList(
+                    session,
+                    InventoryListType.Main,
+                    ReviveCoinService.WalletSlot);
+            }
+            else
+            {
+                await _experienceItemNotifications.SendAsync(session, result);
+            }
             FileLogger.Log(
                 $"[{ProtocolName}] INCREASE_STATUS experience: item={result.ItemTemplateId} slot={request.SlotIndex} remaining={result.ConsumedItem?.RemainingStackCount ?? 0} grant={result.GrantedExp} level={result.PreviousLevel}->{result.NewLevel} exp={result.PreviousExp}->{result.NewExp}");
         }
