@@ -20,36 +20,27 @@ namespace DfoServer.Network.Builders
             if (characterId <= 0 || itemTemplateId <= 0)
                 return false;
 
-            if (PetCreatureScript.TryLoadWelcomeCache(
-                ServerPaths.DatabasePath,
-                ServerPaths.SchemaFilePath,
-                characterId,
-                itemTemplateId,
-                occurrenceIndex,
-                out var cachedBody))
-            {
-                body = cachedBody;
-                return true;
-            }
-
-            return false;
+            return PetCreatureScript.TryBuildWelcomeBody(itemTemplateId, characterId, out body);
         }
 
         private static int ResolveEquippedCreatureItemId(SelectCharacterDataSnapshot snapshot)
         {
+            var characterId = snapshot?.CharacterRecord?.CharacterId ?? 0;
+            if (characterId > 0 && InventoryContext.TryGetLease(characterId, out var lease))
+            {
+                lock (lease.SyncRoot)
+                {
+                    var creature = lease.Inventory.GetItem(
+                        InventoryListType.Equipment,
+                        PetInventoryLayout.CreatureEquipSlot);
+                    if (creature != null && creature.ItemKind == ItemCore.KindCreature)
+                        return creature.ItemId;
+                }
+            }
+
             var tailItemId = snapshot?.CharacterRecord?.Subtype0Tail?.EquippedCreatureItemId ?? 0;
             if (tailItemId > 0)
                 return unchecked((int)tailItemId);
-
-            var items = snapshot?.ItemListSnapshot?.PetItems;
-            if (items == null)
-                return 0;
-
-            foreach (var item in items)
-            {
-                if (item != null && (item.SlotIndex == 24 || item.SlotIndex == 240))
-                    return item.CreatureItemId;
-            }
 
             return 0;
         }

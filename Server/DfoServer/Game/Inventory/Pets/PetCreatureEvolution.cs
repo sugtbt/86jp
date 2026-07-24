@@ -1,6 +1,5 @@
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
-using Microsoft.Data.Sqlite;
 using PvfLib;
 using System;
 using System.Collections.Generic;
@@ -9,221 +8,6 @@ using System.IO;
 
 namespace DfoServer.Game.Inventory
 {
-    public sealed partial class SqliteInventoryStore
-    {
-        private static readonly Lazy<PetCreatureEvolutionCatalog> PetCreatureEvolutionCatalogCache =
-            new Lazy<PetCreatureEvolutionCatalog>(PetCreatureEvolutionCatalog.Load);
-
-        internal static PetCreatureEvolutionResult TryEvolveEquippedPetCreature(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId,
-            int creatureKey,
-            int afterLevel)
-        {
-            if (connection == null) throw new ArgumentNullException(nameof(connection));
-            if (transaction == null) throw new ArgumentNullException(nameof(transaction));
-            if (characterId <= 0 || creatureKey <= 0 || afterLevel <= 0)
-                return PetCreatureEvolutionResult.Noop;
-
-            var equipped = LoadPetCreatureEquippedEntry(connection, transaction, characterId);
-            if (!equipped.HasValue || equipped.Value.Serial != creatureKey)
-                return PetCreatureEvolutionResult.Noop;
-
-            var catalog = PetCreatureEvolutionCatalogCache.Value;
-            if (!catalog.TryResolveByItemId(equipped.Value.ItemId, out var current))
-                return PetCreatureEvolutionResult.Noop;
-
-            // 旧服 CCreature::IsAbleEvolute: PVF 必须配置 [evolution level],
-            // 且当前宠物等级达到该值。
-            if (!current.CanAutoEvolve || afterLevel < current.EvolutionLevel)
-                return PetCreatureEvolutionResult.Noop;
-
-            if (current.EvolutionItemTemplateId <= 0
-                || !catalog.TryResolveByItemId(current.EvolutionItemTemplateId, out var next)
-                || next.ItemTemplateId <= 0
-                || next.ItemTemplateId == equipped.Value.ItemId)
-            {
-                FileLogger.Log($"[PetCreatureEvolution] skipped: missing target currentCreature={current.CreatureId} targetCreature={current.EvolutionCreatureId} targetItem=0x{current.EvolutionItemTemplateId:X8} item=0x{equipped.Value.ItemId:X8}");
-                return PetCreatureEvolutionResult.Noop;
-            }
-
-            UpsertPetEquippedEntry(
-                connection,
-                transaction,
-                characterId,
-                PetCreatureEquipSlot,
-                next.ItemTemplateId,
-                creatureKey,
-                NormalizePetCreatureExtra(equipped.Value.ExpireTime, equipped.Value.CreatureExtra),
-                equipped.Value.ExpireTime);
-            UpsertPetCreatureRuntimeState(connection, transaction, characterId, next.ItemTemplateId, creatureKey);
-
-            FileLogger.Log($"[PetCreatureEvolution] evolved cid={characterId} key={creatureKey} creature={current.CreatureId}->{next.CreatureId} item=0x{equipped.Value.ItemId:X8}->0x{next.ItemTemplateId:X8} level={afterLevel}");
-            return new PetCreatureEvolutionResult(
-                changed: true,
-                creatureKey: creatureKey,
-                currentCreatureId: current.CreatureId,
-                evolvedCreatureId: next.CreatureId,
-                evolvedCreatureParam: next.CreatureParam,
-                previousItemTemplateId: equipped.Value.ItemId,
-                evolvedItemTemplateId: next.ItemTemplateId,
-                equipmentSlot: PetCreatureEquipSlot);
-        }
-
-        internal static PetCreatureEvolutionResult TryCompletePetCreatureEvolutionQuest(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId,
-            int requiredCreatureId,
-            int requiredLevel,
-            int targetCreatureId)
-        {
-            if (connection == null) throw new ArgumentNullException(nameof(connection));
-            if (transaction == null) throw new ArgumentNullException(nameof(transaction));
-            if (characterId <= 0 || requiredCreatureId <= 0 || targetCreatureId <= 0)
-                return PetCreatureEvolutionResult.Noop;
-
-            var equipped = LoadPetCreatureEquippedEntry(connection, transaction, characterId);
-            if (!equipped.HasValue || equipped.Value.Serial <= 0)
-                return PetCreatureEvolutionResult.Noop;
-
-            var catalog = PetCreatureEvolutionCatalogCache.Value;
-            if (!catalog.TryResolveByItemId(equipped.Value.ItemId, out var current))
-                return PetCreatureEvolutionResult.Noop;
-
-            if (!current.HasEvolutionQuest || current.CreatureId != requiredCreatureId)
-            {
-                FileLogger.Log($"[PetCreatureEvolution] quest skipped: current mismatch cid={characterId} current={current.CreatureId} required={requiredCreatureId} hasQuest={current.HasEvolutionQuest}");
-                return PetCreatureEvolutionResult.Noop;
-            }
-
-            var level = LoadEquippedCreatureLevel(
-                connection,
-                transaction,
-                characterId,
-                equipped.Value.Serial);
-            var minLevel = Math.Max(requiredLevel, current.EvolutionLevel);
-            if (minLevel > 0 && level < minLevel)
-            {
-                FileLogger.Log($"[PetCreatureEvolution] quest skipped: level too low cid={characterId} creature={current.CreatureId} level={level} required={minLevel}");
-                return PetCreatureEvolutionResult.Noop;
-            }
-
-            if (current.EvolutionCreatureId != targetCreatureId
-                || !catalog.TryResolveByCreatureId(targetCreatureId, out var next)
-                || next.ItemTemplateId <= 0
-                || next.ItemTemplateId == equipped.Value.ItemId)
-            {
-                FileLogger.Log($"[PetCreatureEvolution] quest skipped: target mismatch cid={characterId} current={current.CreatureId} expected={current.EvolutionCreatureId} reward={targetCreatureId}");
-                return PetCreatureEvolutionResult.Noop;
-            }
-
-            UpsertPetEquippedEntry(
-                connection,
-                transaction,
-                characterId,
-                PetCreatureEquipSlot,
-                next.ItemTemplateId,
-                equipped.Value.Serial,
-                NormalizePetCreatureExtra(equipped.Value.ExpireTime, equipped.Value.CreatureExtra),
-                equipped.Value.ExpireTime);
-            UpsertPetCreatureRuntimeState(connection, transaction, characterId, next.ItemTemplateId, equipped.Value.Serial);
-
-            FileLogger.Log($"[PetCreatureEvolution] quest evolved cid={characterId} key={equipped.Value.Serial} creature={current.CreatureId}->{next.CreatureId} item=0x{equipped.Value.ItemId:X8}->0x{next.ItemTemplateId:X8} level={level}");
-            return new PetCreatureEvolutionResult(
-                changed: true,
-                creatureKey: equipped.Value.Serial,
-                currentCreatureId: current.CreatureId,
-                evolvedCreatureId: next.CreatureId,
-                evolvedCreatureParam: next.CreatureParam,
-                previousItemTemplateId: equipped.Value.ItemId,
-                evolvedItemTemplateId: next.ItemTemplateId,
-                equipmentSlot: PetCreatureEquipSlot);
-        }
-
-        internal static HashSet<int> LoadEligiblePetCreatureEvolutionQuestKinds(
-            string databasePath,
-            string schemaFilePath,
-            int characterId)
-        {
-            var result = new HashSet<int>();
-            if (characterId <= 0)
-                return result;
-
-            var connectionString = SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using (var transaction = connection.BeginTransaction())
-                {
-                    var current = LoadEquippedPetEvolutionQuestState(connection, transaction, characterId);
-                    if (current.HasValue)
-                        result.Add(current.Value.CreatureId);
-                    transaction.Commit();
-                }
-            }
-
-            return result;
-        }
-
-        private static PetCreatureEvolutionQuestState? LoadEquippedPetEvolutionQuestState(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId)
-        {
-            var equipped = LoadPetCreatureEquippedEntry(connection, transaction, characterId);
-            if (!equipped.HasValue || equipped.Value.Serial <= 0)
-                return null;
-
-            var catalog = PetCreatureEvolutionCatalogCache.Value;
-            if (!catalog.TryResolveByItemId(equipped.Value.ItemId, out var current))
-                return null;
-
-            if (current.EvolutionLevel <= 0
-                || current.EvolutionItemTemplateId <= 0
-                || !current.HasEvolutionQuest)
-                return null;
-
-            var level = LoadEquippedCreatureLevel(
-                connection,
-                transaction,
-                characterId,
-                equipped.Value.Serial);
-            if (level < current.EvolutionLevel)
-                return null;
-
-            return new PetCreatureEvolutionQuestState(
-                current.CreatureId,
-                current.EvolutionCreatureId,
-                current.EvolutionItemTemplateId,
-                current.EvolutionLevel);
-        }
-
-        private static int LoadEquippedCreatureLevel(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId,
-            int creatureKey)
-        {
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.Transaction = transaction;
-                cmd.CommandText = @"
-SELECT field_after_value
-FROM character_creatures
-WHERE character_id = @cid AND creature_key = @key
-LIMIT 1;";
-                cmd.Parameters.AddWithValue("@cid", characterId);
-                cmd.Parameters.AddWithValue("@key", creatureKey);
-                var value = cmd.ExecuteScalar();
-                return value == null || value == DBNull.Value
-                    ? 0
-                    : Convert.ToInt32(value, CultureInfo.InvariantCulture);
-            }
-        }
-    }
-
     internal readonly struct PetCreatureEvolutionQuestState
     {
         public PetCreatureEvolutionQuestState(
@@ -478,16 +262,12 @@ LIMIT 1;";
             if (equipment.OutputIndex > 0
                 && equipment.OutputIndex != equipment.ItemTemplateId
                 && equipmentFiles.ContainsKey(equipment.OutputIndex))
-            {
                 return equipment.OutputIndex;
-            }
 
             if (evolutionCreatureId > 0
                 && itemByCreatureId != null
                 && itemByCreatureId.TryGetValue(evolutionCreatureId, out var itemTemplateId))
-            {
                 return itemTemplateId;
-            }
 
             return 0;
         }
@@ -543,8 +323,6 @@ LIMIT 1;";
 
         private static int ResolveCreatureParam(EquipmentFile equipment, int creatureId)
         {
-            // 客户端 EVOLUTE_CREATURE 会把这个值传入 createCreature()。
-            // 这里需要 Creature.lst 的宠物类型编号，不是 .equ [icon] 帧号。
             return creatureId > 0 ? creatureId : 0;
         }
     }

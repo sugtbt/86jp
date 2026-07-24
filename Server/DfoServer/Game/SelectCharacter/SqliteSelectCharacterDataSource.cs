@@ -17,8 +17,7 @@ namespace DfoServer.Game.SelectCharacter
 {
     public sealed class SqliteSelectCharacterDataSource : ISelectCharacterDataSource
     {
-        private readonly IInventoryStore _inventoryStore;
-        private readonly IAssetService _assetService;
+        private readonly InventoryCharacterLifecycleService _inventoryLifecycle;
         private readonly SqliteCharacterProgressRepository _initDataRepository;
         private readonly SqliteDarkKnightComboSkillRepository _darkKnightComboSkillRepository;
         private readonly KnightShieldDeckRepository _knightShieldDeckRepository;
@@ -41,8 +40,7 @@ namespace DfoServer.Game.SelectCharacter
             string databasePath,
             string schemaFilePath,
             ICharacterRepository characterRepository,
-            IAssetService assetService = null,
-            IInventoryStore inventoryStore = null,
+            InventoryCharacterLifecycleService inventoryLifecycle = null,
             IRentalTimeProvider rentalTimeProvider = null,
             DailyReset.DailyResetService dailyResetService = null)
         {
@@ -54,11 +52,10 @@ namespace DfoServer.Game.SelectCharacter
             _lotteryDoubleRewardPolicy = new LotteryDoubleRewardPolicy(
                 _dailyResetService,
                 _connectionString);
-            _inventoryStore = inventoryStore ?? new SqliteInventoryStore(
+            _inventoryLifecycle = inventoryLifecycle ?? new InventoryCharacterLifecycleService(
                 databasePath,
                 schemaFilePath,
                 _rentalTimeProvider);
-            _assetService = assetService;
             _initDataRepository = new SqliteCharacterProgressRepository(databasePath, schemaFilePath);
             _darkKnightComboSkillRepository = new SqliteDarkKnightComboSkillRepository(databasePath, schemaFilePath);
             _knightShieldDeckRepository = KnightShieldDeckRepository.FromConnectionString(_connectionString);
@@ -80,16 +77,34 @@ namespace DfoServer.Game.SelectCharacter
 
         public CreatureItemListSnapshot LoadCreatureItemListSnapshot(int characterId)
         {
+            if (InventoryContext.TryGetLease(characterId, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    return PetInventoryAccessor.BuildCreatureItemListSnapshot(lease.Inventory);
+            }
+
             return _initDataRepository.LoadCreatures(characterId);
         }
 
         public List<TitleBookCategorySnapshot> LoadTitleBookSnapshots(int characterId)
         {
+            if (InventoryContext.TryGetLease(characterId, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    return lease.Inventory.TitleBook.BuildSnapshots();
+            }
+
             return _titleBookRepository.LoadSnapshots(characterId);
         }
 
         public TitleBookCategorySnapshot LoadTitleBookSnapshot(int characterId, int category)
         {
+            if (InventoryContext.TryGetLease(characterId, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    return lease.Inventory.TitleBook.BuildSnapshot(category);
+            }
+
             return _titleBookRepository.LoadSnapshot(characterId, category);
         }
 
@@ -113,9 +128,7 @@ namespace DfoServer.Game.SelectCharacter
 
         public SelectCharacterDataSnapshot Load(int characterId, int accountId)
         {
-            CharacterItemListSnapshot itemList;
-            _inventoryStore.DeleteExpiredRentalEquipment(characterId, accountId);
-            itemList = _inventoryStore.LoadCharacterItemListSnapshot(characterId, accountId);
+            _inventoryLifecycle.DeleteExpiredRentalEquipment(characterId, accountId);
 
             var initSnapshot = new SelectCharacterInitializationSnapshot();
 
@@ -139,14 +152,24 @@ namespace DfoServer.Game.SelectCharacter
             foreach (var comboSkillBody in comboSkillBodies)
                 initSnapshot.DarkKnightComboSkillInfoBodies.Add(comboSkillBody);
             SanitizeDarkKnightComboSkillInfo(initSnapshot);
-            if (_initDataRepository.HasCreatures(characterId))
-                initSnapshot.CreatureItemList = _initDataRepository.LoadCreatures(characterId);
+            initSnapshot.CreatureItemList = LoadCreatureItemListSnapshot(characterId);
 
             _initFlagsRepository.LoadAll(characterId, initSnapshot);
             initSnapshot.TitleBookCategories.Clear();
-            for (var category = 0; category < TitleBookStaticDataProvider.CategoryCapacities.Count; category++)
-                initSnapshot.TitleBookCategories.Add(
-                    _titleBookRepository.LoadSnapshot(characterId, category));
+            if (InventoryContext.TryGetLease(characterId, out var lease))
+            {
+                lock (lease.SyncRoot)
+                {
+                    initSnapshot.AchievementComplete = lease.Inventory.Achievements.BuildSnapshot();
+                    initSnapshot.TitleBookCategories.AddRange(lease.Inventory.TitleBook.BuildSnapshots());
+                }
+            }
+            else
+            {
+                for (var category = 0; category < TitleBookStaticDataProvider.CategoryCapacities.Count; category++)
+                    initSnapshot.TitleBookCategories.Add(
+                        _titleBookRepository.LoadSnapshot(characterId, category));
+            }
 
             
             {
@@ -171,30 +194,20 @@ namespace DfoServer.Game.SelectCharacter
 
             
             LoadInitFieldsFromPacketTemplates(characterId, initSnapshot);
+            ApplyOnlineItemLockList(characterId, initSnapshot);
             // 0x0357 是可变状态，加载模板后立即用当前背包/装备租赁重建。
-            var rebuiltRentalInfo = _inventoryStore.RebuildRentalInfoFromInventory(
+            var rebuiltRentalInfo = _inventoryLifecycle.RebuildRentalInfoFromInventory(
                 characterId,
                 accountId,
                 initSnapshot.RentalInfo);
             initSnapshot.RentalInfo.ReplaceItems(rebuiltRentalInfo.Items);
             SaveRentalInfo(characterId, initSnapshot.RentalInfo);
 
-            if (_assetService != null)
+            using (var conn = new SqliteConnection(_connectionString))
             {
-                using (var assetScope = _assetService.OpenScope(characterId, accountId))
-                {
-                    var wallet = _assetService.LoadWallet(assetScope);
-                    ApplyWallet(initSnapshot, wallet);
-                }
-            }
-            else
-            {
-                using (var conn = new SqliteConnection(_connectionString))
-                {
-                    conn.Open();
-                    var wallet = CurrencyService.LoadWallet(conn, null, characterId);
-                    ApplyWallet(initSnapshot, wallet);
-                }
+                conn.Open();
+                var wallet = CurrencyService.LoadWallet(conn, null, characterId);
+                ApplyWallet(initSnapshot, wallet);
             }
 
             var acctSettings = _accountSettingsRepository.Load(accountId);
@@ -248,7 +261,7 @@ namespace DfoServer.Game.SelectCharacter
             if (characterRecord != null)
             {
                 // 选角初始化 USERINFO 同样必须使用当前穿戴栏重建外观，避免 characters.appearance_blob在新建角色或换装后滞留为空/旧值，导致城镇模型和选人/副本显示不一致。
-                characterRecord.Appearance = Game.Appearance.AppearanceService.LoadAppearanceFromEquipEntries(characterId);
+                characterRecord.Appearance = Game.Appearance.AppearanceService.LoadOnlineAppearanceFromInventory(characterId);
             }
 
             var accountCharacters = _characterRepository?.ListByAccount(accountId);
@@ -292,11 +305,30 @@ namespace DfoServer.Game.SelectCharacter
 
             return new SelectCharacterDataSnapshot
             {
-                ItemListSnapshot = itemList,
                 InitializationSnapshot = initSnapshot,
                 KnightShieldDeck = knightShieldDeck,
                 CharacterRecord = characterRecord,
             };
+        }
+
+        private static void ApplyOnlineItemLockList(int characterId, SelectCharacterInitializationSnapshot initSnapshot)
+        {
+            initSnapshot.ItemLockList = new ItemLockListSnapshot();
+            if (!InventoryContext.TryGetLease(characterId, out var lease))
+                return;
+
+            lock (lease.SyncRoot)
+            {
+                foreach (var entry in InventoryLockService.LoadEquipmentItemLocks(lease.Inventory))
+                {
+                    initSnapshot.ItemLockList.Entries.Add(new ItemLockEntrySnapshot
+                    {
+                        TypeOrList = (byte)entry.ListType,
+                        ItemKeyOrSlot = (ushort)entry.SlotIndex,
+                        State = 1,
+                    });
+                }
+            }
         }
 
         private static void ApplyWallet(SelectCharacterInitializationSnapshot initSnapshot, WalletSnapshot wallet)
@@ -536,7 +568,7 @@ ON CONFLICT(character_id) DO UPDATE SET manage_level=excluded.manage_level;";
 
         public void InitializeNewCharacter(int characterId, int accountId, byte job)
         {
-            _inventoryStore.EnsureContainerState(characterId, accountId);
+            _inventoryLifecycle.EnsureContainerState(characterId, accountId);
 
             var emptySnapshot = new SelectCharacterInitializationSnapshot();
             _initFlagsRepository.SeedFromSnapshot(characterId, emptySnapshot);
@@ -555,7 +587,7 @@ ON CONFLICT(character_id) DO UPDATE SET manage_level=excluded.manage_level;";
             var initialEquip = InitialCharacterEquipment.Get(job);
             if (initialEquip != null)
             {
-                _inventoryStore.SeedNewCharacterEquipment(characterId, accountId, initialEquip);
+                _inventoryLifecycle.SeedNewCharacterEquipment(characterId, accountId, initialEquip);
             }
 
             _initFlagsRepository.SaveHotkeyConfig(characterId, Settings.CharacterKeyboardDefaults.BuildHotkeySlots(job));

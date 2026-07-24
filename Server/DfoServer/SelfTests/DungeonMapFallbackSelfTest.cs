@@ -166,6 +166,39 @@ namespace DfoServer.SelfTests
 
             CheckSuitableLevelEligibility(ref failures);
 
+            var towerClassificationIsSafe = false;
+            try
+            {
+                towerClassificationIsSafe = !DungeonData.TryGetTowerOfDespairFloor(
+                    int.MaxValue,
+                    out _);
+            }
+            catch
+            {
+                towerClassificationIsSafe = false;
+            }
+            Check("tower classification treats an unknown dungeon as non-tower without throwing",
+                towerClassificationIsSafe,
+                ref failures);
+
+            try
+            {
+                var despairTowerFirstFloor = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 11008,
+                    x: 0xFF,
+                    y: 0xFF,
+                    mazeIndex: 0);
+                Check("tower of despair first floor resolves its PVF map and boss APC",
+                    despairTowerFirstFloor.Index == 15130
+                    && ContainsMonster(despairTowerFirstFloor, 20426),
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] tower of despair first floor resolves its PVF map and boss APC: {ex.Message}");
+                failures++;
+            }
+
             try
             {
                 var issue189StartMap = DungeonData.GetDungeonMapMonsterSummaryInformation(
@@ -283,6 +316,36 @@ namespace DfoServer.SelfTests
                     ref failures);
                 Check("issue 361 selected upper boss room keeps boss actor map",
                     issue361SelectedUpperBoss.Index == 18914 && ContainsMonster(issue361SelectedUpperBoss, 65029),
+                    ref failures);
+                var repeatedUpperBossSelectionsKeepActor = true;
+                for (var selection = 0; selection < 32; selection++)
+                {
+                    var repeatedUpperBoss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 158,
+                        x: 4,
+                        y: 0,
+                        mazeIndex: 0,
+                        bossPos: new[] { 4, 0 });
+                    if (repeatedUpperBoss.Index != 18914
+                        || !ContainsMonster(repeatedUpperBoss, 65029))
+                    {
+                        repeatedUpperBossSelectionsKeepActor = false;
+                        break;
+                    }
+                }
+                Check("issue 361 repeated upper boss selections keep boss actor map",
+                    repeatedUpperBossSelectionsKeepActor,
+                    ref failures);
+                var issue361QuestMazeBoss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 158,
+                    x: 4,
+                    y: 0,
+                    mazeIndex: 3,
+                    bossPos: new[] { 4, 0 });
+                Check("issue 361 quest maze keeps its explicit APC boss map",
+                    issue361QuestMazeBoss.Index == 18919
+                    && ContainsMonster(issue361QuestMazeBoss, 56408)
+                    && !ContainsMonster(issue361QuestMazeBoss, 65029),
                     ref failures);
                 Check("issue 361 unselected lower boss coordinate does not spawn false boss",
                     issue361UnselectedLowerBossCoordinate.Index != 18915

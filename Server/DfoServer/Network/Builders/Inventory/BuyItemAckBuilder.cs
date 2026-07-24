@@ -24,7 +24,7 @@ namespace DfoServer.Network.Builders
             writer.WriteUInt16(includePurchasedItemSummary ? result.Durability : (ushort)0);
             writer.WriteByte(0);                         
             writer.WriteUInt16(0);                       
-            writer.WriteInt32(0);                        
+            writer.WriteInt32(includePurchasedItemSummary ? result.ExpireTime : 0);                        
             
             writer.WriteByte(0);
             

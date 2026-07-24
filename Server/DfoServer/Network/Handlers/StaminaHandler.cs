@@ -1,26 +1,26 @@
+using System;
+using System.Threading.Tasks;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
-using System;
-using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers
 {
-    // 疲劳(虚弱)恢复: CMD 0x0009 RECOVER_STAMINA。
-    // 扣金币 -> 清虚弱值 -> 回 0x0021 + 金币刷新。
-    // 与副本流程无关(城镇里也能用), 原先寄居在副本共享服务里, 拆出独立成域。
+    /// <summary>
+    /// 疲劳虚弱恢复。扣金币走在线背包，角色尾部状态仍写 subtype0 字段。
+    /// </summary>
     public sealed class StaminaHandler
     {
         private const string ProtocolLogName = "GameProtocol";
 
-        private readonly IAssetService _assetService;
+        private readonly InventoryRefreshSender _refresh;
 
-        public StaminaHandler(IAssetService assetService)
+        public StaminaHandler(InventoryRefreshSender refresh = null)
         {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
+            _refresh = refresh;
         }
 
         public async Task Handle_ENUM_CMDPACKET_RECOVER_STAMINA(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -31,9 +31,13 @@ namespace DfoServer.Network.Handlers
             if (characterId <= 0)
                 return;
 
-            var accountId = session?.Account?.AccountId ?? 1;
-            if (accountId <= 0)
-                accountId = 1;
+            if (!InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+            {
+                await SendRecoverStaminaErrorAsync(session, 4);
+                FileLogger.Log($"[{ProtocolLogName}] RECOVER_STAMINA: online inventory missing cid={characterId}");
+                return;
+            }
 
             try
             {
@@ -47,25 +51,45 @@ namespace DfoServer.Network.Handlers
                 }
 
                 var cost = CalculateRecoverStaminaGoldCost(session.Player.Level, tail.Stamina);
-                int updatedGold;
-                using (var scope = _assetService.OpenScope(characterId, accountId))
-                {
-                    var wallet = _assetService.LoadWallet(scope);
-                    if (wallet.Gold < cost)
-                    {
-                        await SendRecoverStaminaErrorAsync(session, 22);
-                        FileLogger.Log($"[{ProtocolLogName}] RECOVER_STAMINA: insufficient gold cid={characterId} need={cost} have={wallet.Gold} stamina={tail.Stamina}");
-                        return;
-                    }
+                var updatedGold = 0;
+                byte errorCode = 0;
+                string rejectLog = null;
 
-                    updatedGold = wallet.Gold - cost;
-                    if (cost > 0 && !_assetService.TrySpendGold(scope, cost))
+                lock (lease.SyncRoot)
+                {
+                    var currentGold = lease.Inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart);
+                    if (currentGold < cost)
                     {
-                        await SendRecoverStaminaErrorAsync(session, 22);
-                        FileLogger.Log($"[{ProtocolLogName}] RECOVER_STAMINA: TrySpendGold refused cid={characterId} need={cost}");
-                        return;
+                        errorCode = 22;
+                        rejectLog = $"[{ProtocolLogName}] RECOVER_STAMINA: insufficient gold cid={characterId} need={cost} have={currentGold} stamina={tail.Stamina}";
                     }
-                    scope.Commit();
+                    else
+                    {
+                        updatedGold = currentGold;
+                        if (cost > 0)
+                        {
+                            if (!lease.Inventory.TryConsumeMainItem(
+                                    InventoryService.MainVirtualCurrencySlotStart,
+                                    cost,
+                                    out var consumed)
+                                || !consumed.Success)
+                            {
+                                errorCode = 22;
+                                rejectLog = $"[{ProtocolLogName}] RECOVER_STAMINA: TrySpendGold refused cid={characterId} need={cost}";
+                            }
+                            else
+                            {
+                                updatedGold = consumed.RemainingCount;
+                            }
+                        }
+                    }
+                }
+
+                if (errorCode != 0)
+                {
+                    await SendRecoverStaminaErrorAsync(session, errorCode);
+                    FileLogger.Log(rejectLog);
+                    return;
                 }
 
                 tail.Stamina = 0;
@@ -74,8 +98,8 @@ namespace DfoServer.Network.Handlers
                 session.Player.Subtype0Tail = tail;
 
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0021, new[] { (byte)100 }));
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(updatedGold)));
+                if (_refresh != null)
+                    await _refresh.SendGoldUpdate(session, updatedGold);
 
                 FileLogger.Log($"[{ProtocolLogName}] RECOVER_STAMINA: success cid={characterId} cost={cost} gold={updatedGold}");
             }

@@ -71,25 +71,37 @@ namespace DfoServer.SelfTests
             }
             Check("gold balance is capped at effective carry limit", LoadGold(connectionString, CharacterId) == 800000000);
 
-            var assetService = new SqliteAssetService(tempDb, ServerPaths.SchemaFilePath);
-            var inventoryStore = new SqliteInventoryStore(tempDb, ServerPaths.SchemaFilePath);
-            var dropService = new DropService(assetService, inventoryStore);
-            var run = new DungeonRun();
+            var previousDatabasePath = Environment.GetEnvironmentVariable("INVENTORY_DATABASE_PATH");
+            Environment.SetEnvironmentVariable("INVENTORY_DATABASE_PATH", tempDb);
+            try
+            {
+                var dropService = new DropService();
+                var inventory = new InventoryService(CharacterId, AccountId);
+                var lease = new InventoryLease(Guid.NewGuid(), CharacterId, inventory, 1);
+                var run = new DungeonRun();
 
-            SetGold(connectionString, CharacterId, 799999990);
-            run.Drops[1] = new DropInfo { SceneSlot = 1, TemplateId = 0, StackCount = 100 };
-            var partialPickup = dropService.TryPickup(run, 1, CharacterId, AccountId);
-            Check("gold pickup reports only the amount that fits",
-                partialPickup.Success && partialPickup.GoldAmount == 10 && partialPickup.ExtraGold == 0);
-            Check("partially swallowed gold drop is removed and balance stays capped",
-                !run.Drops.ContainsKey(1) && LoadGold(connectionString, CharacterId) == 800000000);
+                SetGold(connectionString, CharacterId, 799999990);
+                inventory.SetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart, 799999990);
+                run.Drops[1] = new DropInfo { SceneSlot = 1, TemplateId = 0, StackCount = 100 };
+                var partialPickup = dropService.TryPickup(run, 1, lease);
+                Check("gold pickup reports only the amount that fits",
+                    partialPickup.Success && partialPickup.GoldAmount == 10 && partialPickup.ExtraGold == 0);
+                Check("partially swallowed gold drop is removed and balance stays capped",
+                    !run.Drops.ContainsKey(1)
+                    && inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart) == 800000000);
 
-            run.Drops[2] = new DropInfo { SceneSlot = 2, TemplateId = 0, StackCount = 100 };
-            var fullPickup = dropService.TryPickup(run, 2, CharacterId, AccountId);
-            Check("gold pickup at cap reports zero credited gold",
-                fullPickup.Success && fullPickup.GoldAmount == 0 && fullPickup.ExtraGold == 0);
-            Check("fully swallowed gold drop is removed and balance remains capped",
-                !run.Drops.ContainsKey(2) && LoadGold(connectionString, CharacterId) == 800000000);
+                run.Drops[2] = new DropInfo { SceneSlot = 2, TemplateId = 0, StackCount = 100 };
+                var fullPickup = dropService.TryPickup(run, 2, lease);
+                Check("gold pickup at cap reports zero credited gold",
+                    fullPickup.Success && fullPickup.GoldAmount == 0 && fullPickup.ExtraGold == 0);
+                Check("fully swallowed gold drop is removed and balance remains capped",
+                    !run.Drops.ContainsKey(2)
+                    && inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart) == 800000000);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("INVENTORY_DATABASE_PATH", previousDatabasePath);
+            }
 
             Console.WriteLine($"=== result: {_pass} PASS, {_fail} FAIL ===");
             return _fail == 0 ? 0 : 1;
@@ -100,20 +112,24 @@ namespace DfoServer.SelfTests
             using (var connection = new SqliteConnection(connectionString))
             {
                 connection.Open();
-                using (var command = connection.CreateCommand())
+                using (var transaction = connection.BeginTransaction())
                 {
-                    command.CommandText = @"
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.Transaction = transaction;
+                        command.CommandText = @"
 INSERT INTO accounts(account_id, m_id, password_hash) VALUES(@aid, 'gold-limit-selftest', '');
 INSERT INTO characters(character_id, account_id, name, level) VALUES(@cid, @aid, 'gold-limit-main', 60);
-INSERT INTO characters(character_id, account_id, name, level) VALUES(@lowCid, @aid, 'gold-limit-low', 59);
-INSERT INTO character_items(owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, extra_json)
-VALUES('character', @cid, @cid, 0, 0, 0, 'special', 30000000, 30000000, '{}');
-INSERT INTO character_items(owner_scope, owner_id, character_id, list_type, slot_index, item_template_id, item_kind, stack_count, instance_value, extra_json)
-VALUES('character', @lowCid, @lowCid, 0, 0, 0, 'special', 30000000, 30000000, '{}');";
-                    command.Parameters.AddWithValue("@aid", AccountId);
-                    command.Parameters.AddWithValue("@cid", CharacterId);
-                    command.Parameters.AddWithValue("@lowCid", LowLevelCharacterId);
-                    command.ExecuteNonQuery();
+INSERT INTO characters(character_id, account_id, name, level) VALUES(@lowCid, @aid, 'gold-limit-low', 59);";
+                        command.Parameters.AddWithValue("@aid", AccountId);
+                        command.Parameters.AddWithValue("@cid", CharacterId);
+                        command.Parameters.AddWithValue("@lowCid", LowLevelCharacterId);
+                        command.ExecuteNonQuery();
+                    }
+
+                    InventoryMainVirtualCountRepository.UpsertCurrencySlot(connection, transaction, CharacterId, 0, 30000000);
+                    InventoryMainVirtualCountRepository.UpsertCurrencySlot(connection, transaction, LowLevelCharacterId, 0, 30000000);
+                    transaction.Commit();
                 }
             }
         }
@@ -123,12 +139,7 @@ VALUES('character', @lowCid, @lowCid, 0, 0, 0, 'special', 30000000, 30000000, '{
             using (var connection = new SqliteConnection(connectionString))
             {
                 connection.Open();
-                using (var command = connection.CreateCommand())
-                {
-                    command.CommandText = "SELECT stack_count FROM character_items WHERE character_id=@cid AND list_type=0 AND slot_index=0;";
-                    command.Parameters.AddWithValue("@cid", characterId);
-                    return Convert.ToInt32(command.ExecuteScalar());
-                }
+                return InventoryMainVirtualCountRepository.LoadCurrencyCount(connection, null, characterId, 0);
             }
         }
 
@@ -137,12 +148,10 @@ VALUES('character', @lowCid, @lowCid, 0, 0, 0, 'special', 30000000, 30000000, '{
             using (var connection = new SqliteConnection(connectionString))
             {
                 connection.Open();
-                using (var command = connection.CreateCommand())
+                using (var transaction = connection.BeginTransaction())
                 {
-                    command.CommandText = "UPDATE character_items SET stack_count=@gold, instance_value=@gold WHERE character_id=@cid AND list_type=0 AND slot_index=0;";
-                    command.Parameters.AddWithValue("@gold", gold);
-                    command.Parameters.AddWithValue("@cid", characterId);
-                    command.ExecuteNonQuery();
+                    InventoryMainVirtualCountRepository.UpsertCurrencySlot(connection, transaction, characterId, 0, gold);
+                    transaction.Commit();
                 }
             }
         }

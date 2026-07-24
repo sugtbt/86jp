@@ -19,9 +19,21 @@ namespace DfoServer.Network.Handlers
 
             var targetSlot = BitConverter.ToInt16(body, 0);
 
-            var (cid, aid) = ResolveOwner(session);
-            var store = _inventoryStore as SqliteInventoryStore;
-            if (store == null || !store.TryUnsealRandomOption(cid, aid, targetSlot, 0, out var result))
+            var (cid, _) = ResolveOwner(session);
+            RandomOptionUnsealResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TryUnsealRandomOption(lease.Inventory, targetSlot, 0, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 FileLogger.Log($"[{ProtocolName}] UNSEAL_RANDOM_OPTION reject slot={targetSlot}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0191, new byte[] { 0x00 }));
@@ -32,8 +44,7 @@ namespace DfoServer.Network.Handlers
                 await _refresh.SendUpdateItemList(session, result.TargetListType, result.TargetSlotIndex);
 
             if (result.GoldCost > 0)
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(result.UpdatedGold)));
+                await _refresh.SendGoldUpdate(session);
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0191, new byte[] { 0x01 }));
 
@@ -53,9 +64,21 @@ namespace DfoServer.Network.Handlers
             var targetSlot = BitConverter.ToInt16(body, 0);
             var optionIndex = body[4];
 
-            var (cid, aid) = ResolveOwner(session);
-            var store = _inventoryStore as SqliteInventoryStore;
-            if (store == null || !store.TryChangeRandomOption(cid, aid, targetSlot, 0, optionIndex, out var result))
+            var (cid, _) = ResolveOwner(session);
+            RandomOptionUnsealResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TryChangeRandomOption(lease.Inventory, targetSlot, 0, optionIndex, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 FileLogger.Log($"[{ProtocolName}] CHANGE_RANDOM_OPTION reject slot={targetSlot} idx={optionIndex}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x01B6, new byte[] { 0x00 }));
@@ -66,8 +89,7 @@ namespace DfoServer.Network.Handlers
                 await _refresh.SendUpdateItemList(session, result.TargetListType, result.TargetSlotIndex);
 
             if (result.GoldCost > 0)
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(result.UpdatedGold)));
+                await _refresh.SendGoldUpdate(session);
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x01B6, new byte[] { 0x01 }));
 

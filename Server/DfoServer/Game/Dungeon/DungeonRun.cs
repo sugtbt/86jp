@@ -57,6 +57,25 @@ namespace DfoServer.Game.Dungeon
         public int MazeStartMapId;
         public int MazeStartX = -1;
         public int MazeStartY = -1;
+        public int LinkedDungeonNextId;
+        public int LinkedDungeonNextRate;
+        public int LinkedDungeonNextCondition;
+
+        // 赫拉斯研究所 / TimeSpiral 单局传送与结算状态。
+        internal bool TimeSpiralTeleportPending;
+        internal int TimeSpiralTrapMapId;
+        internal bool TimeSpiralTargetActive;
+        internal int TimeSpiralTargetX = -1;
+        internal int TimeSpiralTargetY = -1;
+        internal int TimeSpiralTargetFlag = -1;
+        internal int TimeSpiralTargetWeight;
+        internal bool TimeSpiralHiddenBossActive;
+        internal ushort TimeSpiralHiddenBossSeqId;
+        internal int TimeSpiralHiddenBossCode;
+        internal int TimeSpiralHiddenBossMapId;
+        internal int TimeSpiralHiddenBossX = -1;
+        internal int TimeSpiralHiddenBossY = -1;
+        internal string TimeSpiralHiddenBossSource;
 
         // 深渊(地狱派对)
         public bool HellMode;

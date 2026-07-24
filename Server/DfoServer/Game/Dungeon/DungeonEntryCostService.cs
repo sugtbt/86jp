@@ -9,19 +9,12 @@ namespace DfoServer.Game.Dungeon
 {
     internal sealed class DungeonEntryCostService
     {
-        private readonly IAssetService _assetService;
-
-        internal DungeonEntryCostService(IAssetService assetService)
-        {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
-        }
-
         internal EntryCostResult TryConsumeAbyssPartyTicket(
-            int characterId, int accountId,
+            InventoryService inventory,
             WorldMapArea area, int dungeonMinLevel)
         {
             var result = new EntryCostResult();
-            if (characterId <= 0)
+            if (inventory == null || inventory.CharacterId <= 0)
                 return result.Fail("invalid character");
 
             if (area == null)
@@ -30,78 +23,74 @@ namespace DfoServer.Game.Dungeon
             if (!area.HellDungeon)
                 return result.Fail("area is not hell dungeon");
 
-            if (!CheckHellQuestRequirement(characterId, area, out var missingQuestId))
+            if (!CheckHellQuestRequirement(inventory.CharacterId, area, out var missingQuestId))
                 return result.Fail($"hell quest not cleared quest={missingQuestId}");
 
             try
             {
-                using (var scope = _assetService.OpenScope(characterId, accountId))
+                foreach (var ticket in area.HellFreePassItems)
                 {
-                    foreach (var ticket in area.HellFreePassItems)
-                    {
-                        if (ticket.ItemId <= 0 || ticket.Count <= 0)
-                            continue;
+                    if (ticket.ItemId <= 0 || ticket.Count <= 0)
+                        continue;
 
-                        if (_assetService.CountItem(scope, ticket.ItemId) < ticket.Count)
-                            continue;
+                    if (inventory.CountMainItem(ticket.ItemId) < ticket.Count)
+                        continue;
 
-                        if (_assetService.TryRemoveItem(scope, ticket.ItemId, ticket.Count, out var slot, out var remaining))
-                        {
-                            scope.Commit();
-                            result.Success = true;
-                            result.IsFreePass = true;
-                            result.ConsumedItems.Add(new ItemConsumeUpdate
-                            {
-                                ItemId = ticket.ItemId,
-                                Count = ticket.Count,
-                                SlotIndex = slot,
-                                RemainingCount = remaining,
-                            });
-                            return result;
-                        }
-                    }
-
-                    var normalNeedCount = WorldMap.GetHellNormalTicketNeedCount(dungeonMinLevel);
-                    if (normalNeedCount <= 0)
-                        return result.Fail($"dungeon min level too low minLevel={dungeonMinLevel}");
-
-                    var normalTicketItemIds = area.HellNormalTicketItemIds;
-                    if (normalTicketItemIds.Count == 0)
-                        return result.Fail("normal ticket item missing");
-
-                    var selectedNormalTicketItemId = 0;
-                    foreach (var itemId in normalTicketItemIds)
-                    {
-                        if (itemId > 0 && _assetService.CountItem(scope, itemId) >= normalNeedCount)
-                        {
-                            selectedNormalTicketItemId = itemId;
-                            break;
-                        }
-                    }
-
-                    if (selectedNormalTicketItemId <= 0)
-                        return result.Fail($"ticket missing normalNeed={normalNeedCount}");
-
-                    if (_assetService.TryRemoveItem(scope, selectedNormalTicketItemId, normalNeedCount, out var normalSlot, out var normalRemaining))
+                    if (inventory.TryConsumeMainItem(ticket.ItemId, ticket.Count, out var consumed) && consumed.Success)
                     {
                         result.Success = true;
-                        result.IsFreePass = false;
+                        result.IsFreePass = true;
                         result.ConsumedItems.Add(new ItemConsumeUpdate
                         {
-                            ItemId = selectedNormalTicketItemId,
-                            Count = normalNeedCount,
-                            SlotIndex = normalSlot,
-                            RemainingCount = normalRemaining,
+                            ItemId = ticket.ItemId,
+                            Count = ticket.Count,
+                            SlotIndex = consumed.SlotIndex,
+                            RemainingCount = consumed.RemainingCount,
                         });
+                        return result;
                     }
-                    else
-                    {
-                        return result.Fail($"ticket delete failed item={selectedNormalTicketItemId} normalNeed={normalNeedCount}");
-                    }
-
-                    scope.Commit();
-                    return result;
                 }
+
+                var normalNeedCount = WorldMap.GetHellNormalTicketNeedCount(dungeonMinLevel);
+                if (normalNeedCount <= 0)
+                    return result.Fail($"dungeon min level too low minLevel={dungeonMinLevel}");
+
+                var normalTicketItemIds = area.HellNormalTicketItemIds;
+                if (normalTicketItemIds.Count == 0)
+                    return result.Fail("normal ticket item missing");
+
+                var selectedNormalTicketItemId = 0;
+                foreach (var itemId in normalTicketItemIds)
+                {
+                    if (itemId > 0 && inventory.CountMainItem(itemId) >= normalNeedCount)
+                    {
+                        selectedNormalTicketItemId = itemId;
+                        break;
+                    }
+                }
+
+                if (selectedNormalTicketItemId <= 0)
+                    return result.Fail($"ticket missing normalNeed={normalNeedCount}");
+
+                if (inventory.TryConsumeMainItem(selectedNormalTicketItemId, normalNeedCount, out var normalConsumed)
+                    && normalConsumed.Success)
+                {
+                    result.Success = true;
+                    result.IsFreePass = false;
+                    result.ConsumedItems.Add(new ItemConsumeUpdate
+                    {
+                        ItemId = selectedNormalTicketItemId,
+                        Count = normalNeedCount,
+                        SlotIndex = normalConsumed.SlotIndex,
+                        RemainingCount = normalConsumed.RemainingCount,
+                    });
+                }
+                else
+                {
+                    return result.Fail($"ticket delete failed item={selectedNormalTicketItemId} normalNeed={normalNeedCount}");
+                }
+
+                return result;
             }
             catch (Exception ex)
             {

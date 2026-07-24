@@ -1,10 +1,11 @@
 using System;
+using System.Collections.Generic;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
+using PvfLib;
 
 namespace DfoServer.Network.Builders
 {
-    // NOTI 0x0381(897): 收集箱初始化推送，按 PVF occurrenceIndex 逐个推送每个收集箱。
     public sealed class CollectionBoxBodyBuilder : IInitPacketBuilder
     {
         private readonly CollectBoxProgressRepository _progressRepository;
@@ -29,8 +30,11 @@ namespace DfoServer.Network.Builders
             return TryBuildForBox(_progressRepository, characterId, indexes[occurrenceIndex], out body);
         }
 
-        // 供选角初始化(TryBuild)和运行时推送(放入/取出宝珠后)共用。
-        public static bool TryBuildForBox(CollectBoxProgressRepository progressRepository, int characterId, int boxIndex, out byte[] body)
+        public static bool TryBuildForBox(
+            CollectBoxProgressRepository progressRepository,
+            int characterId,
+            int boxIndex,
+            out byte[] body)
         {
             var entry = CollectBoxDataService.GetByIndex(boxIndex);
             if (entry == null)
@@ -39,10 +43,32 @@ namespace DfoServer.Network.Builders
                 return false;
             }
 
-            // 协议字段语义(参考工程 df_game_r.c 确认)：
-            //   statusFlags=1, remainingSeconds=0          → 无限制
-            //   statusFlags=0, remainingSeconds=剩余秒数   → 倒计时
-            //   statusFlags=0, remainingSeconds=0xFFFFFFFF → 已过期
+            var savedSlots = characterId > 0 && progressRepository != null
+                ? progressRepository.LoadSlots(characterId, entry.Index)
+                : Array.Empty<CollectBoxSlotEntry>();
+            return BuildForBox(entry, savedSlots, out body);
+        }
+
+        internal static bool TryBuildForBox(CollectBoxModel model, int boxIndex, out byte[] body)
+        {
+            var entry = CollectBoxDataService.GetByIndex(boxIndex);
+            if (entry == null)
+            {
+                body = Array.Empty<byte>();
+                return false;
+            }
+
+            var savedSlots = model != null
+                ? model.GetSlots(entry.Index)
+                : Array.Empty<CollectBoxSlotEntry>();
+            return BuildForBox(entry, savedSlots, out body);
+        }
+
+        private static bool BuildForBox(
+            CollectBoxEntry entry,
+            IReadOnlyList<CollectBoxSlotEntry> savedSlots,
+            out byte[] body)
+        {
             uint remainingSeconds = 0;
             byte statusFlags = 1;
             if (!string.IsNullOrEmpty(entry.MaxExpirationDate) &&
@@ -61,14 +87,10 @@ namespace DfoServer.Network.Builders
                 }
             }
 
-            var savedSlots = characterId > 0
-                ? progressRepository.LoadSlots(characterId, entry.Index)
-                : Array.Empty<CollectBoxSlotEntry>();
-            var itemCount = savedSlots.Count;
-
+            var itemCount = savedSlots != null ? savedSlots.Count : 0;
             body = new byte[8 + itemCount * 4];
-            body[0] = (byte)entry.Index;  // BoxType = PVF [Index]
-            body[1] = 1;                  // refresh=1，客户端才会把数据标记为已就绪，否则持续轮询
+            body[0] = (byte)entry.Index;
+            body[1] = 1;
             Buffer.BlockCopy(BitConverter.GetBytes(remainingSeconds), 0, body, 2, 4);
             body[6] = statusFlags;
             body[7] = (byte)itemCount;

@@ -39,9 +39,8 @@ namespace DfoServer.SelfTests
                 Level = 65,
             });
 
-            var assetService = new SqliteAssetService(dbPath, schemaPath);
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
-            var questService = new QuestService(connStr, assetService);
+            var questService = new QuestService(connStr);
 
             var failures = 0;
 

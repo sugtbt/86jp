@@ -1,5 +1,4 @@
 using DfoServer.Game.Inventory;
-using System;
 
 namespace DfoServer.Network.Builders
 {
@@ -21,44 +20,44 @@ namespace DfoServer.Network.Builders
             return BuildPhaseStart(-1, 0);
         }
 
-        public static byte[] BuildCommonItemResult(
+        internal static byte[] BuildCommonItemResult(
             short sourceSlotIndex,
-            CommonInventoryItem rewardItem,
+            short rewardSlotIndex,
+            ItemCore rewardItem,
             int displayValue)
         {
-            if (rewardItem == null || rewardItem.ItemTemplateId <= 0)
+            if (rewardItem == null || rewardItem.ItemId <= 0)
                 return BuildError();
 
             var writer = new GamePacketWriter();
             writer.WriteByte(0x01);
             writer.WriteInt16(sourceSlotIndex);
-            writer.WriteInt16(rewardItem.SlotIndex);
-            writer.WriteInt32(rewardItem.ItemTemplateId);
+            writer.WriteInt16(rewardSlotIndex);
+            writer.WriteInt32(rewardItem.ItemId);
             writer.WriteInt32(displayValue);
             writer.WriteUInt16(rewardItem.Durability);
-            writer.WriteByte(rewardItem.ExtData0);
-            writer.WriteByte(ReadAmplifyType(rewardItem));
-            writer.WriteUInt16(ReadAmplifyValue(rewardItem));
-
-            // Native PacketBuf::put_packet(Inven_Item) appends only the
-            // variable tail after this summary. The 84-byte inventory-list
-            // entry uses a different layout and crashes the client here.
+            writer.WriteByte(rewardItem.Attr);
+            writer.WriteByte(rewardItem.AmplifyType);
+            writer.WriteUInt16(rewardItem.AmplifyValue);
+            writer.WriteInt32(rewardItem.ExpireTime);
             WriteEmptyEquipmentSocketExtension(writer, rewardItem);
             WriteEmptyInvenItemTail(writer);
             return writer.ToArray();
         }
 
-        public static byte[] BuildAvatarItemResult(
+        internal static byte[] BuildAvatarItemResult(
             short sourceSlotIndex,
-            AvatarInventoryItem rewardItem)
+            short rewardSlotIndex,
+            ItemCore rewardItem,
+            AvatarDetail detail)
         {
-            if (rewardItem == null || rewardItem.AvatarItemId <= 0)
+            if (rewardItem == null || rewardItem.ItemId <= 0)
                 return BuildError();
 
             var writer = new GamePacketWriter();
             writer.WriteByte(0x01);
             writer.WriteInt16(sourceSlotIndex);
-            ItemListPacketBuilder.WriteAvatarEntry(writer, rewardItem);
+            ItemListProtocolWriter.WriteAvatarEntry126(writer, rewardSlotIndex, rewardItem, detail);
             return writer.ToArray();
         }
 
@@ -73,18 +72,6 @@ namespace DfoServer.Network.Builders
             return writer.ToArray();
         }
 
-        private static byte ReadAmplifyType(CommonInventoryItem item)
-        {
-            var prefix = item.PrefixData0E ?? Array.Empty<byte>();
-            return prefix.Length >= 6 ? prefix[5] : (byte)0;
-        }
-
-        private static ushort ReadAmplifyValue(CommonInventoryItem item)
-        {
-            var prefix = item.PrefixData0E ?? Array.Empty<byte>();
-            return prefix.Length >= 8 ? BitConverter.ToUInt16(prefix, 6) : (ushort)0;
-        }
-
         private static void WriteEmptyInvenItemTail(GamePacketWriter writer)
         {
             writer.WriteByte(0x00); // empty RandomOption packet
@@ -94,9 +81,9 @@ namespace DfoServer.Network.Builders
 
         private static void WriteEmptyEquipmentSocketExtension(
             GamePacketWriter writer,
-            CommonInventoryItem item)
+            ItemCore item)
         {
-            if (ItemMetadataResolver.Resolve(item.ItemTemplateId).IsStackable)
+            if (ItemMetadataResolver.Resolve(item.ItemId).IsStackable)
                 return;
 
             writer.WriteByte(0xEF);

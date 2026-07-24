@@ -151,13 +151,7 @@ namespace DfoServer.SelfTests
                 "legacy skill-id chronicle entry migrates to aura-id protocol", ref failures);
             Check(Hex(migratedMiddle) == "01-E8-04-00-00-00-00-00-00-00-00-03-00-0D-00-06-00",
                 "captured coat refine entry matches legacy packet layout", ref failures);
-            var mappedCommonItem = InventoryProtocolMapper.NormalizeCommonItem(new CommonInventoryItem
-            {
-                ItemTemplateId = 135000,
-                MiddleData1A = legacyMiddle,
-            });
-            Check(Hex(mappedCommonItem.MiddleData1A) == Hex(migratedMiddle),
-                "common inventory protocol mapper preserves normalized refine data", ref failures);
+
             var successAck = ChronicleRefineAckBuilder.BuildSuccess(new ChronicleRefineResult
             {
                 Command = new ChronicleRefineCommand { MaterialSlotIndex = 105, TargetSlotIndex = 13 },
@@ -323,19 +317,21 @@ namespace DfoServer.SelfTests
                 Check(false, "real first refine definitions load", ref failures);
                 return;
             }
+
             Check(fragmentItemId == 3311, "fragment item id resolved from aura need-material PVF", ref failures);
-            var failureRewards = SqliteInventoryStore.BuildChronicleFailureRewards(metadata, 0, fragmentItemId);
+            var failureRewards = ChronicleRefineService.BuildFailureRewards(metadata, 0, fragmentItemId);
             var fragmentReward = failureRewards.Find(reward => reward.ItemTemplateId == fragmentItemId);
             Check(failureRewards.Count == 3
                 && fragmentReward != null
                 && fragmentReward.Count == 1,
                 "real failure rewards contain three item types and dimensional fragment", ref failures);
-            var reinforcedFailureRewards = SqliteInventoryStore.BuildChronicleFailureRewards(metadata, 3, fragmentItemId);
+            var reinforcedFailureRewards = ChronicleRefineService.BuildFailureRewards(metadata, 3, fragmentItemId);
             var reinforcedFragment = reinforcedFailureRewards.Find(reward => reward.ItemTemplateId == fragmentItemId);
             Check(reinforcedFailureRewards.Count == 3
                 && reinforcedFragment != null
                 && reinforcedFragment.Count == 4,
                 "+3 equipment yields four fragments without extra reward types", ref failures);
+
             var targetType = NormalizeEquipmentType(metadata.EquipmentType);
             ThreeChronicleEnchantCheck selectedCheck = null;
             foreach (var check in material.ThreeChronicleEnchant.Checks)
@@ -348,115 +344,55 @@ namespace DfoServer.SelfTests
                     break;
                 }
             }
+
             if (selectedCheck == null)
             {
-                var availableTypes = string.Empty;
-                foreach (var check in material.ThreeChronicleEnchant.Checks)
-                {
-                    var value = NormalizeEquipmentType(check.EquipmentType);
-                    if (string.IsNullOrWhiteSpace(value)
-                        || availableTypes.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0)
-                        continue;
-                    availableTypes += (availableTypes.Length == 0 ? string.Empty : ", ") + value;
-                }
-                Check(false,
-                    $"real first refine compatible check (target={targetType}, available={availableTypes})",
-                    ref failures);
+                Check(false, $"real first refine compatible check target={targetType}", ref failures);
                 return;
             }
 
             var skill = selectedCheck.Skills[0];
-            var tempDb = Path.Combine(Path.GetTempPath(), "chronicle_refine_" + Guid.NewGuid().ToString("N") + ".db");
-            try
+            var inventory = new InventoryService(characterId, accountId);
+            inventory.SetItem(InventoryListType.Main, materialSlot, new ItemCore
             {
-                var connectionString = SqliteDatabaseBootstrap.Initialize(tempDb, ServerPaths.SchemaFilePath);
-                using (var connection = new SqliteConnection(connectionString))
-                {
-                    connection.Open();
-                    using (var command = connection.CreateCommand())
-                    {
-                        command.CommandText = @"
-INSERT INTO accounts(account_id, m_id) VALUES(@aid, 'chronicle_refine_test');
-INSERT INTO characters(character_id, account_id, name, job, grow_type, level)
-VALUES(@cid, @aid, 'chronicle_refine_char', @job, @grow, 70);
-INSERT INTO character_items(owner_scope, owner_id, character_id, list_type, slot_index,
-    item_template_id, item_kind, stack_count, instance_value, durability, extra_json)
-VALUES('character', @cid, @cid, 0, @materialSlot, @materialId, 'stackable', 2, 2, 0, '{}');
-INSERT INTO character_items(owner_scope, owner_id, character_id, list_type, slot_index,
-    item_template_id, item_kind, stack_count, instance_value, durability, extra_json)
-VALUES('character', @cid, @cid, 0, @targetSlot, @targetId, 'equipment', 10001, 10001, @durability, '{}');";
-                        command.Parameters.AddWithValue("@aid", accountId);
-                        command.Parameters.AddWithValue("@cid", characterId);
-                        command.Parameters.AddWithValue("@job", selectedCheck.Values[0]);
-                        command.Parameters.AddWithValue("@grow", selectedCheck.Values[1]);
-                        command.Parameters.AddWithValue("@materialSlot", materialSlot);
-                        command.Parameters.AddWithValue("@materialId", materialId);
-                        command.Parameters.AddWithValue("@targetSlot", targetSlot);
-                        command.Parameters.AddWithValue("@targetId", targetId);
-                        command.Parameters.AddWithValue("@durability", metadata.Durability);
-                        command.ExecuteNonQuery();
-                    }
-                }
-
-                var store = new SqliteInventoryStore(tempDb, ServerPaths.SchemaFilePath);
-                var ok = store.TryRefineChronicleItem(characterId, accountId, new ChronicleRefineCommand
-                {
-                    MaterialSlotIndex = materialSlot,
-                    MaterialItemTemplateId = materialId,
-                    TargetSlotIndex = targetSlot,
-                    TargetItemTemplateId = targetId,
-                    OptionNo = (byte)skill.OptionNo,
-                    CharacterJob = (byte)selectedCheck.Values[0],
-                    FirstGrowType = (byte)selectedCheck.Values[1],
-                }, out var result);
-
-                using (var connection = new SqliteConnection(connectionString))
-                {
-                    connection.Open();
-                    using (var command = connection.CreateCommand())
-                    {
-                        command.CommandText = @"
-SELECT
-  (SELECT stack_count FROM character_items WHERE character_id=@cid AND slot_index=@materialSlot),
-  (SELECT COUNT(*) FROM character_items WHERE character_id=@cid AND slot_index=@targetSlot),
-  (SELECT extra_json FROM character_items WHERE character_id=@cid AND slot_index=@targetSlot);";
-                        command.Parameters.AddWithValue("@cid", characterId);
-                        command.Parameters.AddWithValue("@materialSlot", materialSlot);
-                        command.Parameters.AddWithValue("@targetSlot", targetSlot);
-                        using (var reader = command.ExecuteReader())
-                        {
-                            reader.Read();
-                            var remaining = reader.GetInt32(0);
-                            var targetCount = reader.GetInt32(1);
-                            var extraJson = reader.GetString(2);
-                            var persistedRecord = new SqliteInventoryStore.ItemRecord
-                            {
-                                ItemTemplateId = targetId,
-                                ExtraJson = extraJson,
-                            };
-                            var persistedOptions = InventoryItemView.ForCommon(persistedRecord).Entry84.ChronicleOptions;
-                            Check(ok && result.RefineSucceeded && result.OptionCount == 1,
-                                "real first refine succeeds", ref failures);
-                            Check(remaining == 1, "real first refine consumes one aura", ref failures);
-                            Check(targetCount == 1
-                                && persistedOptions.Count == 1
-                                && ChronicleRefineMaterialResolver.TryGetPacketAuraItemId(2, out var expectedGreenAuraItemId)
-                                && persistedOptions[0].OptionId == expectedGreenAuraItemId
-                                && persistedOptions[0].EquipmentType == (byte)EquipmentType.Coat,
-                                "real first refine persists target option", ref failures);
-                        }
-                    }
-                }
-            }
-            finally
+                ItemKind = ItemCore.KindConsumable,
+                ItemId = materialId,
+                Count = 2,
+            });
+            inventory.SetItem(InventoryListType.Main, targetSlot, new ItemCore
             {
-                foreach (var path in new[] { tempDb, tempDb + "-wal", tempDb + "-shm" })
-                {
-                    try { if (File.Exists(path)) File.Delete(path); } catch { }
-                }
-            }
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = targetId,
+                Uid = 10001,
+                Durability = metadata.Durability,
+            });
+
+            var ok = ChronicleRefineService.TryRefine(inventory, new ChronicleRefineCommand
+            {
+                MaterialSlotIndex = materialSlot,
+                MaterialItemTemplateId = materialId,
+                TargetSlotIndex = targetSlot,
+                TargetItemTemplateId = targetId,
+                OptionNo = (byte)skill.OptionNo,
+                CharacterJob = (byte)selectedCheck.Values[0],
+                FirstGrowType = (byte)selectedCheck.Values[1],
+            }, out var result);
+
+            var remaining = inventory.GetItem(InventoryListType.Main, materialSlot);
+            var refined = inventory.GetItem(InventoryListType.Main, targetSlot);
+            var persistedOptions = refined?.ChronicleOptions;
+            Check(ok && result.RefineSucceeded && result.OptionCount == 1,
+                "real first refine succeeds", ref failures);
+            Check(remaining != null && remaining.Count == 1,
+                "real first refine consumes one aura", ref failures);
+            Check(refined != null
+                && persistedOptions != null
+                && persistedOptions.Count == 1
+                && ChronicleRefineMaterialResolver.TryGetPacketAuraItemId(2, out var expectedGreenAuraItemId)
+                && persistedOptions[0].OptionId == expectedGreenAuraItemId
+                && persistedOptions[0].EquipmentType == (byte)EquipmentType.Coat,
+                "real first refine stores target option in ItemCore", ref failures);
         }
-
         private static void ValidateFighterChroniclePvf(ref int failures)
         {
             const int targetItemId = 605000;

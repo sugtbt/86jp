@@ -71,6 +71,8 @@ namespace PvfLib
         public string TargetCharacter { get; set; }
         public string DependGiveItem { get; set; }
         public string ClearRewardItem { get; set; }
+        public List<ClearRewardItemEntry> ClearRewardItems { get; set; } =
+            new List<ClearRewardItemEntry>();
 
         #endregion
 
@@ -156,7 +158,11 @@ namespace PvfLib
                     case "first exposed by npc": qst.FirstExposedByNpc = data; break;
                     case "target character": qst.TargetCharacter = data; break;
                     case "depend give item": qst.DependGiveItem = data; break;
-                    case "clear reward item": qst.ClearRewardItem = data; break;
+                    case "clear reward item":
+                        qst.ClearRewardItem = data;
+                        qst.ClearRewardItems =
+                            ClearRewardItemEntry.ParseList(data);
+                        break;
 
                     case "cant giveup": qst.CantGiveup = true; break;
                     case "job change quest": qst.JobChangeQuestValue = ParseInt(data); break;
@@ -255,6 +261,51 @@ namespace PvfLib
                     });
                 }
             }
+            return result;
+        }
+    }
+
+    public class ClearRewardItemEntry
+    {
+        public int DungeonId { get; set; }
+        public int Difficulty { get; set; }
+        public int ItemId { get; set; }
+        public int Count { get; set; }
+        public int DropRate { get; set; }
+        public int MaxStack { get; set; }
+
+        public static List<ClearRewardItemEntry> ParseList(string data)
+        {
+            var result = new List<ClearRewardItemEntry>();
+            if (string.IsNullOrWhiteSpace(data))
+                return result;
+
+            var tokens = data.Split(
+                new[] { ' ', '\t', '\r', '\n' },
+                StringSplitOptions.RemoveEmptyEntries);
+            for (var i = 0; i + 5 < tokens.Length; i += 6)
+            {
+                if (!int.TryParse(tokens[i], out var dungeonId)
+                    || !int.TryParse(tokens[i + 1], out var difficulty)
+                    || !int.TryParse(tokens[i + 2], out var itemId)
+                    || !int.TryParse(tokens[i + 3], out var count)
+                    || !int.TryParse(tokens[i + 4], out var dropRate)
+                    || !int.TryParse(tokens[i + 5], out var maxStack))
+                {
+                    continue;
+                }
+
+                result.Add(new ClearRewardItemEntry
+                {
+                    DungeonId = dungeonId,
+                    Difficulty = difficulty,
+                    ItemId = itemId,
+                    Count = count,
+                    DropRate = dropRate,
+                    MaxStack = maxStack,
+                });
+            }
+
             return result;
         }
     }

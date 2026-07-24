@@ -68,13 +68,7 @@ namespace DfoServer.Game.Dungeon
 
                 var meta = ItemMetadataResolver.Resolve(itemId);
                 slotCounter++;
-                result.Add(new DropInfo
-                {
-                    SceneSlot = slotCounter,
-                    TemplateId = (uint)itemId,
-                    StackCount = 1,
-                    Endurance = meta.Durability,
-                });
+                result.Add(DropInfo.CreateItem(slotCounter, itemId, 1));
                 FileLogger.Log($"[HellMonsterDropConfig] roll#{i + 1}: hit dungeonLevelRange={dungeonMinimumLevel}-{itemBasisLevel} gradeRange={gradeMin}-{gradeMax} dungeonDifficulty={dungeonDifficulty} hellDifficulty={hellDifficulty} rate={rate} chance={chance} roll={chanceRoll} rarity={rarity} candidates={candidateCount} fallback={fallbackUsed} item={itemId} itemGrade={meta.Grade} itemMinLv={meta.MinimumLevel}");
             }
 

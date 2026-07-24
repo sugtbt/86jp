@@ -1,4 +1,5 @@
 using DfoServer.GameWorld;
+using DfoServer.Infrastructure;
 using PvfLib;
 using System;
 using System.Collections.Generic;
@@ -34,9 +35,6 @@ namespace DfoServer.Game.Inventory
         private static readonly Lazy<Dictionary<int, string>> JobIndexToFile = new Lazy<Dictionary<int, string>>(LoadJobIndex);
         private static readonly Dictionary<string, CompoundAvatarFile> FileCache = new Dictionary<string, CompoundAvatarFile>();
         private static readonly object CacheLock = new object();
-        // Random.Shared(.NET 6+)内部线程安全, 避免多个玩家并发合成时共享同一个 new Random() 实例导致状态损坏。
-        private static Random Rng => Random.Shared;
-
         private static readonly string[] PartNames =
         {
             "hat", "hair", "face", "neck", "coat", "pants", "belt", "shoes"
@@ -87,7 +85,7 @@ namespace DfoServer.Game.Inventory
             else if (consumeMaterialId == MaterialMaster)
                 rate += MasterBindCubeRateBonus;
 
-            var roll = Rng.Next(10000);
+            var roll = ServerRandom.Next(10000);
             var hitRare = roll < rate && pool.RarePool.Count > 0;
 
             var resultItemIds = new List<int> { requestedItemId };
@@ -106,7 +104,7 @@ namespace DfoServer.Game.Inventory
             foreach (var (_, weight) in pool) total += weight;
             if (total <= 0) return pool[0].ItemId;
 
-            var roll = Rng.Next(total);
+            var roll = ServerRandom.Next(total);
             int acc = 0;
             foreach (var (itemId, weight) in pool)
             {

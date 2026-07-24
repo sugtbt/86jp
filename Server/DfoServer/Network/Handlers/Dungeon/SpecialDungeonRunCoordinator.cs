@@ -57,7 +57,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            run.IgnoreDefaultDungeonClear = dungeonFile.IgnoreDefaultDungeonClear;
+            run.IgnoreDefaultDungeonClear =
+                dungeonFile.IgnoreDefaultDungeonClear
+                || TimeSpiralDungeonCoordinator.IsDungeon(run.DungeonId);
             run.MeltdownHelpusHostages.Clear();
             run.SpecialMinimapIconGroups = null;
 

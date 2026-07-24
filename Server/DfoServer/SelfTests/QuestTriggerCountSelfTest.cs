@@ -43,9 +43,8 @@ namespace DfoServer.SelfTests
                 Level = 50,
             });
 
-            var assetService = new SqliteAssetService(dbPath, schemaPath);
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
-            var questService = new QuestService(connStr, assetService);
+            var questService = new QuestService(connStr);
             var failures = 0;
 
             Check("1791 hunt-enemy single target starts at 1",

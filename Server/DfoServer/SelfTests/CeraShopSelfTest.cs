@@ -1,5 +1,9 @@
 using System;
+using System.IO;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.Shop;
+using DfoServer.Infrastructure;
+using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
 {
@@ -52,8 +56,80 @@ namespace DfoServer.SelfTests
             // [community package] 段(stride=11, 价格 col4) —— 修复前未解析, 婚庆/社区礼包购买必失败。
             CheckProduct("社区礼包(结婚戒指-男)", 102317, 2683326, 18888);
 
+            Check("name tag state overwrites same character and keeps absolute expire time", CheckNameTagState());
+
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;
+        }
+
+        private static bool CheckNameTagState()
+        {
+            const int accountId = 903001;
+            const int characterId = 903002;
+            var databasePath = Path.Combine(
+                Path.GetTempPath(),
+                "cerashop-name-tag-" + Guid.NewGuid().ToString("N") + ".db");
+
+            try
+            {
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+INSERT OR IGNORE INTO accounts(account_id, m_id, password_hash)
+VALUES(@accountId, 'cerashop-name-tag-selftest', '');
+INSERT OR IGNORE INTO characters(character_id, account_id, name)
+VALUES(@characterId, @accountId, 'cerashop-name-tag');";
+                        command.Parameters.AddWithValue("@accountId", accountId);
+                        command.Parameters.AddWithValue("@characterId", characterId);
+                        command.ExecuteNonQuery();
+                    }
+
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        var now = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                        NameTagStateRepository.Upsert(
+                            connection,
+                            transaction,
+                            characterId,
+                            1111111,
+                            now + 3600);
+                        NameTagStateRepository.Upsert(
+                            connection,
+                            transaction,
+                            characterId,
+                            2222222,
+                            now + 7200);
+                        transaction.Commit();
+                    }
+
+                    var state = NameTagStateRepository.Load(connection, characterId);
+                    var nowAfterLoad = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    return state.ItemId == 2222222
+                        && state.ExpireTime > nowAfterLoad
+                        && state.ExpireTime <= nowAfterLoad + 7200;
+                }
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                foreach (var path in new[] { databasePath, databasePath + "-wal", databasePath + "-shm" })
+                {
+                    try
+                    {
+                        if (File.Exists(path))
+                            File.Delete(path);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
         }
     }
 }

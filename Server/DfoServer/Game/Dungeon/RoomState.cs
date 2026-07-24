@@ -59,6 +59,10 @@ namespace DfoServer.Game.Dungeon
         public HellPartyPhase HellPartyPhase;
         // 深渊小队剩余成员数。key 为 group index，value 为该 group 尚未收到死亡包的成员数。
         public Dictionary<int, int> HellPartyGroupRemaining;
+        public bool TimeSpiralHiddenBossActive;
+        public ushort TimeSpiralHiddenBossSeqId;
+        public int TimeSpiralHiddenBossCode;
+        public string TimeSpiralHiddenBossSource;
 
         public bool IsCleared => KilledSeqIds.Count >= MonsterCount && MonsterCount > 0;
     }

@@ -1,8 +1,10 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.Premium;
 using DfoServer.Game.Progression;
+using DfoServer.Game.ReviveCoin;
 using DfoServer.Game.Skills;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
@@ -248,7 +250,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 await PetCreatureRuntimeService.GrantRoomClearExperienceOnceAsync(session, clearedRoomState, 1);
 
-                if ((ccType1 || endPoint) && !run.IgnoreDefaultDungeonClear)
+                if (ShouldClearDungeon(
+                    ccType1,
+                    endPoint,
+                    run.IgnoreDefaultDungeonClear))
                     await _settlement.TryClearDungeon(session, $"prepare_dungeon_clear ccType1={ccType1} endPoint={endPoint}", killedMonsterCode);
 
                 FileLogger.Log($"[DungeonHandler] ROOM CLEARED: dungeon={run.DungeonId} room=({run.RoomKey.X},{run.RoomKey.Y}) map={currentMapId} killedBlocking={killedBlockingCount}/{blockingCount} killedTotal={run.RoomKilledSeqIds.Count}");
@@ -283,9 +288,31 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (run.ClearCondition != null)
             {
                 int ccType = IsBossActorType(killedMonsterType) ? 4 : (killedMonsterType >= 5 ? 3 : 2);
-                if (run.ClearCondition.Check(ccType, killedMonsterCode)
-                    && !run.IgnoreDefaultDungeonClear)
+                if (ShouldClearDungeon(
+                    run.ClearCondition.Check(ccType, killedMonsterCode),
+                    false,
+                    run.IgnoreDefaultDungeonClear))
                     await _settlement.TryClearDungeon(session, $"ClearCondition type={ccType} target={killedMonsterCode}", killedMonsterCode);
+            }
+
+            if (TryGetCurrentRoomState(session, out var timeSpiralRoomState)
+                && TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
+                    run,
+                    timeSpiralRoomState,
+                    req.LocalIndex,
+                    killedMonsterCode))
+            {
+                FileLogger.Log(
+                    $"[TimeSpiral] hidden boss killed: " +
+                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                    $"room=({timeSpiralRoomState.Maze.X},{timeSpiralRoomState.Maze.Y}) " +
+                    $"map={timeSpiralRoomState.Maze.Index} seq={req.LocalIndex} " +
+                    $"code={killedMonsterCode} path={run.TimeSpiralHiddenBossSource}");
+                await _settlement.TryClearDungeon(
+                    session,
+                    $"TimeSpiral hidden boss seq={run.TimeSpiralHiddenBossSeqId} " +
+                    $"code={run.TimeSpiralHiddenBossCode}",
+                    killedMonsterCode);
             }
 
             // 诊断(组队通关排查): boss 类怪被杀却仍未 Cleared 时, 打印全量决策输入。
@@ -381,7 +408,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             var run = bs.Player?.CurrentRun;
             if (run == null || run.Phase != DungeonRunPhase.InProgress) return;
 
-            bool doPrepareClear = false, doCondClear = false;
+            bool doPrepareClear = false;
+            bool doCondClear = false;
+            bool doTimeSpiralClear = false;
             bool endPoint = false; bool ccType1 = false; int ccType = 0; int kCode = 0;
             lock (run.SyncRoot)
             {
@@ -402,23 +431,35 @@ namespace DfoServer.Network.Handlers.Dungeon
                     kCode = monsters[roomLocalIndex].Code;
                 }
 
+                TryGetCurrentRoomState(bs, out var currentRoomState);
+                doTimeSpiralClear =
+                    TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
+                        run,
+                        currentRoomState,
+                        seqId,
+                        kCode);
+
                 if (roomCleared)
                 {
-                    TryGetCurrentRoomState(bs, out var roomState);   // 读 run.RoomStates, 必须在锁内(与 bs 换房写互斥)
+                    var roomState = currentRoomState;
                     if (roomState != null && run.BossMapPos != null && run.BossMapPos.Length >= 2)
                         endPoint = roomState.Maze.X == run.BossMapPos[0] && roomState.Maze.Y == run.BossMapPos[1];
                     int currentMapId = roomState != null ? roomState.Maze.Index : 0;
                     ccType1 = run.ClearCondition != null && run.ClearCondition.Check(1, currentMapId);
-                    doPrepareClear =
-                        (ccType1 || endPoint) && !run.IgnoreDefaultDungeonClear;
+                    doPrepareClear = ShouldClearDungeon(
+                        ccType1,
+                        endPoint,
+                        run.IgnoreDefaultDungeonClear);
                     FileLogger.Log($"[DungeonHandler] PARTY_RELAY_CLEAR cid={bs.Player.CharacterId} seqId={seqId} roomCleared={roomCleared} blocking={killedBlockingCount}/{blockingCount} endPoint={endPoint} ccType1={ccType1} phase={run.Phase}");
                 }
 
                 if (run.ClearCondition != null && run.Phase == DungeonRunPhase.InProgress)
                 {
                     ccType = IsBossActorType(kType) ? 4 : (kType >= 5 ? 3 : 2);
-                    doCondClear = run.ClearCondition.Check(ccType, kCode)
-                        && !run.IgnoreDefaultDungeonClear;
+                    doCondClear = ShouldClearDungeon(
+                        run.ClearCondition.Check(ccType, kCode),
+                        false,
+                        run.IgnoreDefaultDungeonClear);
                 }
             }
 
@@ -427,6 +468,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 await _settlement.TryClearDungeon(bs, $"party-relayed roomCleared endPoint={endPoint} ccType1={ccType1}", kCode);
             if (doCondClear)
                 await _settlement.TryClearDungeon(bs, $"party-relayed ClearCondition type={ccType} target={kCode}", kCode);
+            if (doTimeSpiralClear)
+                await _settlement.TryClearDungeon(
+                    bs,
+                    $"party-relayed TimeSpiral hidden boss " +
+                    $"seq={run.TimeSpiralHiddenBossSeqId} " +
+                    $"code={run.TimeSpiralHiddenBossCode}",
+                    kCode);
         }
 
         // 组队击杀经验: exp=raw gainedExp(纯怪物量), 每个队友用【自己等级 vs monsterLevel】各自缩放
@@ -474,6 +522,15 @@ namespace DfoServer.Network.Handlers.Dungeon
         private static bool IsBossActorType(byte monsterType)
         {
             return monsterType == 3 || monsterType == 8;
+        }
+
+        internal static bool ShouldClearDungeon(
+            bool explicitClearConditionMatched,
+            bool reachedBossEndpoint,
+            bool ignoreDefaultDungeonClear)
+        {
+            return explicitClearConditionMatched
+                || (reachedBossEndpoint && !ignoreDefaultDungeonClear);
         }
 
         private static int GetRewardMonsterType(byte monsterType)
@@ -716,13 +773,12 @@ namespace DfoServer.Network.Handlers.Dungeon
             // df_game_r: read = u16 targetActorId
             ushort targetId = body != null && body.Length >= 2 ? BitConverter.ToUInt16(body, 0) : session.Player.UserId;
             var characterId = session.Player?.CharacterId ?? 0;
-            var accountId = session.Account?.AccountId ?? 1;
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] USE_COIN: uid={session.Player.UserId} target={targetId} cid={characterId}");
 
             // 先扣复活币, 成功才发复活通知(旧实现不扣币白送复活)
             short coinSlot;
             int coinRemaining;
-            if (characterId <= 0 || !_svc.ReviveCoin.TryConsume(characterId, accountId, out coinSlot, out coinRemaining))
+            if (characterId <= 0 || !TryConsumeOnlineReviveCoin(session, characterId, out coinSlot, out coinRemaining))
             {
                 var err = new GamePacketWriter();
                 err.WriteByte(0x00);
@@ -751,6 +807,31 @@ namespace DfoServer.Network.Handlers.Dungeon
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] USE_COIN: OK cid={characterId} slot={coinSlot} remaining={coinRemaining}");
         }
 
+        private static bool TryConsumeOnlineReviveCoin(
+            EnhancedClientSession session,
+            int characterId,
+            out short slot,
+            out int remaining)
+        {
+            slot = -1;
+            remaining = 0;
+            if (session == null
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+                return false;
+
+            lock (lease.SyncRoot)
+            {
+                if (!lease.Inventory.TryConsumeMainItem(ReviveCoinService.ItemId, 1, out var consumed)
+                    || !consumed.Success)
+                    return false;
+
+                slot = consumed.SlotIndex;
+                remaining = consumed.RemainingCount;
+                return true;
+            }
+        }
+
         internal async Task HandleGetItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var run = session.Player.CurrentRun;
@@ -765,8 +846,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var accountId = session.Account?.AccountId ?? 1;
-            var pickup = _svc.Drops.TryPickup(run, req.SrcSlot, session.Player.CharacterId, accountId);
+            var pickup = _svc.Drops.TryPickup(run, req.SrcSlot, session);
 
             if (!pickup.Success)
             {
@@ -784,17 +864,10 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0027,
                     DropItemBuilder.BuildPickupItem(req.SrcSlot, session.Player.UserId, (ushort)pickup.InventorySlot, 7)));
-                if (pickup.RestoredItem != null)
-                {
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        ItemListUpdateBuilder.BuildCommonUpdates(new[] { pickup.RestoredItem })));
-                }
                 if (session.GameSession?.QuestManager != null && pickup.PickedUpItemId > 0)
                     await session.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(
                         new[] { pickup.PickedUpItemId });
-                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] GET_ITEM: item pickup srcSlot={req.SrcSlot} templateId={pickup.PickedUpItemId} invSlot={pickup.InventorySlot} restoredValue={pickup.RestoredItem?.CountOrInstanceValue.ToString() ?? "-"}");
+                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] GET_ITEM: item pickup srcSlot={req.SrcSlot} templateId={pickup.PickedUpItemId} invSlot={pickup.InventorySlot}");
             }
         }
 
@@ -817,7 +890,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             var result = _svc.Drops.TryDropInventoryItem(
                 run,
-                session.Player.CharacterId,
+                session,
                 request.ListType,
                 request.SlotIndex,
                 request.Count);

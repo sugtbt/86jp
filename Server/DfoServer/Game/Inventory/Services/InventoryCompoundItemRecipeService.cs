@@ -1,0 +1,371 @@
+using PvfLib;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+
+namespace DfoServer.Game.Inventory
+{
+    internal static class InventoryCompoundItemRecipeService
+    {
+        internal static bool TryCompoundItemRecipe(
+            InventoryService inventory,
+            CompoundItemRecipeRequest request,
+            out CompoundItemRecipeResult result)
+        {
+            result = new CompoundItemRecipeResult
+            {
+                RequestedCount = request != null ? request.RequestedCount : (ushort)0,
+            };
+
+            if (inventory == null || request == null || request.RequestedCount == 0)
+                return Fail(result, 17);
+
+            if (!TryResolveSource(inventory, request, result, out var sourceItemId, out var sourceSlotIndex, out var source))
+                return false;
+
+            result.SourceItemTemplateId = sourceItemId;
+            if (!TryParseCompoundRecipe(sourceItemId, out var recipe))
+                return Fail(result, 17);
+
+            result.PvfPath = recipe.PvfPath;
+            result.RecipeType = recipe.RecipeType;
+
+            var materials = MultiplyRecipeEntries(recipe.Materials, request.RequestedCount);
+            var outputs = MultiplyRecipeEntries(recipe.Outputs, request.RequestedCount);
+            if (outputs.Count == 0)
+                return Fail(result, 17);
+            if (!HasEnoughMaterials(inventory, materials))
+                return Fail(result, 21);
+
+            var rewardRequests = BuildRewardRequests(outputs);
+            var planningInventory = InventoryCompoundPlanning.CloneInventory(inventory);
+            if (!DeleteMaterials(planningInventory, materials, null))
+                return Fail(result, 17);
+            if (!request.SourceIsItemId
+                && (!InventoryDeleteService.TryConsumeFromSlot(
+                        planningInventory,
+                        InventoryListType.Main,
+                        sourceSlotIndex,
+                        source.ItemId,
+                        request.RequestedCount,
+                        out var planningSourceDelete)
+                    || !planningSourceDelete.Success))
+            {
+                return Fail(result, 17);
+            }
+
+            if (!InventoryRewardGrantService.TryPlanBatch(planningInventory, rewardRequests, out var plan)
+                || plan == null
+                || !plan.Success)
+                return Fail(result, 4);
+
+            var deleted = new List<CompoundItemDeletedEntry>();
+            if (!DeleteMaterials(inventory, materials, deleted))
+                return Fail(result, 17);
+            if (!request.SourceIsItemId)
+            {
+                if (!InventoryDeleteService.TryConsumeFromSlot(
+                        inventory,
+                        InventoryListType.Main,
+                        sourceSlotIndex,
+                        source.ItemId,
+                        request.RequestedCount,
+                        out var sourceDelete)
+                    || !sourceDelete.Success)
+                {
+                    return Fail(result, 17);
+                }
+
+                deleted.Insert(0, new CompoundItemDeletedEntry
+                {
+                    ListType = InventoryListType.Main,
+                    SlotIndex = sourceSlotIndex,
+                    Count = sourceDelete.DeletedCount,
+                    ItemTemplateId = source.ItemId,
+                });
+                result.SourceConsumed = true;
+            }
+
+            if (!InventoryRewardGrantService.TryApplyPreparedBatch(inventory, plan, out var grantBatch)
+                || grantBatch == null
+                || !grantBatch.Success)
+                return Fail(result, 4);
+
+            result.DeletedEntries.AddRange(deleted);
+            AddRewardResults(inventory, grantBatch.Results, result.Rewards);
+            result.ErrorCode = 0;
+            return true;
+        }
+
+        private static bool TryResolveSource(
+            InventoryService inventory,
+            CompoundItemRecipeRequest request,
+            CompoundItemRecipeResult result,
+            out int sourceItemId,
+            out short sourceSlotIndex,
+            out ItemCore source)
+        {
+            sourceItemId = request.SourceValue;
+            sourceSlotIndex = -1;
+            source = null;
+            if (request.SourceIsItemId)
+                return sourceItemId > 0 || Fail(result, 17);
+
+            if (request.SourceValue < short.MinValue || request.SourceValue > short.MaxValue)
+                return Fail(result, 17);
+
+            source = inventory.GetItem(InventoryListType.Main, (short)request.SourceValue);
+            if (source == null)
+                return Fail(result, 17);
+
+            sourceItemId = source.ItemId;
+            sourceSlotIndex = (short)request.SourceValue;
+            result.SourceSlotIndex = sourceSlotIndex;
+            if (InventoryStackRuleService.IsStackable(source) && source.Count < request.RequestedCount)
+                return Fail(result, 17);
+
+            return true;
+        }
+
+        internal static bool TryParseCompoundRecipe(int itemTemplateId, out CompoundItemRecipeDefinition recipe)
+        {
+            recipe = null;
+            if (!ItemMetadataResolver.TryLoadStackableFile(itemTemplateId, out StackableItemFile stackable)
+                || stackable == null)
+                return false;
+
+            var stackableType = NormalizeRecipeTag(stackable.StackableType);
+            if (!stackableType.Equals("[recipe]", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var values = ParseRecipeIntList(stackable.IntData);
+            if (values.Count < 1)
+                return false;
+
+            var pos = 0;
+            var materialCount = values[pos++];
+            if (materialCount < 0 || values.Count < pos + materialCount * 2)
+                return false;
+
+            var materials = new List<CompoundItemRecipeEntry>();
+            for (var index = 0; index < materialCount; index++)
+                materials.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+
+            var outputs = new List<CompoundItemRecipeEntry>();
+            if (pos < values.Count)
+            {
+                var outputCount = values[pos++];
+                if (outputCount < 0 || values.Count < pos + outputCount * 2)
+                    return false;
+
+                for (var index = 0; index < outputCount; index++)
+                    outputs.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+            }
+
+            var entry = ItemMetadataResolver.GetStackableEntry(itemTemplateId);
+            recipe = new CompoundItemRecipeDefinition
+            {
+                PvfPath = entry?.FilePath ?? string.Empty,
+                RecipeType = ResolveRecipeType(stackable),
+                Materials = materials,
+                Outputs = outputs,
+            };
+            return true;
+        }
+
+        private static List<CompoundItemRecipeEntry> MultiplyRecipeEntries(
+            IReadOnlyList<CompoundItemRecipeEntry> entries,
+            ushort requestedCount)
+        {
+            var merged = new Dictionary<int, int>();
+            if (entries == null)
+                return new List<CompoundItemRecipeEntry>();
+
+            foreach (var entry in entries)
+            {
+                var count = checked(entry.Count * (int)requestedCount);
+                if (entry.ItemTemplateId <= 0 || count <= 0)
+                    continue;
+
+                if (!merged.ContainsKey(entry.ItemTemplateId))
+                    merged[entry.ItemTemplateId] = 0;
+                merged[entry.ItemTemplateId] = checked(merged[entry.ItemTemplateId] + count);
+            }
+
+            return merged
+                .OrderBy(pair => pair.Key)
+                .Select(pair => new CompoundItemRecipeEntry(pair.Key, pair.Value))
+                .ToList();
+        }
+
+        private static bool HasEnoughMaterials(
+            InventoryService inventory,
+            IReadOnlyList<CompoundItemRecipeEntry> materials)
+        {
+            foreach (var material in materials)
+            {
+                if (inventory.CountMainItem(material.ItemTemplateId) < material.Count)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool DeleteMaterials(
+            InventoryService inventory,
+            IReadOnlyList<CompoundItemRecipeEntry> materials,
+            List<CompoundItemDeletedEntry> deleted)
+        {
+            foreach (var material in materials)
+            {
+                if (!DeleteMaterial(inventory, material, deleted))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool DeleteMaterial(
+            InventoryService inventory,
+            CompoundItemRecipeEntry material,
+            List<CompoundItemDeletedEntry> deleted)
+        {
+            var remaining = material.Count;
+            foreach (var pair in inventory.GetItems(InventoryListType.Main)
+                         .Where(candidate => candidate.Value.ItemId == material.ItemTemplateId)
+                         .OrderBy(candidate => candidate.Key))
+            {
+                if (remaining <= 0)
+                    return true;
+
+                var item = pair.Value;
+                var remove = Math.Min(remaining, InventoryStackRuleService.IsStackable(item) ? item.Count : 1);
+                if (remove <= 0)
+                    continue;
+
+                if (!InventoryDeleteService.TryConsumeFromSlot(
+                        inventory,
+                        InventoryListType.Main,
+                        pair.Key,
+                        item.ItemId,
+                        remove,
+                        out var delete)
+                    || !delete.Success)
+                    return false;
+
+                deleted?.Add(new CompoundItemDeletedEntry
+                {
+                    ListType = InventoryListType.Main,
+                    SlotIndex = pair.Key,
+                    Count = delete.DeletedCount,
+                    ItemTemplateId = item.ItemId,
+                });
+                remaining -= remove;
+            }
+
+            return remaining <= 0;
+        }
+
+        private static List<InventoryRewardGrantRequest> BuildRewardRequests(
+            IReadOnlyList<CompoundItemRecipeEntry> outputs)
+        {
+            var requests = new List<InventoryRewardGrantRequest>();
+            foreach (var output in outputs)
+                requests.Add(InventoryRewardGrantRequest.Create(
+                    output.ItemTemplateId,
+                    output.Count,
+                    ItemCreateReason.Unknown));
+            return requests;
+        }
+
+        private static void AddRewardResults(
+            InventoryService inventory,
+            IReadOnlyList<InventoryRewardGrantResult> rewards,
+            List<BoosterRewardResult> target)
+        {
+            if (rewards == null || target == null)
+                return;
+
+            foreach (var reward in rewards)
+            {
+                if (reward == null || !reward.Success)
+                    continue;
+
+                var core = reward.SlotIndex >= 0
+                    ? inventory.GetItem(reward.ListType, reward.SlotIndex)
+                    : reward.Core;
+                var stackCount = ResolveFinalCount(core, reward);
+                var itemTemplateId = reward.ItemTemplateId > 0
+                    ? reward.ItemTemplateId
+                    : core?.ItemId ?? 0;
+                target.Add(new BoosterRewardResult
+                {
+                    ListType = reward.ListType,
+                    SlotIndex = reward.SlotIndex,
+                    ItemTemplateId = itemTemplateId,
+                    GrantedCount = reward.GrantedCount,
+                    StackCount = stackCount,
+                });
+            }
+        }
+
+        private static int ResolveFinalCount(ItemCore core, InventoryRewardGrantResult reward)
+        {
+            if (reward.Kind == InventoryRewardGrantKind.MainVirtualCount)
+                return reward.FinalCount;
+            if (core == null)
+                return Math.Max(1, reward.GrantedCount);
+            return InventoryStackRuleService.IsStackable(core)
+                ? core.Count
+                : Math.Max(1, reward.GrantedCount);
+        }
+
+        private static List<int> ParseRecipeIntList(string text)
+        {
+            var values = new List<int>();
+            if (string.IsNullOrWhiteSpace(text))
+                return values;
+
+            foreach (var token in text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+                    values.Add(value);
+            }
+
+            return values;
+        }
+
+        private static string ResolveRecipeType(StackableItemFile stackable)
+        {
+            if (stackable?.StringDataItems != null && stackable.StringDataItems.Count > 0)
+                return string.Join(",", stackable.StringDataItems.Select(NormalizeRecipeTag));
+
+            return NormalizeRecipeTag(stackable?.StringData);
+        }
+
+        private static string NormalizeRecipeTag(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+
+            var trimmed = text.Trim();
+            var first = trimmed.IndexOf('`');
+            if (first >= 0)
+            {
+                var second = trimmed.IndexOf('`', first + 1);
+                if (second > first)
+                    return trimmed.Substring(first + 1, second - first - 1).Trim();
+            }
+
+            return trimmed.Replace("`", string.Empty).Trim();
+        }
+
+        private static bool Fail(CompoundItemRecipeResult result, byte errorCode)
+        {
+            if (result != null)
+                result.ErrorCode = errorCode;
+            return false;
+        }
+    }
+}

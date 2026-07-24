@@ -421,17 +421,20 @@ namespace DfoServer.Game.Inventory
 
         internal static ChronicleOptionFields[] BuildChronicleOptions(byte[] middleData1A)
         {
-            var options = InventoryItemViewBytes.ParseChronicleOptions(middleData1A);
-            var result = new ChronicleOptionFields[options.Count];
-            for (var i = 0; i < options.Count; i++)
+            if (middleData1A == null || middleData1A.Length < 17)
+                return Array.Empty<ChronicleOptionFields>();
+
+            var count = Math.Min(2, (int)middleData1A[0]);
+            var result = new ChronicleOptionFields[count];
+            for (var i = 0; i < count; i++)
             {
                 result[i] = new ChronicleOptionFields
                 {
-                    OptionId = options[i].OptionId,
-                    CharacJob = options[i].CharacJob,
-                    FirstGrowType = options[i].FirstGrowType,
-                    EquipmentType = options[i].EquipmentType,
-                    OptionNo = options[i].OptionNo,
+                    OptionId = BitConverter.ToInt32(middleData1A, 1 + i * 4),
+                    CharacJob = middleData1A[9 + i],
+                    FirstGrowType = middleData1A[11 + i],
+                    EquipmentType = middleData1A[13 + i],
+                    OptionNo = middleData1A[15 + i],
                 };
             }
             return result;

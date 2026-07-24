@@ -108,12 +108,16 @@ namespace DfoServer.SelfTests
 
             try
             {
-                var store = new SqliteInventoryStore(
+                var timeProvider = new FixedRentalTimeProvider(nowUnixSeconds);
+                var lifecycle = new InventoryCharacterLifecycleService(
                     databasePath,
                     ServerPaths.SchemaFilePath,
-                    new FixedRentalTimeProvider(nowUnixSeconds));
+                    timeProvider);
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
 
-                using (var connection = new SqliteConnection(store.ConnectionString))
+                using (var connection = new SqliteConnection(connectionString))
                 {
                     connection.Open();
                     using (var command = connection.CreateCommand())
@@ -123,15 +127,6 @@ INSERT OR IGNORE INTO accounts(account_id, m_id, password_hash)
 VALUES(@accountId, 'rental-cleanup-selftest', '');
 INSERT OR IGNORE INTO characters(character_id, account_id, name)
 VALUES(@characterId, @accountId, 'rental-cleanup-main');
-INSERT INTO character_items(
-    owner_scope, owner_id, character_id, list_type, slot_index,
-    item_template_id, item_kind, expire_time)
-VALUES
-    ('character', @characterId, @characterId, 0, @rentalSlot, @legacyRentalTemplateId, 'special', @expiredAt),
-    ('character', @characterId, @characterId, 0, @activeRentalSlot, @activeLegacyRentalTemplateId, 'special', @activeUntil),
-    ('character', @characterId, @characterId, 0, @outOfRangeSlot, @outOfRangeRentalTemplateId, 'special', @expiredAt);
-INSERT INTO character_equipped_entries(character_id, slot, item_id, expire_time, raw_entry)
-VALUES(@characterId, 0, @legacyRentalTemplateId, @expiredAt, X'00');
 INSERT INTO character_rental_items(
     character_id, shop_entry_id, inventory_template_id, expire_time)
 VALUES
@@ -143,45 +138,77 @@ VALUES
                         command.Parameters.AddWithValue("@legacyRentalTemplateId", legacyRentalTemplateId);
                         command.Parameters.AddWithValue("@activeLegacyRentalTemplateId", activeLegacyRentalTemplateId);
                         command.Parameters.AddWithValue("@outOfRangeRentalTemplateId", outOfRangeRentalTemplateId);
-                        command.Parameters.AddWithValue("@rentalSlot", SqliteInventoryStore.QuickSlotStart);
-                        command.Parameters.AddWithValue("@activeRentalSlot", SqliteInventoryStore.QuickSlotStart + 1);
-                        command.Parameters.AddWithValue("@outOfRangeSlot", SqliteInventoryStore.RentalBagSlotEnd + 1);
                         command.Parameters.AddWithValue("@expiredAt", expiredAtUnixSeconds);
                         command.Parameters.AddWithValue("@activeUntil", activeUntilUnixSeconds);
                         command.ExecuteNonQuery();
                     }
+
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        InventoryItemRepository.UpsertCharacterSlot(
+                            connection,
+                            transaction,
+                            characterId,
+                            InventoryListType.Main,
+                            InventoryCharacterLifecycleService.RentalMainSlotStart,
+                            CreateRentalCore(legacyRentalTemplateId, expiredAtUnixSeconds));
+                        InventoryItemRepository.UpsertCharacterSlot(
+                            connection,
+                            transaction,
+                            characterId,
+                            InventoryListType.Main,
+                            (short)(InventoryCharacterLifecycleService.RentalMainSlotStart + 1),
+                            CreateRentalCore(activeLegacyRentalTemplateId, activeUntilUnixSeconds));
+                        InventoryItemRepository.UpsertCharacterSlot(
+                            connection,
+                            transaction,
+                            characterId,
+                            InventoryListType.Main,
+                            (short)(InventoryCharacterLifecycleService.RentalMainSlotEnd + 1),
+                            CreateRentalCore(outOfRangeRentalTemplateId, expiredAtUnixSeconds));
+                        InventoryItemRepository.UpsertCharacterSlot(
+                            connection,
+                            transaction,
+                            characterId,
+                            InventoryListType.Equipment,
+                            11,
+                            CreateRentalCore(legacyRentalTemplateId, expiredAtUnixSeconds));
+                        transaction.Commit();
+                    }
                 }
 
-                var removed = store.DeleteExpiredRentalEquipment(characterId, accountId);
+                var removed = lifecycle.DeleteExpiredRentalEquipment(characterId, accountId);
 
                 if (removed != 2)
-                    return "cleanup must remove persisted legacy rentals from bag and equipment";
+                    return "cleanup must remove persisted rentals from new bag and equipment slots";
 
-                using (var connection = new SqliteConnection(store.ConnectionString))
+                using (var connection = new SqliteConnection(connectionString))
                 {
                     connection.Open();
                     using (var command = connection.CreateCommand())
                     {
                         command.CommandText = @"
 SELECT
-    (SELECT COUNT(*) FROM character_items
-     WHERE character_id = @characterId AND item_template_id = @legacyRentalTemplateId),
-    (SELECT COUNT(*) FROM character_equipped_entries
-     WHERE character_id = @characterId AND item_id = @legacyRentalTemplateId),
-    (SELECT COUNT(*) FROM character_items
-     WHERE character_id = @characterId AND item_template_id = @activeLegacyRentalTemplateId),
-    (SELECT COUNT(*) FROM character_items
-     WHERE character_id = @characterId AND item_template_id = @outOfRangeRentalTemplateId);";
+    (SELECT COUNT(*) FROM character_new_items
+     WHERE character_id = @characterId AND list_type = @mainList AND slot_index = @rentalSlot),
+    (SELECT COUNT(*) FROM character_new_items
+     WHERE character_id = @characterId AND list_type = @equipmentList AND slot_index = 11),
+    (SELECT COUNT(*) FROM character_new_items
+     WHERE character_id = @characterId AND list_type = @mainList AND slot_index = @activeRentalSlot),
+    (SELECT COUNT(*) FROM character_new_items
+     WHERE character_id = @characterId AND list_type = @mainList AND slot_index = @outOfRangeSlot);";
                         command.Parameters.AddWithValue("@characterId", characterId);
-                        command.Parameters.AddWithValue("@legacyRentalTemplateId", legacyRentalTemplateId);
-                        command.Parameters.AddWithValue("@activeLegacyRentalTemplateId", activeLegacyRentalTemplateId);
-                        command.Parameters.AddWithValue("@outOfRangeRentalTemplateId", outOfRangeRentalTemplateId);
+                        command.Parameters.AddWithValue("@mainList", (int)InventoryListType.Main);
+                        command.Parameters.AddWithValue("@equipmentList", (int)InventoryListType.Equipment);
+                        command.Parameters.AddWithValue("@rentalSlot", InventoryCharacterLifecycleService.RentalMainSlotStart);
+                        command.Parameters.AddWithValue("@activeRentalSlot", InventoryCharacterLifecycleService.RentalMainSlotStart + 1);
+                        command.Parameters.AddWithValue("@outOfRangeSlot", InventoryCharacterLifecycleService.RentalMainSlotEnd + 1);
                         using (var reader = command.ExecuteReader())
                         {
                             if (!reader.Read())
                                 return "cleanup verification query returned no row";
                             if (reader.GetInt32(0) != 0 || reader.GetInt32(1) != 0)
-                                return "expired persisted rentals must be removed from the rental bag range and equipment";
+                                return "expired persisted rentals must be removed from new rental bag range and equipment";
                             if (reader.GetInt32(2) != 1)
                                 return "active persisted rentals must remain unchanged";
                             if (reader.GetInt32(3) != 1)
@@ -196,6 +223,19 @@ SELECT
             }
 
             return null;
+        }
+
+        private static ItemCore CreateRentalCore(int itemTemplateId, int expireTime)
+        {
+            return new ItemCore
+            {
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = itemTemplateId,
+                InstanceValue = RentalWeaponRequestCodec.RentalWeaponQualitySeed,
+                Durability = RentalWeaponRequestCodec.RentalWeaponDurability,
+                ExpireTime = expireTime,
+                Marker16 = ItemCore.Marker16Default,
+            };
         }
 
         private static void DeleteTempDatabase(string databasePath)
