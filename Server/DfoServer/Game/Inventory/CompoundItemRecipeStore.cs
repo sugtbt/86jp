@@ -1,3 +1,4 @@
+using DfoServer.Game.Currency;
 using Microsoft.Data.Sqlite;
 using PvfLib;
 using System;
@@ -124,6 +125,19 @@ namespace DfoServer.Game.Inventory
                         result.SourceConsumed = true;
                     }
 
+                    var totalGoldCost = recipe.GoldCost * (int)request.RequestedCount;
+                    if (totalGoldCost > 0)
+                    {
+                        if (!CurrencyService.TrySpendGold(connection, transaction, characterId, totalGoldCost))
+                        {
+                            result.ErrorCode = 22;
+                            return false;
+                        }
+
+                        result.GoldSpent = totalGoldCost;
+                        result.UpdatedGold = ReadCharacterGold(connection, transaction, characterId);
+                    }
+
                     foreach (var output in outputs)
                     {
                         if (!_db.TryAddBoosterRewardItems(
@@ -163,36 +177,47 @@ namespace DfoServer.Game.Inventory
                 return false;
 
             var values = ParseRecipeIntList(stackable.IntData);
-            if (values.Count < 1)
-                return false;
-
-            var pos = 0;
-            var materialCount = values[pos++];
-            if (materialCount < 0 || values.Count < pos + materialCount * 2)
-                return false;
-
             var materials = new List<CompoundItemRecipeEntry>();
-            for (var index = 0; index < materialCount; index++)
-                materials.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
-
             var outputs = new List<CompoundItemRecipeEntry>();
-            if (pos < values.Count)
+
+            if (values.Count >= 1)
             {
-                var outputCount = values[pos++];
-                if (outputCount < 0 || values.Count < pos + outputCount * 2)
+                var pos = 0;
+                var materialCount = values[pos++];
+                if (materialCount < 0 || values.Count < pos + materialCount * 2)
                     return false;
 
-                for (var index = 0; index < outputCount; index++)
-                    outputs.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+                for (var index = 0; index < materialCount; index++)
+                    materials.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+
+                if (pos < values.Count)
+                {
+                    var outputCount = values[pos++];
+                    if (outputCount < 0 || values.Count < pos + outputCount * 2)
+                        return false;
+
+                    for (var index = 0; index < outputCount; index++)
+                        outputs.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
+                }
+            }
+            else
+            {
+                // IntData 为空，回退解析 [input item]/[output item]（生产 stk）
+                materials = ParseInputOutputEntries(stackable.InputItem);
+                outputs = ParseInputOutputEntries(stackable.OutputItem);
+                if (materials.Count == 0 || outputs.Count == 0)
+                    return false;
             }
 
             var entry = ItemMetadataResolver.GetStackableEntry(itemTemplateId);
+            var goldCost = ParseGoldCostFromInputItem(stackable.InputItem);
             recipe = new CompoundItemRecipeDefinition
             {
                 PvfPath = entry?.FilePath ?? string.Empty,
                 RecipeType = ResolveRecipeType(stackable),
                 Materials = materials,
                 Outputs = outputs,
+                GoldCost = goldCost,
             };
             return true;
         }
@@ -286,6 +311,33 @@ namespace DfoServer.Game.Inventory
             return remaining <= 0;
         }
 
+        private static List<CompoundItemRecipeEntry> ParseInputOutputEntries(string text)
+        {
+            var entries = new List<CompoundItemRecipeEntry>();
+            var values = ParseRecipeIntList(text);
+            for (var i = 0; i + 1 < values.Count; i += 2)
+            {
+                if (values[i] > 0 && values[i + 1] > 0)
+                    entries.Add(new CompoundItemRecipeEntry(values[i], values[i + 1]));
+            }
+
+            return entries;
+        }
+
+        private static int ParseGoldCostFromInputItem(string text)
+        {
+            var values = ParseRecipeIntList(text);
+            var totalGold = 0;
+            for (var i = 0; i + 3 < values.Count; i += 4)
+            {
+                // [input item] 格式: itemId count goldId goldAmount
+                if (values[i + 2] == 0 && values[i + 3] > 0)
+                    totalGold += values[i + 3];
+            }
+
+            return totalGold;
+        }
+
         private static List<int> ParseRecipeIntList(string text)
         {
             var values = new List<int>();
@@ -307,6 +359,21 @@ namespace DfoServer.Game.Inventory
                 return string.Join(",", stackable.StringDataItems.Select(NormalizeRecipeTag));
 
             return NormalizeRecipeTag(stackable?.StringData);
+        }
+
+        private static int ReadCharacterGold(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            using (var cmd = connection.CreateCommand())
+            {
+                cmd.Transaction = transaction;
+                cmd.CommandText = "SELECT stack_count FROM character_items WHERE character_id = @cid AND list_type = 0 AND slot_index = 0 LIMIT 1;";
+                cmd.Parameters.AddWithValue("@cid", characterId);
+                var result = cmd.ExecuteScalar();
+                return result is long l ? (int)l : (result is int i ? i : 0);
+            }
         }
 
         private static string NormalizeRecipeTag(string text)
