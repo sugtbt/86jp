@@ -3,65 +3,6 @@ using System.Collections.Generic;
 
 namespace DfoServer.Game.TitleBook
 {
-    public sealed class TitleBookInventoryItem
-    {
-        public int Category { get; set; }
-
-        public ushort BookIndex { get; set; }
-
-        public ushort Slot { get; set; }
-
-        public int ItemId { get; set; } = -1;
-
-        public int Value { get; set; }
-
-        public byte Attr { get; set; }
-
-        public ushort Durability { get; set; }
-
-        public byte SealFlag { get; set; }
-
-        public int EnchantIndex { get; set; }
-
-        public byte EnchantUpgradeCount { get; set; }
-
-        public byte AmplifyType { get; set; }
-
-        public ushort AmplifyValue { get; set; }
-
-        public int Marker16 { get; set; }
-
-        public TitleBookChronicleData Chronicle { get; set; } = new TitleBookChronicleData();
-
-        public int ExpireTime { get; set; }
-
-        public byte[] TailData { get; set; } = new byte[37];
-
-        public byte EquipmentLockId { get; set; }
-
-        public bool IsEmpty => ItemId <= 0;
-    }
-
-    public sealed class TitleBookChronicleData
-    {
-        public byte Count { get; set; }
-
-        public List<TitleBookChronicleOption> Options { get; } = new List<TitleBookChronicleOption>();
-    }
-
-    public sealed class TitleBookChronicleOption
-    {
-        public int OptionId { get; set; }
-
-        public byte CharacJob { get; set; }
-
-        public byte FirstGrowType { get; set; }
-
-        public byte EquipmentType { get; set; }
-
-        public byte OptionNo { get; set; }
-    }
-
     public sealed class TitleBookListEntrySnapshot
     {
         public ushort SlotIndex { get; set; }

@@ -1,6 +1,5 @@
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
-using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -13,107 +12,60 @@ namespace DfoServer.Game.Inventory
         private static readonly Lazy<int[]> CreatureExpThresholds = new Lazy<int[]>(LoadCreatureExpThresholds);
 
         internal static PetCreatureExperienceUpdate ApplyDungeonClearExperience(
-            string databasePath,
-            string schemaFilePath,
-            int characterId,
+            InventoryService inventory,
             int consumedFatigue)
         {
-            if (characterId <= 0 || consumedFatigue <= 0)
-                return PetCreatureExperienceUpdate.Noop(characterId);
+            if (inventory == null || consumedFatigue <= 0)
+                return PetCreatureExperienceUpdate.Noop(inventory?.CharacterId ?? 0);
 
-            var connectionString = SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using (var transaction = connection.BeginTransaction())
-                {
-                    var creatureKey = PetCreatureSatietyService.ResolveEquippedCreatureKey(
-                        connection,
-                        transaction,
-                        characterId);
-                    if (creatureKey <= 0)
-                        return PetCreatureExperienceUpdate.Noop(characterId);
+            if (!PetInventoryAccessor.TryGetEquippedCreature(inventory, out _, out var detail))
+                return PetCreatureExperienceUpdate.Noop(inventory.CharacterId);
 
-                    var current = LoadCreatureExperience(connection, transaction, characterId, creatureKey);
-                    if (!current.HasValue)
-                        return PetCreatureExperienceUpdate.Noop(characterId);
+            var creatureKey = detail.Uid;
+            if (detail.Stomach <= 0)
+                return PetCreatureExperienceUpdate.Noop(inventory.CharacterId, creatureKey);
 
-                    if (current.Value.Satiety <= 0)
-                        return PetCreatureExperienceUpdate.Noop(characterId, creatureKey);
+            var beforeLevel = ClampLevel(detail.Level);
+            var beforeExp = Math.Max(0, detail.Exp);
+            if (beforeLevel >= MaxCreatureLevel)
+                return new PetCreatureExperienceUpdate(
+                    inventory.CharacterId,
+                    creatureKey,
+                    beforeLevel,
+                    beforeLevel,
+                    beforeExp,
+                    beforeExp,
+                    false);
 
-                    var beforeLevel = ClampLevel(current.Value.Level);
-                    var beforeExp = Math.Max(0, current.Value.Experience);
-                    if (beforeLevel >= MaxCreatureLevel)
-                        return new PetCreatureExperienceUpdate(
-                            characterId,
-                            creatureKey,
-                            beforeLevel,
-                            beforeLevel,
-                            beforeExp,
-                            beforeExp,
-                            false);
+            var gainedExperience = CalculateClearExperience(consumedFatigue);
+            if (gainedExperience <= 0)
+                return PetCreatureExperienceUpdate.Noop(inventory.CharacterId, creatureKey);
 
-                    var gainedExperience = CalculateClearExperience(consumedFatigue);
-                    if (gainedExperience <= 0)
-                        return PetCreatureExperienceUpdate.Noop(characterId, creatureKey);
+            var afterExp = AddSaturating(beforeExp, gainedExperience);
+            var afterLevel = Math.Max(beforeLevel, GetCreatureLevelForExperience(afterExp));
+            if (afterLevel > MaxCreatureLevel)
+                afterLevel = MaxCreatureLevel;
 
-                    var afterExp = AddSaturating(beforeExp, gainedExperience);
-                    var afterLevel = Math.Max(beforeLevel, GetCreatureLevelForExperience(afterExp));
-                    if (afterLevel > MaxCreatureLevel)
-                        afterLevel = MaxCreatureLevel;
+            detail.Exp = afterExp;
+            detail.Level = afterLevel;
+            inventory.CreatureDetails.Put(detail);
 
-                    using (var update = connection.CreateCommand())
-                    {
-                        update.Transaction = transaction;
-                        update.CommandText = @"
-UPDATE character_creatures
-SET progress_value = @exp,
-    field_after_value = @level
-WHERE character_id = @cid
-  AND creature_key = @key;";
-                        update.Parameters.AddWithValue("@exp", afterExp);
-                        update.Parameters.AddWithValue("@level", afterLevel);
-                        update.Parameters.AddWithValue("@cid", characterId);
-                        update.Parameters.AddWithValue("@key", creatureKey);
-                        update.ExecuteNonQuery();
-                    }
+            var evolution = PetCreatureEvolutionResult.Noop;
+            if (afterLevel > beforeLevel)
+                evolution = PetCreatureEvolutionRuntimeService.TryEvolveEquippedPetCreature(
+                    inventory,
+                    creatureKey,
+                    afterLevel);
 
-                    using (var subtype1 = connection.CreateCommand())
-                    {
-                        subtype1.Transaction = transaction;
-                        subtype1.CommandText = @"
-INSERT INTO character_subtype1_fields(character_id, equipped_creature_level)
-VALUES(@cid, @level)
-ON CONFLICT(character_id)
-DO UPDATE SET equipped_creature_level = @level;";
-                        subtype1.Parameters.AddWithValue("@cid", characterId);
-                        subtype1.Parameters.AddWithValue("@level", afterLevel);
-                        subtype1.ExecuteNonQuery();
-                    }
-
-                    var evolution = PetCreatureEvolutionResult.Noop;
-                    if (afterLevel > beforeLevel)
-                    {
-                        evolution = SqliteInventoryStore.TryEvolveEquippedPetCreature(
-                            connection,
-                            transaction,
-                            characterId,
-                            creatureKey,
-                            afterLevel);
-                    }
-
-                    transaction.Commit();
-                    return new PetCreatureExperienceUpdate(
-                        characterId,
-                        creatureKey,
-                        beforeLevel,
-                        afterLevel,
-                        beforeExp,
-                        afterExp,
-                        afterLevel > beforeLevel || afterExp != beforeExp || evolution.Changed,
-                        evolution);
-                }
-            }
+            return new PetCreatureExperienceUpdate(
+                inventory.CharacterId,
+                creatureKey,
+                beforeLevel,
+                afterLevel,
+                beforeExp,
+                afterExp,
+                afterLevel > beforeLevel || afterExp != beforeExp || evolution.Changed,
+                evolution);
         }
 
         internal static int GetCreatureLevelForExperience(int experience)
@@ -132,37 +84,6 @@ DO UPDATE SET equipped_creature_level = @level;";
             }
 
             return ClampLevel(level);
-        }
-
-        private static CreatureExperienceRecord? LoadCreatureExperience(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId,
-            int creatureKey)
-        {
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = @"
-SELECT field04, progress_value, field_after_value
-FROM character_creatures
-WHERE character_id = @cid
-  AND creature_key = @key
-LIMIT 1;";
-                command.Parameters.AddWithValue("@cid", characterId);
-                command.Parameters.AddWithValue("@key", creatureKey);
-
-                using (var reader = command.ExecuteReader())
-                {
-                    if (!reader.Read())
-                        return null;
-
-                    return new CreatureExperienceRecord(
-                        reader.GetInt32(0),
-                        reader.GetInt32(1),
-                        reader.GetInt32(2));
-                }
-            }
         }
 
         private static int[] LoadCreatureExpThresholds()
@@ -240,20 +161,6 @@ LIMIT 1;";
 
         private static int ClampLevel(int level)
             => Math.Max(1, Math.Min(MaxCreatureLevel, level));
-
-        private readonly struct CreatureExperienceRecord
-        {
-            public CreatureExperienceRecord(int satiety, int experience, int level)
-            {
-                Satiety = satiety;
-                Experience = experience;
-                Level = level;
-            }
-
-            public int Satiety { get; }
-            public int Experience { get; }
-            public int Level { get; }
-        }
     }
 
     internal readonly struct PetCreatureExperienceUpdate

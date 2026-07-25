@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using DfoServer.Game.Dungeon;
 
@@ -256,7 +256,7 @@ namespace DfoServer.Game.DeathTower
             {
                 // Death Tower owns its temporary 3-8 quickbar view. Persistent quickbar
                 // occupancy must never change tower pickup order.
-                if (Inventory.SqliteInventoryStore.IsQuickSlot(slot))
+                if (Inventory.ItemSlotBoundService.IsMainQuickSlot(slot))
                     continue;
                 _persistentMainSlots.Add(slot);
             }
@@ -419,3 +419,4 @@ namespace DfoServer.Game.DeathTower
         }
     }
 }
+

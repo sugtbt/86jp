@@ -126,22 +126,19 @@ namespace DfoServer.SelfTests
                 SeedAccountAndCharacter(dbPath, KillerCharacterId, "combat-killer");
                 SeedAccountAndCharacter(dbPath, MemberCharacterId, "combat-member");
 
-                var inventory = new SqliteInventoryStore(dbPath, ServerPaths.SchemaFilePath);
-                var assets = new SqliteAssetService(dbPath, ServerPaths.SchemaFilePath, inventory);
+                var connectionString = SqliteDatabaseBootstrap.Initialize(dbPath, ServerPaths.SchemaFilePath);
                 var dailyReset = new DailyResetService(dbPath, ServerPaths.SchemaFilePath);
                 var characters = new Game.Characters.SqliteCharacterRepository(dbPath, ServerPaths.SchemaFilePath);
                 var selectData = new Game.SelectCharacter.SqliteSelectCharacterDataSource(
                     dbPath,
                     ServerPaths.SchemaFilePath,
                     characters,
-                    assets,
-                    inventory,
+                    null,
                     SystemRentalTimeProvider.Instance);
-                var refresh = new Network.Handlers.InventoryRefreshSender(inventory, selectData, characters);
+                var refresh = new Network.Handlers.InventoryRefreshSender(selectData, characters);
                 var questDrops = new Game.Quests.QuestDropService(
-                    assets,
                     refresh,
-                    SqliteDatabaseBootstrap.BuildConnectionString(dbPath));
+                    connectionString);
                 var parties = new PartyManager();
                 var sessions = new SessionDirectory();
                 var killer = ConnectedSession.Create(KillerCharacterId, "combat-killer");
@@ -153,12 +150,11 @@ namespace DfoServer.SelfTests
                     throw new InvalidOperationException("Unable to create combat self-test party.");
 
                 var handler = new DungeonHandler(
-                    assets,
-                    new ReviveCoinService(inventory, assets, dailyReset),
+                    new ReviveCoinService(dailyReset),
                     characters,
                     selectData,
                     SystemRentalTimeProvider.Instance,
-                    inventory,
+                    connectionString,
                     refresh,
                     parties,
                     sessions,

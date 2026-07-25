@@ -1,16 +1,13 @@
+using System;
+using System.IO;
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.ReviveCoin;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
-using System;
-using System.IO;
 
 namespace DfoServer.SelfTests
 {
-    // 复活币功能自测(每日功能打样的功能侧):
-    // slot1 固定槽机制(领取-扣光-重建) + ReviveCoinService 用例
-    // (救济规则/领取发币同事务/每日一次/死亡消耗)。机制侧见 DailyResetSelfTest。
     public static class ReviveCoinSelfTest
     {
         private const int AccountId = 930017;
@@ -31,49 +28,40 @@ namespace DfoServer.SelfTests
             var connStr = SqliteDatabaseBootstrap.Initialize(tempDb, ServerPaths.SchemaFilePath);
             Seed(connStr);
 
-            var store = new SqliteInventoryStore(tempDb, ServerPaths.SchemaFilePath);
-            var assetService = new SqliteAssetService(tempDb, ServerPaths.SchemaFilePath, store);
             var dailyReset = new DailyResetService(tempDb, ServerPaths.SchemaFilePath);
-            var reviveCoin = new ReviveCoinService(store, assetService, dailyReset);
+            var reviveCoin = new ReviveCoinService(dailyReset);
+            var inventory = new InventoryService(CharacterId, AccountId);
+            var lease = new InventoryLease(Guid.NewGuid(), CharacterId, inventory, 1);
 
-            // ── slot1 固定槽机制: 发放-扣光-重建(store 专线) ──
-            short slot;
-            Check("发放复活币成功", store.TryPickupItem(CharacterId, AccountId, Coin, 3, out slot));
-            Check("复活币落在 slot1", slot == ReviveCoinService.WalletSlot);
-            Check("计数=3", store.CountItem(CharacterId, Coin) == 3);
-            using (var scope = assetService.OpenScope(CharacterId, AccountId))
-            {
-                short rSlot;
-                int remaining;
-                Check("扣除3枚成功", assetService.TryRemoveItem(scope, Coin, 3, out rSlot, out remaining) && remaining == 0);
-                scope.Commit();
-            }
-            Check("扣光后计数=0", store.CountItem(CharacterId, Coin) == 0);
-            Check("重建发放成功", store.TryPickupItem(CharacterId, AccountId, Coin, 1, out slot));
-            Check("重建仍落 slot1", slot == ReviveCoinService.WalletSlot);
+            Check("发放复活币成功", inventory.SetMainVirtualCount(ReviveCoinService.WalletSlot, Coin, 3));
+            Check("复活币落在 slot1", inventory.GetMainVirtualCount(ReviveCoinService.WalletSlot)?.ItemId == Coin);
+            Check("计数=3", inventory.CountMainItem(Coin) == 3);
+            Check("扣除3枚成功",
+                inventory.TryConsumeMainItem(Coin, 3, out var bulk)
+                && bulk.Success
+                && bulk.RemainingCount == 0);
+            Check("扣光后计数0", inventory.CountMainItem(Coin) == 0);
+            Check("重建发放成功", inventory.SetMainVirtualCount(ReviveCoinService.WalletSlot, Coin, 1));
+            Check("重建仍落 slot1", inventory.GetMainVirtualCount(ReviveCoinService.WalletSlot)?.Count == 1);
 
-            // ── 用例: 救济规则(身上有币不发, 且不烧当日标记) ──
             short grantSlot;
-            Check("有币时领取被拒", !reviveCoin.TryGrantDaily(CharacterId, AccountId, out grantSlot));
+            Check("有币时领取被拒", !reviveCoin.TryGrantDaily(lease, out grantSlot));
             Check("被拒不消耗当日标记", !dailyReset.IsClaimed(CharacterId, ReviveCoinService.DailyClaimKey));
 
-            // ── 用例: 死亡消耗 ──
             short useSlot;
             int useRemaining;
-            Check("消耗1枚成功", reviveCoin.TryConsume(CharacterId, AccountId, out useSlot, out useRemaining));
-            Check("消耗后剩0", useRemaining == 0 && store.CountItem(CharacterId, Coin) == 0);
+            Check("消耗1枚成功", reviveCoin.TryConsume(lease, out useSlot, out useRemaining));
+            Check("消耗后剩0", useRemaining == 0 && inventory.CountMainItem(Coin) == 0);
 
-            // ── 用例: 每日领取(无币且未领 → 发1枚; 标记与发币同事务) ──
-            Check("无币未领时领取成功", reviveCoin.TryGrantDaily(CharacterId, AccountId, out grantSlot));
+            Check("无币未领时领取成功", reviveCoin.TryGrantDaily(lease, out grantSlot));
             Check("领取落 slot1", grantSlot == ReviveCoinService.WalletSlot);
-            Check("领取后计数=1", store.CountItem(CharacterId, Coin) == 1);
+            Check("领取后计数1", inventory.CountMainItem(Coin) == 1);
             Check("领取后当日已领", dailyReset.IsClaimed(CharacterId, ReviveCoinService.DailyClaimKey));
-            Check("当日二次领取被拒", !reviveCoin.TryGrantDaily(CharacterId, AccountId, out grantSlot));
+            Check("当日二次领取被拒", !reviveCoin.TryGrantDaily(lease, out grantSlot));
 
-            // ── 用例: 扣光后当日仍不可再领(每日一次不因消耗复活) ──
-            Check("再消耗成功", reviveCoin.TryConsume(CharacterId, AccountId, out useSlot, out useRemaining));
-            Check("无币时消耗被拒", !reviveCoin.TryConsume(CharacterId, AccountId, out useSlot, out useRemaining));
-            Check("扣光后当日仍不可再领", !reviveCoin.TryGrantDaily(CharacterId, AccountId, out grantSlot));
+            Check("再消耗成功", reviveCoin.TryConsume(lease, out useSlot, out useRemaining));
+            Check("无币时消耗被拒", !reviveCoin.TryConsume(lease, out useSlot, out useRemaining));
+            Check("扣光后当日仍不可再领", !reviveCoin.TryGrantDaily(lease, out grantSlot));
 
             PrintSummary();
             return _fail == 0 ? 0 : 1;

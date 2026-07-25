@@ -9,10 +9,12 @@ namespace DfoServer.Network.Handlers
     public sealed class GoldLimitHandler
     {
         private readonly CharacterGoldLimitRepository _repository;
+        private readonly InventoryRefreshSender _refresh;
 
-        public GoldLimitHandler(CharacterGoldLimitRepository repository)
+        public GoldLimitHandler(CharacterGoldLimitRepository repository, InventoryRefreshSender refresh = null)
         {
             _repository = repository ?? throw new ArgumentNullException(nameof(repository));
+            _refresh = refresh;
         }
 
         public async Task HandleUpgradeAsync(
@@ -40,10 +42,8 @@ namespace DfoServer.Network.Handlers
 
             if (result.Status == GoldLimitUpgradeStatus.Success)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                    0x00,
-                    0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(result.GoldAfter)));
+                if (_refresh != null)
+                    await _refresh.SendGoldUpdate(session, result.GoldAfter);
             }
         }
     }

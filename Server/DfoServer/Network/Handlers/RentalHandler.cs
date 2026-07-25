@@ -1,36 +1,39 @@
+using System;
+using System.Threading.Tasks;
+using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
-using System;
-using System.Linq;
-using System.Threading.Tasks;
+using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Network.Handlers
 {
-    /// 租赁商店：租赁武器（0x0372）。
+    /// <summary>
+    /// 租赁商店租赁武器。幸运星扣减直接写账号状态，物品写在线背包。
+    /// </summary>
     public sealed class RentalHandler
     {
-        private readonly IAssetService _assetService;
-        private readonly IInventoryStore _inventoryStore;
         private readonly IRentalTimeProvider _rentalTimeProvider;
         private readonly SqliteSelectCharacterDataSource _dataSource;
+        private readonly InventoryRefreshSender _refresh;
+        private readonly string _connectionString;
 
         public RentalHandler(
-            IAssetService assetService,
-            IInventoryStore inventoryStore,
             SqliteSelectCharacterDataSource dataSource,
-            IRentalTimeProvider rentalTimeProvider = null)
+            IRentalTimeProvider rentalTimeProvider = null,
+            InventoryRefreshSender refresh = null)
         {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
-            _inventoryStore = inventoryStore ?? throw new ArgumentNullException(nameof(inventoryStore));
             _dataSource = dataSource;
             _rentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
+            _refresh = refresh;
+            _connectionString = SqliteDatabaseBootstrap.Initialize(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
         }
 
         public async Task HandleRentWeapon(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var (characterId, accountId) = InventoryHandler.ResolveOwner(session);
-            if (characterId <= 0)
+            if (characterId <= 0 || accountId <= 0)
                 return;
 
             if (!RentalWeaponRequestCodec.TryParse(body, out var weaponId, out var parsedInventoryId, out var starCost, out var priceTier))
@@ -47,83 +50,81 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var inventoryTemplateId = (int)parsedInventoryId;
-            var rental = LoadRentalInfo(characterId);
-            var expireTime = (int)ResolveRentalExpireTime();
-            rental.UpsertItem(weaponId, (uint)inventoryTemplateId, (uint)expireTime);
-
-            short invSlot = -1;
-            int instanceValue = 0;
-            var pickupSucceeded = false;
-            ushort luckyStar = 0;
-
-            // 扣幸运星、发放装备、保存 0x0357 内部存储必须同事务提交；发放失败则整体回滚。
-            using (var scope = _assetService.OpenScope(characterId, accountId))
+            if (!InventoryContext.TryGetLease(characterId, out var lease) || !lease.IsOwnedBy(session.SessionId))
             {
-                var currentLuckyStar = _assetService.LoadWallet(scope).LuckyStar;
-                if (!_assetService.TrySpendLuckyStar(scope, starCost))
-                {
-                    FileLogger.Log($"[Rental] RENT_WEAPON: insufficient stars need={starCost} have={currentLuckyStar} char={characterId}");
-                    await Send0372Error(session);
-                    return;
-                }
-
-                pickupSucceeded = _inventoryStore.TryPickupRentalWeapon(
-                    scope.Connection, scope.Transaction, characterId, accountId, inventoryTemplateId, expireTime, out invSlot, out instanceValue);
-
-                if (pickupSucceeded)
-                {
-                    _dataSource.SaveRentalInfo(scope.Connection, scope.Transaction, characterId, rental);
-                    luckyStar = (ushort)Math.Max(0, currentLuckyStar - starCost);
-                    scope.Commit();
-                }
-            }
-
-            if (!pickupSucceeded)
-            {
-                FileLogger.Log($"[Rental] RENT_WEAPON: pickup FAILED (inventory full or invalid) shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} char={characterId}");
+                FileLogger.Log($"[Rental] RENT_WEAPON: online inventory missing shop=0x{weaponId:X8} inv=0x{parsedInventoryId:X8} char={characterId}");
                 await Send0372Error(session);
                 return;
             }
 
-            if (invSlot >= 0)
-                FileLogger.Log($"[Rental] RENT_WEAPON: added/refreshed inv shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} invSlot={invSlot} char={characterId}");
-            else
-                FileLogger.Log($"[Rental] RENT_WEAPON: refreshed equipped shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} char={characterId}");
+            var inventoryTemplateId = (int)parsedInventoryId;
+            var rental = LoadRentalInfo(characterId);
+            var expireTime = (int)ResolveRentalExpireTime();
+            var luckyStar = (ushort)0;
+            InventoryMutationResult rentResult = null;
+            string rejectLog = null;
 
+            try
+            {
+                lock (lease.SyncRoot)
+                {
+                    if (!InventoryShopRuntimeService.CanRentWeapon(lease.Inventory, inventoryTemplateId))
+                    {
+                        rejectLog = $"[Rental] RENT_WEAPON: plan FAILED (inventory full or invalid) shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} char={characterId}";
+                    }
+                    else
+                    {
+                        using (var connection = new SqliteConnection(_connectionString))
+                        {
+                            connection.Open();
+                            using (var transaction = connection.BeginTransaction())
+                            {
+                                var currentLuckyStar = CurrencyService.LoadWallet(connection, transaction, characterId).LuckyStar;
+                                if (!CurrencyService.TrySpendLuckyStar(connection, transaction, accountId, starCost))
+                                {
+                                    rejectLog = $"[Rental] RENT_WEAPON: insufficient stars need={starCost} have={currentLuckyStar} char={characterId}";
+                                }
+                                else
+                                {
+                                    rental.UpsertItem(weaponId, (uint)inventoryTemplateId, (uint)expireTime);
+                                    _dataSource.SaveRentalInfo(connection, transaction, characterId, rental);
+                                    luckyStar = (ushort)Math.Max(0, currentLuckyStar - starCost);
+                                    transaction.Commit();
+
+                                    if (!InventoryShopRuntimeService.TryRentWeapon(
+                                            lease.Inventory,
+                                            inventoryTemplateId,
+                                            expireTime,
+                                            out rentResult))
+                                    {
+                                        rejectLog = $"[Rental] RENT_WEAPON: apply FAILED after plan shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} char={characterId}";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                rejectLog = $"[Rental] RENT_WEAPON: exception shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} char={characterId} error={ex.Message}";
+            }
+
+            if (rentResult == null)
+            {
+                FileLogger.Log(rejectLog ?? $"[Rental] RENT_WEAPON: failed shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} char={characterId}");
+                await Send0372Error(session);
+                return;
+            }
+
+            FileLogger.Log($"[Rental] RENT_WEAPON: added/refreshed shop=0x{weaponId:X8} inv=0x{inventoryTemplateId:X8} list={rentResult.ListType} slot={rentResult.SlotIndex} char={characterId}");
             FileLogger.Log($"[Rental] RENT_WEAPON: char={characterId} weapon=0x{weaponId:X8} inv=0x{parsedInventoryId:X8} cost={starCost} priceTier={priceTier} starsLeft={luckyStar} expire={expireTime}");
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0372, CommonPacketBodyBuilder.BuildSuccessAck()));
             await RentalInfoPanelNotifier.SyncAsync(session, _dataSource, characterId, luckyStar, _rentalTimeProvider);
 
-            if (invSlot >= 0)
-            {
-                var itemSnapshot = _inventoryStore.LoadCharacterItemListSnapshot(characterId, accountId);
-                var pickedItem = itemSnapshot.MainItems.FirstOrDefault(i => i.SlotIndex == invSlot);
-                if (pickedItem != null)
-                {
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                        ItemListUpdateBuilder.BuildCommonUpdates(new[] { pickedItem })));
-                }
-                else
-                {
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E,
-                        ItemListUpdateBuilder.BuildCommonUpdates(new[]
-                        {
-                            new CommonInventoryItem
-                            {
-                                SlotIndex = invSlot,
-                                ItemTemplateId = inventoryTemplateId,
-                                CountOrInstanceValue = instanceValue > 0
-                                    ? instanceValue
-                                    : RentalWeaponRequestCodec.RentalWeaponQualitySeed,
-                                Durability = RentalWeaponRequestCodec.RentalWeaponDurability,
-                                Marker16 = -1,
-                                ExpireTime = expireTime,
-                            }
-                        })));
-                }
-            }
+            if (_refresh != null && rentResult.SlotIndex >= 0)
+                await _refresh.SendUpdateItemList(session, rentResult.ListType, rentResult.SlotIndex);
         }
 
         private RentalInfoSnapshot LoadRentalInfo(int characterId)

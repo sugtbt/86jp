@@ -47,8 +47,8 @@ namespace DfoServer.Game.Skills
             return plan.Result;
         }
 
-        public static BuySkillResult ExecuteWithRefundConsumable(
-            IInventoryStore inventoryStore,
+        internal static BuySkillResult ExecuteWithRefundConsumable(
+            InventoryService inventory,
             SqliteCharacterProgressRepository repo,
             int cid,
             int accountId,
@@ -71,36 +71,32 @@ namespace DfoServer.Game.Skills
                 return plan.Result;
             }
 
-            if (inventoryStore == null)
+            if (inventory == null
+                || !inventory.TryConsumeMainItem(
+                    SkillResetConsumableService.ForgetRiverWaterItemTemplateId,
+                    1,
+                    out var consumed)
+                || !consumed.Success)
             {
                 plan.Result.Success = false;
                 plan.Result.ErrorCode = 3;
                 return plan.Result;
             }
 
-            short consumedSlot;
-            InventoryMutationResult consumedItem;
-            var consumed = inventoryStore.TryRemoveItemByTemplateId(
-                cid,
-                accountId,
-                SkillResetConsumableService.ForgetRiverWaterItemTemplateId,
-                out consumedSlot,
-                out consumedItem,
-                (connection, transaction) =>
-                {
-                    repo.SaveSkillProgress(connection, transaction, cid, plan.Snapshot);
-                });
-
-            if (!consumed)
-            {
-                plan.Result.Success = false;
-                plan.Result.ErrorCode = 3;
-                return plan.Result;
-            }
+            repo.SaveSkillProgress(cid, plan.Snapshot);
 
             plan.Result.ConsumedForgetRiverWater = true;
-            plan.Result.ConsumedForgetRiverWaterSlot = consumedSlot;
-            plan.Result.ConsumedForgetRiverWaterItem = consumedItem;
+            plan.Result.ConsumedForgetRiverWaterSlot = consumed.SlotIndex;
+            plan.Result.ConsumedForgetRiverWaterItem = new InventoryMutationResult
+            {
+                ListType = InventoryListType.Main,
+                SlotIndex = consumed.SlotIndex,
+                ItemTemplateId = SkillResetConsumableService.ForgetRiverWaterItemTemplateId,
+                RemainingStackCount = consumed.RemainingCount,
+                InstanceValue = consumed.RemainingCount,
+                RequestedCount = 1,
+                AppliedCount = (short)Math.Min(short.MaxValue, consumed.ConsumedCount),
+            };
             return plan.Result;
         }
 

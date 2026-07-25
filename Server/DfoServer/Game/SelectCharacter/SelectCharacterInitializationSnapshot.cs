@@ -68,8 +68,6 @@ namespace DfoServer.Game.SelectCharacter
 
         public Unknown730Snapshot Unknown730 { get; set; } = new Unknown730Snapshot();
 
-        public List<AchievementListChunkSnapshot> AchievementChunks { get; } = new List<AchievementListChunkSnapshot>();
-
         public List<TitleBookCategorySnapshot> TitleBookCategories { get; } = new List<TitleBookCategorySnapshot>();
 
         public List<Unknown725Snapshot> Unknown725Packets { get; } = new List<Unknown725Snapshot>();

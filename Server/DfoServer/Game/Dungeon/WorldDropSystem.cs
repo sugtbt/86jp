@@ -47,15 +47,8 @@ namespace DfoServer.Game.Dungeon
                 }
             }
 
-            var meta = ItemMetadataResolver.Resolve(itemId);
             slotCounter++;
-            result.Add(new DropInfo
-            {
-                SceneSlot = slotCounter,
-                TemplateId = (uint)itemId,
-                StackCount = 1,
-                Endurance = meta.Durability
-            });
+            result.Add(DropInfo.CreateItem(slotCounter, itemId, 1));
             return result;
         }
 

@@ -11,13 +11,11 @@ namespace DfoServer.Network.Handlers
     public class SkillHandler
     {
         private readonly ICharacterRepository _characterRepository;
-        private readonly IInventoryStore _inventoryStore;
         private readonly InventoryRefreshSender _refresh;
 
-        public SkillHandler(ICharacterRepository characterRepository, IInventoryStore inventoryStore, InventoryRefreshSender refresh)
+        public SkillHandler(ICharacterRepository characterRepository, InventoryRefreshSender refresh)
         {
             _characterRepository = characterRepository;
-            _inventoryStore = inventoryStore;
             _refresh = refresh;
         }
 
@@ -267,9 +265,35 @@ namespace DfoServer.Network.Handlers
                     var charRepo = new Game.Characters.SqliteCharacterRepository(
                         Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
                     var rec = charRepo.GetById(cid);
-                    // Account 缺失时传 0(查不到契约/物品, 拒绝), 不能回退到账号 1 借用其契约效果。
-                    var result = Game.Skills.BuySkillService.ExecuteWithRefundConsumable(_inventoryStore, repo, cid, session.Account?.AccountId ?? 0, job, skillTree, entries,
-                        rec?.BonusSp ?? 0, rec?.Level ?? (byte)1, rec?.BonusTp ?? 0, rec?.GrowType ?? 0);
+                    // Account 缺失时传 0，避免误用账号 1 的契约效果。
+                    Game.Skills.BuySkillResult result;
+                    if (InventoryContext.TryGetLease(cid, out var lease) && lease.IsOwnedBy(session.SessionId))
+                    {
+                        lock (lease.SyncRoot)
+                            result = Game.Skills.BuySkillService.ExecuteWithRefundConsumable(
+                                lease.Inventory,
+                                repo,
+                                cid,
+                                session.Account?.AccountId ?? 0,
+                                job,
+                                skillTree,
+                                entries,
+                                rec?.BonusSp ?? 0,
+                                rec?.Level ?? (byte)1,
+                                rec?.BonusTp ?? 0,
+                                rec?.GrowType ?? 0);
+                    }
+                    else
+                    {
+                        FileLogger.Log($"[SkillHandler] BUY_SKILL rejected: online inventory missing char={cid}");
+                        result = new Game.Skills.BuySkillResult
+                        {
+                            Success = false,
+                            SkillTree = skillTree,
+                            ErrorCode = 3,
+                        };
+                    }
+
                     var ack = BuySkillAckBuilder.Build(result);
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x001D, ack));
                     if (result != null && result.Success && result.ConsumedForgetRiverWater && result.ConsumedForgetRiverWaterItem != null)

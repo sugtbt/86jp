@@ -38,7 +38,20 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            if (!_inventoryStore.TryRepairEquipment(cid, aid, listType.Value, slot, quickRepair, freeRepair, out var result))
+            RepairEquipmentResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryRepairService.TryRepairEquipment(lease.Inventory, listType.Value, slot, quickRepair, freeRepair, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 FileLogger.Log($"[{ProtocolName}] REPAIR_EQUIPMENT: FAILED inven_type={invenType} slot={slot}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0017, RepairEquipmentAckBuilder.BuildError(0x0A)));
@@ -57,8 +70,8 @@ namespace DfoServer.Network.Handlers
         {
             switch (invenType)
             {
-                case 0: return InventoryListType.Main;          // 背包/快捷栏 → character_items
-                case 3: return InventoryListType.Equipment;     // 穿戴装备 → character_equipped_entries
+                case 0: return InventoryListType.Main;          // 背包/快捷栏
+                case 3: return InventoryListType.Equipment;     // 穿戴装备
                 case 2: return InventoryListType.PersonalCargo; // 货柜
                 default: return null;
             }

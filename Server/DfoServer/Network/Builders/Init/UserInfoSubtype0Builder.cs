@@ -1,4 +1,5 @@
 using DfoServer.Game.Characters;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
 using System;
 using System.Collections.Generic;
@@ -70,6 +71,7 @@ namespace DfoServer.Network.Builders
         private static void WriteTail(GamePacketWriter writer, CharacterRecord record)
         {
             var t = record.Subtype0Tail ?? new UserInfoMinimumTailSnapshot();
+            ApplyOnlineInventoryTailFields(record.CharacterId, t);
 
             writer.WriteUInt32(t.CloneTitleItemId);
             writer.WriteByte(t.Forging); // 锻造
@@ -77,7 +79,7 @@ namespace DfoServer.Network.Builders
             writer.WriteByte(t.CreatureField3);             
             writer.WriteByte(t.CreatureField4);             
             writer.WriteUInt32(t.NameTagItemId); // 名称装饰卡ID
-            writer.WriteUInt32(t.NameTagExpireTime); // 名称装饰卡剩余期限
+            writer.WriteUInt32(t.NameTagExpireTime); // 名称装饰卡到期时间戳
             writer.WriteByte(t.Stamina);                    
             writer.WriteUInt32(t.FatiguePenalty);           
             writer.WriteByte(t.IsEventCharacter);           
@@ -128,6 +130,15 @@ namespace DfoServer.Network.Builders
             writer.WriteByte(t.PvpLoseStreak);              
             writer.WriteUInt32(t.PvpRankPoint);             
             writer.WriteByte(t.TrailingByte);               
+        }
+
+        private static void ApplyOnlineInventoryTailFields(int characterId, UserInfoMinimumTailSnapshot tail)
+        {
+            if (characterId <= 0 || tail == null || !InventoryContext.TryGetLease(characterId, out var lease))
+                return;
+
+            lock (lease.SyncRoot)
+                new Noti2InventoryProjectionBuilder().ApplySubtype0TailDynamicFields(lease.Inventory, tail);
         }
 
         

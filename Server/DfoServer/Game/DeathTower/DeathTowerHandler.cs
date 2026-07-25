@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DfoServer.Game.Accounts;
 using DfoServer.Network.Builders;
@@ -11,33 +12,30 @@ namespace DfoServer.Game.DeathTower
 {
     public sealed class DeathTowerHandler
     {
-        private readonly IInventoryStore _inventoryStore;
         private readonly DeathTowerSettlementService _settlementService;
         private readonly Func<EnhancedClientSession, DeathTowerSettlementResult, Task> _sendExpGrantNotification;
         private readonly Func<EnhancedClientSession, Task> _sendInDungeonLevelUpFollowups;
         private readonly InventoryRefreshSender _inventoryRefresh;
 
         public DeathTowerHandler()
-            : this(null, null, null, null, null, null, null)
+            : this(null, null, null, null, null, null)
         {
         }
 
         internal DeathTowerHandler(
-            IInventoryStore inventoryStore = null,
-            IAssetService assetService = null,
+            string connectionString = null,
             DeathTowerExperienceGrantInTransaction grantExperienceInTransaction = null,
             Func<EnhancedClientSession, DeathTowerSettlementResult, Task> sendExpGrantNotification = null,
             AccountExperienceProgressService accountExperience = null,
             Func<EnhancedClientSession, Task> sendInDungeonLevelUpFollowups = null,
             InventoryRefreshSender inventoryRefresh = null)
         {
-            _inventoryStore = inventoryStore;
             _sendExpGrantNotification = sendExpGrantNotification;
             _sendInDungeonLevelUpFollowups = sendInDungeonLevelUpFollowups;
             _inventoryRefresh = inventoryRefresh;
-            if (assetService != null)
+            if (!string.IsNullOrWhiteSpace(connectionString))
                 _settlementService = new DeathTowerSettlementService(
-                    assetService,
+                    connectionString,
                     accountExperience,
                     grantExperienceInTransaction);
         }
@@ -55,20 +53,22 @@ namespace DfoServer.Game.DeathTower
 
         public async Task SendEntryPacketsAsync(EnhancedClientSession session, DeathTowerSession tower, byte difficulty = 0)
         {
-            if (_inventoryStore != null)
+            if (InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
+                && lease.IsOwnedBy(session.SessionId))
             {
                 try
                 {
-                    var (characterId, accountId) = SessionOwnerResolver.Resolve(session);
-                    var snapshot = _inventoryStore.LoadCharacterItemListSnapshot(characterId, accountId);
-                    var occupiedSlots = new List<short>(snapshot.MainItems.Count);
-                    foreach (var item in snapshot.MainItems)
-                        occupiedSlots.Add(item.SlotIndex);
-                    tower.SetPersistentMainSlotOccupancy(occupiedSlots);
+                    lock (lease.SyncRoot)
+                    {
+                        tower.SetPersistentMainSlotOccupancy(
+                            lease.Inventory.GetItems(InventoryListType.Main)
+                                .Select(item => item.Key)
+                                .ToList());
+                    }
                 }
                 catch (Exception ex)
                 {
-                    FileLogger.Log($"[DeathTower] inventory occupancy load failed; continuing without persistent-slot reservations: {ex.Message}");
+                    FileLogger.Log($"[DeathTower] online inventory occupancy load failed; continuing without persistent-slot reservations: {ex.Message}");
                 }
             }
 
@@ -161,7 +161,7 @@ namespace DfoServer.Game.DeathTower
             return Network.Handlers.Dungeon.DungeonClearMapQuestSync.SyncAsync(session, 0, mapId, source);
         }
 
-        // 返城时清除塔状态(由生命周期统一清理路径调用; run 置换后本方法只负责日志与提前摘除)
+        // 返城时清除塔状�?由生命周期统一清理路径调用; run 置换后本方法只负责日志与提前摘除)
         public static void ClearTowerState(EnhancedClientSession session)
         {
             var run = session?.Player?.CurrentRun;
@@ -237,10 +237,8 @@ namespace DfoServer.Game.DeathTower
                         await _sendInDungeonLevelUpFollowups(session);
                     if (settlement.GoldGained > 0)
                     {
-                        await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                            0x00,
-                            0x000E,
-                            ItemListUpdateBuilder.BuildGoldUpdate(settlement.UpdatedGold)));
+                        if (_inventoryRefresh != null)
+                            await _inventoryRefresh.SendGoldUpdate(session, settlement.UpdatedGold);
                     }
                     if (_inventoryRefresh != null && settlement.ChangedMainSlots.Count > 0)
                     {
@@ -378,7 +376,7 @@ namespace DfoServer.Game.DeathTower
             var instanceValue = BitConverter.ToInt32(body, 3);
             if (listType != InventoryListType.Main
                 && (listType != InventoryListType.QuickSlot
-                    || !SqliteInventoryStore.IsQuickSlot(slot)))
+                    || !ItemSlotBoundService.IsMainQuickSlot(slot)))
                 return false;
 
             var expectedItemId = body.Length >= 11 ? BitConverter.ToInt32(body, 7) : 0;
@@ -469,57 +467,75 @@ namespace DfoServer.Game.DeathTower
             DeathTowerSession tower,
             IReadOnlyList<short> slots)
         {
-            var mainUpdates = new List<CommonInventoryItem>();
-            var quickSlotUpdates = new List<CommonInventoryItem>();
+            var mainSlots = new List<short>();
+            var quickSlots = new List<short>();
             foreach (var slot in slots)
             {
-                var itemSpace = SqliteInventoryStore.IsQuickSlot(slot)
+                var itemSpace = ItemSlotBoundService.IsMainQuickSlot(slot)
                     ? InventoryListType.QuickSlot
                     : InventoryListType.Main;
-                var updates = itemSpace == InventoryListType.QuickSlot
-                    ? quickSlotUpdates
-                    : mainUpdates;
-                if (tower.TryGetInventoryItem(slot, out var item))
-                {
-                    var record = new SqliteInventoryStore.ItemRecord
-                    {
-                        ListType = itemSpace,
-                        SlotIndex = slot,
-                        ItemTemplateId = item.ItemId,
-                        ItemKind = "stackable",
-                        StackCount = item.Count,
-                        InstanceValue = item.Count,
-                        ExtraJson = "{}",
-                    };
-                    updates.Add(InventoryProtocolMapper.ToCommonItem(record));
-                }
+
+                if (itemSpace == InventoryListType.QuickSlot)
+                    AddSlot(quickSlots, slot);
                 else
-                {
-                    updates.Add(ItemListUpdateBuilder.CreateEmptyCommonItem(slot));
-                }
+                    AddSlot(mainSlots, slot);
             }
 
-            await InventoryRefreshSender.SendCommonItemUpdates(
-                session,
-                InventoryListType.QuickSlot,
-                quickSlotUpdates);
-            await InventoryRefreshSender.SendCommonItemUpdates(
-                session,
-                InventoryListType.Main,
-                mainUpdates);
+            await SendTowerItemUpdates(session, tower, InventoryListType.QuickSlot, quickSlots);
+            await SendTowerItemUpdates(session, tower, InventoryListType.Main, mainSlots);
+        }
+
+        private static async Task SendTowerItemUpdates(
+            EnhancedClientSession session,
+            DeathTowerSession tower,
+            InventoryListType listType,
+            IReadOnlyList<short> slots)
+        {
+            if (slots == null || slots.Count == 0)
+                return;
+
+            var writer = new GamePacketWriter();
+            writer.WriteByte((byte)listType);
+            writer.WriteUInt16((ushort)slots.Count);
+            foreach (var slot in slots)
+            {
+                if (tower.TryGetInventoryItem(slot, out var item))
+                    ItemListProtocolWriter.WriteCommonEntry84(writer, slot, CreateTowerItemCore(item));
+                else
+                    ItemListProtocolWriter.WriteEmptyEntry(writer, listType, slot);
+            }
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, writer.ToArray()));
+        }
+
+        private static ItemCore CreateTowerItemCore(TowerInventoryItem item)
+        {
+            var itemKind = ItemCore.KindConsumable;
+            if (item != null && ItemMetadataResolver.TryResolveItemKind(item.ItemId, out var resolvedKind))
+                itemKind = resolvedKind;
+
+            var core = ItemCore.Create(itemKind, item?.ItemId ?? 0);
+            core.Count = item?.Count ?? 0;
+            return core;
+        }
+
+        private static void AddSlot(List<short> slots, short slot)
+        {
+            if (!slots.Contains(slot))
+                slots.Add(slot);
         }
 
         private static bool IsSupportedTowerEndpoint(InventoryListType listType, short slot)
             => listType == InventoryListType.Main
                 || (listType == InventoryListType.QuickSlot
-                    && SqliteInventoryStore.IsQuickSlot(slot));
+                    && ItemSlotBoundService.IsMainQuickSlot(slot));
 
         private static bool IsTowerEndpoint(
             InventoryListType listType,
             short slot,
             DeathTowerSession tower)
             => IsSupportedTowerEndpoint(listType, slot)
-                && (SqliteInventoryStore.IsQuickSlot(slot)
+                && (ItemSlotBoundService.IsMainQuickSlot(slot)
                     || tower.InventoryItems.ContainsKey(slot));
 
         private static Task SyncTowerQuestProgress(

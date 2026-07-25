@@ -6,6 +6,7 @@ namespace DfoServer.Game.Inventory
         internal const short ArtifactRedEquipSlot = 25;
         internal const short ArtifactBlueEquipSlot = 26;
         internal const short ArtifactGreenEquipSlot = 27;
+        // 旧库兼容：240 是穿戴宠物映射槽，协议和在线模型都不把它当作真实宠物栏槽位。
         internal const short EquippedStorageSlotOffset = 216;
         internal const short CreatureEquippedStorageSlot = CreatureEquipSlot + EquippedStorageSlotOffset;
 

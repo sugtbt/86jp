@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Microsoft.Data.Sqlite;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Infrastructure;
@@ -123,39 +124,25 @@ namespace DfoServer.Game.CharacterData
 
                 
                 
-                using (var cmd = new SqliteCommand(@"
-SELECT slot, item_id, raw_entry
-FROM character_equipped_entries
-WHERE character_id=@cid AND (expire_time<=0 OR expire_time>@now)
-ORDER BY slot", conn))
+                var projectionBuilder = new Noti2InventoryProjectionBuilder();
+                if (InventoryContext.TryGetLease(characterId, out var lease))
                 {
-                    cmd.Parameters.AddWithValue("@cid", characterId);
-                    cmd.Parameters.AddWithValue("@now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-                    using (var r = cmd.ExecuteReader())
+                    lock (lease.SyncRoot)
                     {
-                        while (r.Read())
-                        {
-                            int slot = r.GetInt32(0);
-                            int itemId = r.GetInt32(1);
-                            var raw = ClearEquippedSortLockForClient((byte[])r.GetValue(2));
-
-                            int diff = Game.Inventory.InvenItem.VerifyRoundTrip(raw, out var item);
-                           //if (diff >= 0)
-                           //    throw new System.IO.InvalidDataException(
-                           //        $"[Subtype1Repo] char {characterId} slot {slot} item {itemId}: InvenItem roundtrip 首差 offset {diff} (rawLen={raw.Length})");
-
-                            snap.EquippedEntries.Add(new EquippedEntrySnapshot
-                            {
-                                Slot = slot,
-                                ItemId = itemId,
-                                RawEntry = raw,
-                                Item = item,
-                            });
-                        }
+                        var equippedProjection = projectionBuilder.BuildUserInfoAddition(lease.Inventory);
+                        snap.NameTagItemId = equippedProjection.NameTagItemId;
+                        snap.NameTagExpireTime = equippedProjection.NameTagExpireTime;
+                        snap.EquippedEntries.AddRange(equippedProjection.EquippedEntries);
+                        foreach (var pair in equippedProjection.AvatarDetails)
+                            snap.AvatarDetails[pair.Key] = pair.Value;
+                        foreach (var pair in equippedProjection.CreatureDetails)
+                            snap.CreatureDetails[pair.Key] = pair.Value;
                     }
                 }
-
-                
+                else
+                {
+                    ApplyNameTagState(NameTagStateRepository.Load(conn, characterId), snap);
+                }
                 using (var cmd = new SqliteCommand("SELECT dim_key, val1, val2 FROM character_dimensions WHERE character_id=@cid ORDER BY sort_order", conn))
                 {
                     cmd.Parameters.AddWithValue("@cid", characterId);
@@ -221,6 +208,22 @@ ORDER BY slot_index", conn))
             }
 
             return snap;
+        }
+
+        private static void ApplyNameTagState(NameTagState state, UserInfoAdditionSnapshot snap)
+        {
+            if (snap == null)
+                return;
+
+            if (state == null || !state.IsActive())
+            {
+                snap.NameTagItemId = 0;
+                snap.NameTagExpireTime = 0;
+                return;
+            }
+
+            snap.NameTagItemId = (uint)state.ItemId;
+            snap.NameTagExpireTime = (uint)state.ExpireTime;
         }
 
         public int UpdateSkillTreeIndex(int characterId, byte skillTreeIndex)

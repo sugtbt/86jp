@@ -113,7 +113,7 @@ namespace DfoServer.Game.Inventory
             };
 
         internal static ExperienceItemDefinition Resolve(int itemTemplateId)
-            => Resolve(itemTemplateId, InventoryDbPrimitives.LoadStackableItem(itemTemplateId));
+            => Resolve(itemTemplateId, StackableItemProvider.Load(itemTemplateId));
 
         internal static ExperienceItemDefinition Resolve(
             int itemTemplateId,

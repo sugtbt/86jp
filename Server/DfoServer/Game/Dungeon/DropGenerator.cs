@@ -48,12 +48,7 @@ namespace DfoServer.Game.Dungeon
             if (goldRate > _lcg.Next(DropDenominator))
             {
                 slotCounter++;
-                drops.Add(new DropInfo
-                {
-                    SceneSlot = slotCounter,
-                    TemplateId = 0,
-                    StackCount = (uint)goldAmount
-                });
+                drops.Add(DropInfo.CreateGold(slotCounter, goldAmount));
             }
             else
             {
@@ -68,12 +63,7 @@ namespace DfoServer.Game.Dungeon
                 if (itemId > 0)
                 {
                     slotCounter++;
-                    drops.Add(new DropInfo
-                    {
-                        SceneSlot = slotCounter,
-                        TemplateId = (uint)itemId,
-                        StackCount = 1
-                    });
+                    drops.Add(DropInfo.CreateItem(slotCounter, itemId, 1));
                 }
             }
 
@@ -84,15 +74,8 @@ namespace DfoServer.Game.Dungeon
                 int itemId = MonsterDropConfig.ChooseEquipment(_lcg, monsterLevel, rarity);
                 if (itemId > 0)
                 {
-                    var meta = ItemMetadataResolver.Resolve(itemId);
                     slotCounter++;
-                    drops.Add(new DropInfo
-                    {
-                        SceneSlot = slotCounter,
-                        TemplateId = (uint)itemId,
-                        StackCount = 1,
-                        Endurance = meta.Durability
-                    });
+                    drops.Add(DropInfo.CreateItem(slotCounter, itemId, 1));
                 }
             }
 
@@ -104,12 +87,7 @@ namespace DfoServer.Game.Dungeon
                 if (itemId > 0)
                 {
                     slotCounter++;
-                    drops.Add(new DropInfo
-                    {
-                        SceneSlot = slotCounter,
-                        TemplateId = (uint)itemId,
-                        StackCount = 1
-                    });
+                    drops.Add(DropInfo.CreateItem(slotCounter, itemId, 1));
                 }
             }
 
@@ -130,12 +108,7 @@ namespace DfoServer.Game.Dungeon
                         if (roll < cum)
                         {
                             slotCounter++;
-                            drops.Add(new DropInfo
-                            {
-                                SceneSlot = slotCounter,
-                                TemplateId = (uint)dropPool[i].ItemId,
-                                StackCount = 1
-                            });
+                            drops.Add(DropInfo.CreateItem(slotCounter, dropPool[i].ItemId, 1));
                             break;
                         }
                     }

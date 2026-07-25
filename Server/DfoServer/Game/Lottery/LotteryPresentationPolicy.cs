@@ -10,41 +10,35 @@ namespace DfoServer.Game.Lottery
         public static bool ShouldSendGoldRefresh(LotteryOpenResult result)
             => result != null && result.ConsumedGold > 0;
 
-        public static CommonInventoryItem ResolveResultItem(
-            CharacterItemListSnapshot snapshot,
+        internal static ItemCore ResolveResultCore(
+            InventoryService inventory,
             LotteryRewardGrant reward)
         {
-            if (reward == null || reward.ListType != InventoryListType.Main || reward.ItemTemplateId <= 0)
-                return null;
-
-            var item = FindResultItem(snapshot, reward);
-            if (item != null)
-                return item;
-
-            var metadata = ItemMetadataResolver.Resolve(reward.ItemTemplateId);
-            return new CommonInventoryItem
+            if (inventory == null
+                || reward == null
+                || reward.ItemTemplateId <= 0
+                || (reward.ListType != InventoryListType.Main
+                    && reward.ListType != InventoryListType.Avatar))
             {
-                SlotIndex = reward.SlotIndex,
-                ItemTemplateId = reward.ItemTemplateId,
-                CountOrInstanceValue = reward.StackCount > 0
-                    ? reward.StackCount
-                    : Math.Max(1, reward.GrantedCount),
-                Durability = metadata.Durability,
-                Marker16 = metadata.IsStackable ? 0 : -1,
-                ExpireTime = metadata.IsStackable ? 0 : -1,
-            };
-        }
-
-        public static AvatarInventoryItem ResolveAvatarResultItem(
-            CharacterItemListSnapshot snapshot,
-            LotteryRewardGrant reward)
-        {
-            if (reward == null || reward.ListType != InventoryListType.Avatar || reward.ItemTemplateId <= 0)
                 return null;
+            }
 
-            return snapshot?.AvatarItems?.FirstOrDefault(item => item != null
-                && item.SlotIndex == reward.SlotIndex
-                && item.AvatarItemId == reward.ItemTemplateId);
+            if (reward.ListType == InventoryListType.Main
+                && InventoryService.IsVirtualMainSlot(reward.SlotIndex))
+            {
+                var virtualItem = inventory.GetMainVirtualCount(reward.SlotIndex);
+                if (virtualItem == null || virtualItem.ItemId != reward.ItemTemplateId)
+                    return null;
+
+                var core = ItemCore.Create(ItemCore.KindConsumable, virtualItem.ItemId);
+                core.Count = virtualItem.Count;
+                return core;
+            }
+
+            var item = inventory.GetItem(reward.ListType, reward.SlotIndex);
+            return item != null && item.ItemId == reward.ItemTemplateId
+                ? item
+                : null;
         }
 
         public static IReadOnlyList<LotteryRewardGrant> ResolveDisplayRewards(
@@ -79,8 +73,8 @@ namespace DfoServer.Game.Lottery
                 : resolvedDisplayValue;
         }
 
-        public static int ResolveDisplayValue(
-            CommonInventoryItem item,
+        internal static int ResolveDisplayValue(
+            ItemCore item,
             LotteryRewardGrant reward,
             IReadOnlyList<LotteryRewardGrant> sameOpenRewards = null)
         {
@@ -157,18 +151,6 @@ namespace DfoServer.Game.Lottery
                 && !metadata.IsStackable
                 && (metadata.Rarity >= 3
                     || string.Equals(metadata.ItemCategory, "legacy", StringComparison.OrdinalIgnoreCase));
-        }
-
-        public static CommonInventoryItem FindResultItem(
-            CharacterItemListSnapshot snapshot,
-            LotteryRewardGrant reward)
-        {
-            if (snapshot == null || reward == null)
-                return null;
-
-            return snapshot.MainItems?.FirstOrDefault(item =>
-                item.SlotIndex == reward.SlotIndex
-                && item.ItemTemplateId == reward.ItemTemplateId);
         }
 
         private static string RewardKey(LotteryRewardGrant reward)
