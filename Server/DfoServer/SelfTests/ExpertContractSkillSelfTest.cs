@@ -209,7 +209,7 @@ namespace DfoServer.SelfTests
                 passiveRefresh.InitializationSnapshot.SkillInfo.Pages[0].Entries.Find(
                     entry => entry.SkillId == skill.SkillIndex)?.Level == purchasedLevel);
             Check(
-                "ordinary snapshot refresh keeps expired expert-contract marker pending",
+                "ordinary snapshot refresh leaves the expired premium state row untouched",
                 PremiumRowExists(DatabasePath, AccountId, ExpertContractPremiumType));
 
             selectData.PrepareForSkillSynchronization(CharacterId, AccountId);
@@ -244,39 +244,42 @@ namespace DfoServer.SelfTests
                 "expired expert contract persists page1 capped level",
                 persistedPage1 != null && persistedPage1.Level == ordinaryMax);
 
-            var otherPersisted = repo.LoadSkills(OtherCharacterId);
+            var otherBeforeOwnSynchronization = repo.LoadSkills(OtherCharacterId);
             Check(
-                "expired expert contract removes unavailable skill from another account character",
-                otherPersisted.Pages[0].Entries.Find(
+                "expired expert contract leaves another character unchanged until its own skill synchronization",
+                otherBeforeOwnSynchronization.Pages[0].Entries.Find(
+                    entry => entry.SkillId == skill.SkillIndex)?.Level == 1);
+            Check(
+                "expired expert contract keeps the persisted premium state row",
+                PremiumRowExists(DatabasePath, AccountId, ExpertContractPremiumType));
+
+            selectData.PrepareForSkillSynchronization(OtherCharacterId, AccountId);
+            var otherSelected = selectData.Load(OtherCharacterId, AccountId);
+            var otherSelectedSkills = otherSelected.InitializationSnapshot.SkillInfo;
+            Check(
+                "expired expert contract removes the unavailable skill when that character synchronizes",
+                otherSelectedSkills.Pages[0].Entries.Find(
                     entry => entry.SkillId == skill.SkillIndex) == null);
             var otherPoints = SkillPointLedger.Compute(
                 0,
                 otherCharacterLevel,
                 0,
                 0,
-                otherPersisted,
+                otherSelectedSkills,
                 0);
             Check(
-                "expired expert contract refunds all unavailable-skill SP on another character",
+                "expired expert contract refunds all unavailable-skill SP on that character",
                 otherPoints.RemainingSp == otherPoints.TotalSp);
             Check(
-                "expired expert contract consumes its premium event marker",
-                !PremiumRowExists(DatabasePath, AccountId, ExpertContractPremiumType));
+                "per-character reconciliation does not consume the persisted premium state row",
+                PremiumRowExists(DatabasePath, AccountId, ExpertContractPremiumType));
 
-            var laterGrant = repo.LoadSkills(OtherCharacterId);
-            laterGrant.Pages[0].Entries.Add(new SkillInfoEntrySnapshot
-            {
-                SkillId = (ushort)skill.SkillIndex,
-                Level = 1,
-                Slot = FindUnusedSlot(laterGrant.Pages[0]),
-            });
-            repo.SaveSkillProgress(OtherCharacterId, laterGrant);
-
-            var selectedAfterLaterGrant = selectData.Load(OtherCharacterId, AccountId);
+            selectData.PrepareForSkillSynchronization(CharacterId, AccountId);
+            var selectedAgain = selectData.Load(CharacterId, AccountId);
             Check(
-                "processed expiry does not remove a later legitimate skill grant",
-                selectedAfterLaterGrant.InitializationSnapshot.SkillInfo.Pages[0].Entries.Find(
-                    entry => entry.SkillId == skill.SkillIndex)?.Level == 1);
+                "repeated synchronization keeps the already capped skill unchanged",
+                selectedAgain.InitializationSnapshot.SkillInfo.Pages[0].Entries.Find(
+                    entry => entry.SkillId == skill.SkillIndex)?.Level == ordinaryMax);
         }
 
         private static void SetPremiumEndTime(
@@ -327,17 +330,6 @@ SELECT EXISTS (
                     return Convert.ToInt32(command.ExecuteScalar()) != 0;
                 }
             }
-        }
-
-        private static byte FindUnusedSlot(SkillInfoPageSnapshot page)
-        {
-            for (var slot = 0; slot <= byte.MaxValue; slot++)
-            {
-                if (page == null || !page.Entries.Exists(entry => entry.Slot == slot))
-                    return (byte)slot;
-            }
-
-            throw new InvalidOperationException("No free skill slot is available.");
         }
 
         private static void SeedSkillProgress(

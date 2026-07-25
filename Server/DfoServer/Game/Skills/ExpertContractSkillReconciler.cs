@@ -16,101 +16,112 @@ namespace DfoServer.Game.Skills
             if (repository == null || characterId <= 0 || accountId <= 0)
                 return false;
 
-            // Load PVF-backed premium metadata before taking the SQLite transaction.
             var premiumCatalog = Game.Premium.PremiumCatalog.Load();
+            CharacterSkillProfile.Warmup();
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
             using (var connection = new SqliteConnection(repository.ConnectionString))
             {
                 connection.Open();
-                var previewExpiredPremiumTypes = FindExpiredOverSkillPremiumTypes(
-                    connection,
-                    null,
-                    accountId,
-                    now,
-                    premiumCatalog,
-                    out var previewHasActiveReplacement);
-                if (previewHasActiveReplacement || previewExpiredPremiumTypes.Count == 0)
-                    return false;
-
-                // Avoid parsing character/skill PVF data while holding the account-wide
-                // write transaction. State is re-read below before any mutation.
-                CharacterSkillProfile.Warmup();
-                WarmSkillDataForAccount(connection, accountId);
-
                 using (var transaction = connection.BeginTransaction())
                 {
-                    var expiredPremiumTypes = FindExpiredOverSkillPremiumTypes(
-                        connection,
-                        transaction,
-                        accountId,
-                        now,
-                        premiumCatalog,
-                        out var hasActiveReplacement);
-                    if (hasActiveReplacement || expiredPremiumTypes.Count == 0)
-                    {
-                        transaction.Commit();
-                        return false;
-                    }
-
-                    var characters = LoadAccountCharacters(connection, transaction, accountId);
-                    if (!characters.Exists(x => x.CharacterId == characterId))
-                    {
-                        transaction.Commit();
-                        return false;
-                    }
-
-                    var changedCharacters = 0;
-                    var changedEntries = 0;
-                    foreach (var character in characters)
-                    {
-                        Characters.CharacterStatComputer.DecodeGrowType(
-                            character.RawGrowType,
-                            out var growType,
-                            out var secondGrowType);
-                        var skills = repository.LoadSkills(
+                    if (!HasExpiredExpertContract(
                             connection,
                             transaction,
-                            character.CharacterId);
-                        var baseline = SkillPointLedger.BuildFreeBaseline(
-                            character.Job,
-                            growType,
-                            secondGrowType);
-                        var characterChangedEntries = ReconcileCharacterSkills(
-                            skills,
-                            character.Job,
-                            character.Level,
-                            growType,
-                            secondGrowType,
-                            baseline);
-                        if (characterChangedEntries == 0)
-                            continue;
+                            accountId,
+                            now,
+                            premiumCatalog))
+                    {
+                        transaction.Commit();
+                        return false;
+                    }
 
+                    var character = repository.LoadProgressSnapshot(
+                        connection,
+                        transaction,
+                        characterId);
+                    if (character == null || character.AccountId != accountId)
+                    {
+                        transaction.Commit();
+                        return false;
+                    }
+
+                    Characters.CharacterStatComputer.DecodeGrowType(
+                        character.GrowType,
+                        out var growType,
+                        out var secondGrowType);
+                    var skills = repository.LoadSkills(
+                        connection,
+                        transaction,
+                        characterId);
+                    var baseline = SkillPointLedger.BuildFreeBaseline(
+                        character.Job,
+                        growType,
+                        secondGrowType);
+                    var changedEntries = ReconcileCharacterSkills(
+                        skills,
+                        character.Job,
+                        character.Level,
+                        growType,
+                        secondGrowType,
+                        baseline);
+                    if (changedEntries > 0)
+                    {
                         repository.SaveSkillProgress(
                             connection,
                             transaction,
-                            character.CharacterId,
+                            characterId,
                             skills);
-
-                        changedCharacters++;
-                        changedEntries += characterChangedEntries;
                     }
 
-                    var deletedPremiumRows = DeleteExpiredPremiumRows(
-                        connection,
-                        transaction,
-                        accountId,
-                        expiredPremiumTypes,
-                        now);
                     transaction.Commit();
+                    if (changedEntries == 0)
+                        return false;
 
                     FileLogger.Log(
                         $"[ExpertContractSkillReconciler] reconciled aid={accountId} " +
-                        $"characters={characters.Count} changedCharacters={changedCharacters} " +
-                        $"entries={changedEntries} premiumRows={deletedPremiumRows}");
+                        $"cid={characterId} entries={changedEntries}");
                     return true;
                 }
             }
+        }
+
+        private static bool HasExpiredExpertContract(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int accountId,
+            long now,
+            Game.Premium.PremiumCatalog premiumCatalog)
+        {
+            // Existing premium helpers only expose active effects and open their own
+            // connections. Keep the expired-state check in the skill write transaction.
+            var hasExpiredContract = false;
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT premium_type, end_time
+FROM account_premiums
+WHERE account_id=@aid;";
+                command.Parameters.AddWithValue("@aid", accountId);
+
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        var effects = premiumCatalog.GetEffects(reader.GetInt32(0));
+                        if (effects == null || effects.OverSkillLevel <= 0)
+                            continue;
+
+                        if (reader.GetInt64(1) > now)
+                            return false;
+
+                        hasExpiredContract = true;
+                    }
+                }
+            }
+
+            return hasExpiredContract;
         }
 
         private static int ReconcileCharacterSkills(
@@ -131,8 +142,8 @@ namespace DfoServer.Game.Skills
                     if (skill == null || skill.IsFixedLevelSkill)
                         continue;
 
-                    // A skill unavailable to this advancement was not created by the
-                    // expert contract, so leave quest/task/free-grant ownership intact.
+                    // Skills unavailable to this advancement were not learned through
+                    // the expert contract, so preserve quest/task/free grants.
                     if (skill.GetMaxLevelFor(growType, secondGrowType) <= 0)
                         continue;
 
@@ -155,153 +166,6 @@ namespace DfoServer.Game.Skills
             }
 
             return changedEntries;
-        }
-
-        private static void WarmSkillDataForAccount(
-            SqliteConnection connection,
-            int accountId)
-        {
-            var skillKeys = new List<(byte Job, int SkillId)>();
-            using (var command = connection.CreateCommand())
-            {
-                command.CommandText = @"
-SELECT DISTINCT c.job, s.skill_id
-FROM characters c
-JOIN character_skills s ON s.character_id=c.character_id
-WHERE c.account_id=@aid
-  AND c.delete_flag=0;";
-                command.Parameters.AddWithValue("@aid", accountId);
-
-                using (var reader = command.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        skillKeys.Add((
-                            (byte)Math.Max(0, Math.Min(byte.MaxValue, reader.GetInt32(0))),
-                            reader.GetInt32(1)));
-                    }
-                }
-            }
-
-            foreach (var skillKey in skillKeys)
-                SkillDataProvider.GetSkill(skillKey.Job, skillKey.SkillId);
-        }
-
-        private static HashSet<int> FindExpiredOverSkillPremiumTypes(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int accountId,
-            long now,
-            Game.Premium.PremiumCatalog premiumCatalog,
-            out bool hasActiveReplacement)
-        {
-            var expiredPremiumTypes = new HashSet<int>();
-            hasActiveReplacement = false;
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = @"
-SELECT premium_type, end_time
-FROM account_premiums
-WHERE account_id=@aid;";
-                command.Parameters.AddWithValue("@aid", accountId);
-
-                using (var reader = command.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        var premiumType = reader.GetInt32(0);
-                        var effects = premiumCatalog.GetEffects(premiumType);
-                        if (effects == null || effects.OverSkillLevel <= 0)
-                            continue;
-
-                        if (reader.GetInt64(1) > now)
-                        {
-                            hasActiveReplacement = true;
-                            expiredPremiumTypes.Clear();
-                            return expiredPremiumTypes;
-                        }
-
-                        expiredPremiumTypes.Add(premiumType);
-                    }
-                }
-            }
-
-            return expiredPremiumTypes;
-        }
-
-        private static List<AccountCharacter> LoadAccountCharacters(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int accountId)
-        {
-            var characters = new List<AccountCharacter>();
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = @"
-SELECT character_id, job, level, grow_type
-FROM characters
-WHERE account_id=@aid
-  AND delete_flag=0
-ORDER BY character_id;";
-                command.Parameters.AddWithValue("@aid", accountId);
-
-                using (var reader = command.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        characters.Add(new AccountCharacter
-                        {
-                            CharacterId = reader.GetInt32(0),
-                            Job = (byte)Math.Max(0, Math.Min(byte.MaxValue, reader.GetInt32(1))),
-                            Level = (byte)Math.Max(0, Math.Min(byte.MaxValue, reader.GetInt32(2))),
-                            RawGrowType = (byte)Math.Max(0, Math.Min(byte.MaxValue, reader.GetInt32(3))),
-                        });
-                    }
-                }
-            }
-
-            return characters;
-        }
-
-        private static int DeleteExpiredPremiumRows(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int accountId,
-            IEnumerable<int> premiumTypes,
-            long now)
-        {
-            var deletedRows = 0;
-            foreach (var premiumType in premiumTypes)
-            {
-                using (var command = connection.CreateCommand())
-                {
-                    command.Transaction = transaction;
-                    command.CommandText = @"
-DELETE FROM account_premiums
-WHERE account_id=@aid
-  AND premium_type=@type
-  AND end_time<=@now;";
-                    command.Parameters.AddWithValue("@aid", accountId);
-                    command.Parameters.AddWithValue("@type", premiumType);
-                    command.Parameters.AddWithValue("@now", now);
-                    deletedRows += command.ExecuteNonQuery();
-                }
-            }
-
-            return deletedRows;
-        }
-
-        private sealed class AccountCharacter
-        {
-            public int CharacterId { get; set; }
-
-            public byte Job { get; set; }
-
-            public byte Level { get; set; }
-
-            public byte RawGrowType { get; set; }
         }
     }
 }
