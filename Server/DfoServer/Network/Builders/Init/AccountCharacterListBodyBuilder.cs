@@ -20,7 +20,7 @@ namespace DfoServer.Network.Builders
             adventureGroup = AdventureGroupDataProvider.Calculate(characters);
             honorLevel = honorLevel ?? HonorLevelDataProvider.CalculateFromHonorExp(0, characters);
             var rosterAppearances = accountId > 0
-                ? AppearanceService.LoadRosterAppearancesFromDb(accountId)
+                ? AppearanceService.LoadRosterAppearancesFromDb(accountId, characters)
                 : new Dictionary<int, CharacterAppearanceEntry[]>();
 
             var writer = new GamePacketWriter();
