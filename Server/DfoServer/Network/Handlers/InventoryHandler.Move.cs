@@ -50,7 +50,12 @@ namespace DfoServer.Network.Handlers
             InventoryMoveServiceResult moveResult;
             bool moveOk;
             lock (lease.SyncRoot)
-                moveOk = InventoryMoveService.TryMove(lease.Inventory, request, out moveResult);
+                moveOk = InventoryMoveService.TryMove(
+                    lease.Inventory,
+                    request,
+                    session.Player.Job,
+                    session.Player.GrowType,
+                    out moveResult);
 
             if (!moveOk)
             {

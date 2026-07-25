@@ -53,14 +53,33 @@ namespace DfoServer.Game.Inventory
 
     internal static class InventoryMoveService
     {
+        private const byte FemaleSlayerJob = 11;
+        private const int VagabondGrowType = 4;
+
+        private readonly struct ActorContext
+        {
+            internal ActorContext(byte job, int growType)
+            {
+                Job = job;
+                GrowType = growType;
+            }
+
+            internal byte Job { get; }
+
+            internal int GrowType { get; }
+        }
+
         private static readonly ItemSlotRange MainQuickSlotRange = new ItemSlotRange(3, 8);
 
         internal static bool TryMove(
             InventoryService inventory,
             InventoryMoveRequest request,
+            byte characterJob,
+            int characterGrowType,
             out InventoryMoveServiceResult result)
         {
             result = CreateResult(request);
+            var actor = new ActorContext(characterJob, characterGrowType);
             if (inventory == null)
                 return Fail(result, InventoryMoveServiceError.InvalidInventory);
 
@@ -101,6 +120,7 @@ namespace DfoServer.Game.Inventory
                         request.DestinationSlotIndex,
                         request.SourceListType,
                         request.SourceSlotIndex,
+                        actor,
                         result))
                     return false;
 
@@ -132,11 +152,12 @@ namespace DfoServer.Game.Inventory
                     request.SourceSlotIndex,
                     request.DestinationListType,
                     request.DestinationSlotIndex,
+                    actor,
                     result))
                 return false;
 
             var destination = inventory.GetItem(request.DestinationListType, request.DestinationSlotIndex);
-            if (IsTitleNameClientEcho(request, source, destination))
+            if (IsTitleNameClientEcho(request, source, destination, actor))
                 return Fail(result, InventoryMoveServiceError.ClientEcho);
 
             if (destination != null)
@@ -150,6 +171,7 @@ namespace DfoServer.Game.Inventory
                         destination,
                         request.DestinationListType,
                         request.DestinationSlotIndex,
+                        actor,
                         result);
 
                 if (request.SourceListType != request.DestinationListType)
@@ -160,6 +182,7 @@ namespace DfoServer.Game.Inventory
                         request.SourceSlotIndex,
                         request.DestinationListType,
                         moveCount,
+                        actor,
                         result);
 
                 if (CanStackFull(source, destination, moveCount))
@@ -204,6 +227,7 @@ namespace DfoServer.Game.Inventory
                     destination,
                     request.DestinationListType,
                     request.DestinationSlotIndex,
+                    actor,
                     result);
             }
 
@@ -249,6 +273,7 @@ namespace DfoServer.Game.Inventory
             short sourceSlotIndex,
             InventoryListType destinationListType,
             int moveCount,
+            ActorContext actor,
             InventoryMoveServiceResult result)
         {
             if (InventoryStackRuleService.IsStackable(source)
@@ -280,6 +305,7 @@ namespace DfoServer.Game.Inventory
                     sourceListType,
                     sourceSlotIndex,
                     destinationListType,
+                    actor,
                     out var emptySlot))
             {
                 return ApplyMoveToEmptySlot(
@@ -304,6 +330,7 @@ namespace DfoServer.Game.Inventory
             ItemCore destination,
             InventoryListType destinationListType,
             short destinationSlotIndex,
+            ActorContext actor,
             InventoryMoveServiceResult result)
         {
             if (sourceListType == destinationListType)
@@ -315,6 +342,7 @@ namespace DfoServer.Game.Inventory
                     destination,
                     destinationListType,
                     destinationSlotIndex,
+                    actor,
                     result);
 
             if (!TryValidateDestinationSlot(
@@ -324,6 +352,7 @@ namespace DfoServer.Game.Inventory
                     destinationSlotIndex,
                     sourceListType,
                     sourceSlotIndex,
+                    actor,
                     result))
                 return false;
 
@@ -335,6 +364,7 @@ namespace DfoServer.Game.Inventory
                 destination,
                 destinationListType,
                 destinationSlotIndex,
+                actor,
                 result);
         }
 
@@ -438,9 +468,18 @@ namespace DfoServer.Game.Inventory
             ItemCore destination,
             InventoryListType destinationListType,
             short destinationSlotIndex,
+            ActorContext actor,
             InventoryMoveServiceResult result)
         {
-            if (!TryValidateDestinationSlot(inventory, destination, destinationListType, destinationSlotIndex, sourceListType, sourceSlotIndex, result))
+            if (!TryValidateDestinationSlot(
+                    inventory,
+                    destination,
+                    destinationListType,
+                    destinationSlotIndex,
+                    sourceListType,
+                    sourceSlotIndex,
+                    actor,
+                    result))
                 return false;
 
             var sourceToDestination = PrepareForDestination(
@@ -488,6 +527,7 @@ namespace DfoServer.Game.Inventory
             short currentSlotIndex,
             InventoryListType targetListType,
             short targetSlotIndex,
+            ActorContext actor,
             InventoryMoveServiceResult result)
         {
             if (item == null || item.IsEmpty)
@@ -539,7 +579,11 @@ namespace DfoServer.Game.Inventory
             }
 
             if (targetListType == InventoryListType.Equipment
-                && !IsValidEquipmentSlotForItem(item, targetSlotIndex))
+                && !IsValidEquipmentSlotForItem(
+                    item,
+                    targetSlotIndex,
+                    actor.Job,
+                    actor.GrowType))
                 return Fail(result, InventoryMoveServiceError.InvalidDestinationSlot);
 
             if (!ItemSlotBoundService.IsValidSlotForKind(
@@ -623,6 +667,7 @@ namespace DfoServer.Game.Inventory
             InventoryListType currentListType,
             short currentSlotIndex,
             InventoryListType targetListType,
+            ActorContext actor,
             out short slotIndex)
         {
             slotIndex = -1;
@@ -635,7 +680,15 @@ namespace DfoServer.Game.Inventory
                     continue;
 
                 var probe = CreateResult(null);
-                if (!TryValidateDestinationSlot(inventory, item, currentListType, currentSlotIndex, targetListType, slot, probe))
+                if (!TryValidateDestinationSlot(
+                        inventory,
+                        item,
+                        currentListType,
+                        currentSlotIndex,
+                        targetListType,
+                        slot,
+                        actor,
+                        probe))
                     continue;
 
                 slotIndex = slot;
@@ -859,7 +912,11 @@ namespace DfoServer.Game.Inventory
                 && request.MoveCount > 0;
         }
 
-        private static bool IsTitleNameClientEcho(InventoryMoveRequest request, ItemCore source, ItemCore destination)
+        private static bool IsTitleNameClientEcho(
+            InventoryMoveRequest request,
+            ItemCore source,
+            ItemCore destination,
+            ActorContext actor)
         {
             if (request == null
                 || source == null
@@ -871,7 +928,11 @@ namespace DfoServer.Game.Inventory
             {
                 return request.DestinationInstanceValue == 0
                     && destination == null
-                    && IsValidEquipmentSlotForItem(source, (short)EquipmentType.TitleName);
+                    && IsValidEquipmentSlotForItem(
+                        source,
+                        (short)EquipmentType.TitleName,
+                        actor.Job,
+                        actor.GrowType);
             }
 
             if (source.ItemId != request.SourceInstanceValue)
@@ -920,7 +981,11 @@ namespace DfoServer.Game.Inventory
                 && slotIndex <= (short)EquipmentType.WeaponAvatar;
         }
 
-        private static bool IsValidEquipmentSlotForItem(ItemCore item, short slotIndex)
+        private static bool IsValidEquipmentSlotForItem(
+            ItemCore item,
+            short slotIndex,
+            byte characterJob,
+            int characterGrowType)
         {
             if (item == null || item.IsEmpty)
                 return false;
@@ -938,7 +1003,13 @@ namespace DfoServer.Game.Inventory
             if (type == EquipmentType.Unknown)
                 return false;
 
-            return slotIndex == (short)type;
+            if (slotIndex == (short)type)
+                return true;
+
+            return type == EquipmentType.Weapon
+                && slotIndex == (short)EquipmentType.SupportWeapon
+                && characterJob == FemaleSlayerJob
+                && (characterGrowType & 0x0F) == VagabondGrowType;
         }
 
         private static bool IsMainQuickSlot(short slotIndex)
