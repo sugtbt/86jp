@@ -12,9 +12,9 @@ namespace DfoServer.Network.Handlers
         private readonly SecretShopPurchaseService _purchaseService;
         private readonly InventoryRefreshSender _refresh;
 
-        internal SecretShopHandler(IInventoryStore inventoryStore, InventoryRefreshSender refresh)
+        internal SecretShopHandler(InventoryRefreshSender refresh)
         {
-            _purchaseService = new SecretShopPurchaseService(inventoryStore);
+            _purchaseService = new SecretShopPurchaseService();
             _refresh = refresh ?? throw new ArgumentNullException(nameof(refresh));
         }
 
@@ -47,8 +47,25 @@ namespace DfoServer.Network.Handlers
             }
 
             var characterId = session.Player.CharacterId;
-            var accountId = session.Account?.AccountId ?? 0;
-            if (!_purchaseService.TryPurchase(characterId, accountId, offer, request.ItemId, request.RequestedCount, out var result))
+            SecretShopPurchaseResult result;
+            bool ok;
+            if (InventoryContext.TryGetLease(characterId, out var lease) && lease.IsOwnedBy(session.SessionId))
+            {
+                lock (lease.SyncRoot)
+                    ok = _purchaseService.TryPurchase(
+                        lease.Inventory,
+                        offer,
+                        request.ItemId,
+                        request.RequestedCount,
+                        out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 FileLogger.Log($"[SecretShop] BUY reject transaction: char={characterId} npc={offer.NpcId} item={request.ItemId}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
@@ -65,10 +82,7 @@ namespace DfoServer.Network.Handlers
 
             if (result.GoldCost > 0)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                    0x00,
-                    0x000E,
-                    ItemListUpdateBuilder.BuildGoldUpdate(result.UpdatedGold)));
+                await _refresh.SendGoldUpdate(session);
             }
 
             await _refresh.SendUpdateItemList(session, InventoryListType.Main, result.AssignedSlot);

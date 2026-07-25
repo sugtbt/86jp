@@ -20,12 +20,11 @@ namespace DfoServer.Network.Handlers
         private readonly DungeonTutorialHandler _tutorial;
 
         public DungeonHandler(
-            IAssetService assetService,
             Game.ReviveCoin.ReviveCoinService reviveCoinService,
             Game.Characters.SqliteCharacterRepository characterRepository,
             SqliteSelectCharacterDataSource selectCharacterDataSource,
             IRentalTimeProvider rentalTimeProvider,
-            IInventoryStore inventoryStore,
+            string connectionString,
             InventoryRefreshSender inventoryRefresh,
             Game.Party.PartyManager partyManager = null,
             Game.Session.ISessionDirectory sessionDirectory = null,
@@ -33,12 +32,11 @@ namespace DfoServer.Network.Handlers
             Game.Accounts.AccountExperienceProgressService accountExperience = null)
         {
             _services = new DungeonSharedServices(
-                assetService,
                 reviveCoinService,
                 characterRepository,
                 selectCharacterDataSource,
                 rentalTimeProvider,
-                inventoryStore,
+                connectionString,
                 inventoryRefresh,
                 partyManager,
                 sessionDirectory,

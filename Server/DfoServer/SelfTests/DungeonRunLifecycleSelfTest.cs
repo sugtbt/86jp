@@ -391,12 +391,8 @@ namespace DfoServer.SelfTests
 
         private static void CheckTowerRewardGrantPersistence(ref int failures)
         {
-            const int successAccountId = 970021;
-            const int successCharacterId = 970121;
-            const int rejectionAccountId = 970022;
-            const int rejectionCharacterId = 970122;
-            const int rollbackAccountId = 970023;
-            const int rollbackCharacterId = 970123;
+            const int accountId = 970021;
+            const int characterId = 970121;
             const int synthesizerItemId = 1252;
             const int completionMedalItemId = 3314;
             var tempDb = Path.Combine(
@@ -409,16 +405,22 @@ namespace DfoServer.SelfTests
                     ServerPaths.SchemaFilePath);
                 SeedTowerRewardOwners(
                     connectionString,
-                    new[]
-                    {
-                        (successAccountId, successCharacterId),
-                        (rejectionAccountId, rejectionCharacterId),
-                        (rollbackAccountId, rollbackCharacterId),
-                    });
+                    new[] { (accountId, characterId) });
+                InventoryService inventory;
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    inventory = InventoryService.LoadFromDb(
+                        connection,
+                        characterId,
+                        accountId);
+                }
 
-                var realAssets = new SqliteAssetService(
-                    tempDb,
-                    ServerPaths.SchemaFilePath);
+                var lease = new InventoryLease(
+                    Guid.NewGuid(),
+                    characterId,
+                    inventory,
+                    version: 1);
                 var candidates = new List<ClearRewardGenerator.CardReward>
                 {
                     new ClearRewardGenerator.CardReward
@@ -433,119 +435,65 @@ namespace DfoServer.SelfTests
                     },
                 };
 
-                var successService =
-                    new TowerOfDespairRewardGrantService(realAssets);
-                var successful = successService.Grant(
-                    successCharacterId,
-                    successAccountId,
-                    candidates);
-                Check("tower reward grant persists and returns successful items",
+                var service = new TowerOfDespairRewardGrantService();
+                var successful = service.Grant(inventory, candidates);
+                Check("tower reward grant uses the online inventory batch and reports actual changed slots",
                     successful.Count == 2
                     && successful[0].Reward.ItemId == synthesizerItemId
                     && successful[1].Reward.ItemId == completionMedalItemId
-                    && CountItem(
-                        realAssets,
-                        successCharacterId,
-                        successAccountId,
-                        synthesizerItemId) == 1
-                    && CountItem(
-                        realAssets,
-                        successCharacterId,
-                        successAccountId,
-                        completionMedalItemId) == 1,
+                    && successful[0].ListType == InventoryListType.Main
+                    && successful[0].Slot >= InventoryService.MainSlotStart
+                    && successful[1].ListType == InventoryListType.Main
+                    && successful[1].Slot >= InventoryService.MainSlotStart
+                    && inventory.CountMainItem(synthesizerItemId) == 1
+                    && inventory.CountMainItem(completionMedalItemId) == 1,
                     ref failures);
 
-                var rejectingAssets = new ControlledAssetService(
-                    realAssets,
-                    rejectItemId: completionMedalItemId);
-                var rejectionService =
-                    new TowerOfDespairRewardGrantService(rejectingAssets);
-                var acceptedOnly = rejectionService.Grant(
-                    rejectionCharacterId,
-                    rejectionAccountId,
-                    candidates);
-                Check("rejected tower rewards are not persisted or displayed",
-                    acceptedOnly.Count == 1
-                    && acceptedOnly[0].Reward.ItemId == synthesizerItemId
-                    && CountItem(
-                        realAssets,
-                        rejectionCharacterId,
-                        rejectionAccountId,
-                        synthesizerItemId) == 1
-                    && CountItem(
-                        realAssets,
-                        rejectionCharacterId,
-                        rejectionAccountId,
-                        completionMedalItemId) == 0,
-                    ref failures);
-
-                var throwingAssets = new ControlledAssetService(
-                    realAssets,
-                    throwOnAddCall: 2);
-                var rollbackService =
-                    new TowerOfDespairRewardGrantService(throwingAssets);
-                var rolledBack = rollbackService.Grant(
-                    rollbackCharacterId,
-                    rollbackAccountId,
-                    candidates);
-                Check("tower reward grant rolls back and displays nothing on exception",
-                    rolledBack.Count == 0
-                    && CountItem(
-                        realAssets,
-                        rollbackCharacterId,
-                        rollbackAccountId,
-                        synthesizerItemId) == 0
-                    && CountItem(
-                        realAssets,
-                        rollbackCharacterId,
-                        rollbackAccountId,
-                        completionMedalItemId) == 0,
-                    ref failures);
-
-                var inventoryStore = new SqliteInventoryStore(
-                    tempDb,
-                    ServerPaths.SchemaFilePath);
-                var refreshCandidates =
-                    new List<ClearRewardGenerator.CardReward>
-                    {
-                        new ClearRewardGenerator.CardReward
-                        {
-                            ItemId = synthesizerItemId,
-                            StackCount = 2,
-                        },
-                        new ClearRewardGenerator.CardReward
-                        {
-                            ItemId = 3033,
-                            StackCount = 3,
-                        },
-                    };
-                var refreshService =
-                    new TowerOfDespairRewardGrantService(realAssets);
-                var refreshGranted = refreshService.Grant(
-                    successCharacterId,
-                    successAccountId,
-                    refreshCandidates);
-                CommonInventoryItem stackedItem = null;
-                CommonInventoryItem cubeItem = null;
-                foreach (var reward in refreshGranted)
+                using (var connection = new SqliteConnection(connectionString))
                 {
-                    var item = inventoryStore.LoadCommonItemForRefresh(
-                        successCharacterId,
-                        successAccountId,
-                        InventoryListType.Main,
-                        reward.Slot);
-                    if (item?.ItemTemplateId == synthesizerItemId)
-                        stackedItem = item;
-                    else if (item?.ItemTemplateId == 3033)
-                        cubeItem = item;
+                    connection.Open();
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        InventoryPersistenceService.SaveDirtyInTransaction(
+                            connection,
+                            transaction,
+                            lease);
+                        transaction.Commit();
+                    }
                 }
+                inventory.ClearDirtyState();
 
-                Check("existing inventory refresh path reads committed tower rewards without a nested asset scope",
-                    stackedItem != null
-                    && stackedItem.CountOrInstanceValue == 3
-                    && cubeItem != null
-                    && cubeItem.SlotIndex == 354
-                    && cubeItem.CountOrInstanceValue == 3,
+                InventoryService reloaded;
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    reloaded = InventoryService.LoadFromDb(
+                        connection,
+                        characterId,
+                        accountId);
+                }
+                Check("tower reward online-inventory mutations persist through the shared inventory persistence path",
+                    reloaded.CountMainItem(synthesizerItemId) == 1
+                    && reloaded.CountMainItem(completionMedalItemId) == 1,
+                    ref failures);
+
+                var rejectedInventory = new InventoryService(
+                    characterId + 1,
+                    accountId + 1);
+                var rejected = service.Grant(
+                    rejectedInventory,
+                    new[]
+                    {
+                        candidates[0],
+                        new ClearRewardGenerator.CardReward
+                        {
+                            ItemId = int.MaxValue,
+                            StackCount = 1,
+                        },
+                    });
+                Check("unsupported tower reward rejects the whole planned batch without partial inventory mutation",
+                    rejected.Count == 0
+                    && rejectedInventory.CountMainItem(synthesizerItemId) == 0,
                     ref failures);
             }
             finally
@@ -586,16 +534,6 @@ VALUES (@cid, @aid, @name);";
             }
         }
 
-        private static int CountItem(
-            IAssetService assetService,
-            int characterId,
-            int accountId,
-            int itemId)
-        {
-            using (var scope = assetService.OpenScope(characterId, accountId))
-                return assetService.CountItem(scope, itemId);
-        }
-
         private static void DeleteTempDatabase(string databasePath)
         {
             foreach (var path in new[]
@@ -608,87 +546,6 @@ VALUES (@cid, @aid, @name);";
                 if (File.Exists(path))
                     File.Delete(path);
             }
-        }
-
-        private sealed class ControlledAssetService : IAssetService
-        {
-            private readonly IAssetService _inner;
-            private readonly int _rejectItemId;
-            private readonly int _throwOnAddCall;
-            private int _addCalls;
-
-            internal ControlledAssetService(
-                IAssetService inner,
-                int rejectItemId = 0,
-                int throwOnAddCall = 0)
-            {
-                _inner = inner;
-                _rejectItemId = rejectItemId;
-                _throwOnAddCall = throwOnAddCall;
-            }
-
-            public DbScope OpenScope(int characterId, int accountId)
-                => _inner.OpenScope(characterId, accountId);
-
-            public bool TryAddItem(
-                DbScope scope,
-                int itemTemplateId,
-                int count,
-                out short assignedSlot)
-            {
-                _addCalls++;
-                if (_throwOnAddCall > 0 && _addCalls == _throwOnAddCall)
-                {
-                    throw new InvalidOperationException(
-                        "injected tower reward persistence failure");
-                }
-                if (itemTemplateId == _rejectItemId)
-                {
-                    assignedSlot = -1;
-                    return false;
-                }
-                return _inner.TryAddItem(
-                    scope,
-                    itemTemplateId,
-                    count,
-                    out assignedSlot);
-            }
-
-            public bool TryRemoveItem(
-                DbScope scope,
-                int itemTemplateId,
-                int count,
-                out short slot,
-                out int remaining)
-                => _inner.TryRemoveItem(
-                    scope,
-                    itemTemplateId,
-                    count,
-                    out slot,
-                    out remaining);
-
-            public int CountItem(
-                DbScope scope,
-                int itemTemplateId)
-                => _inner.CountItem(scope, itemTemplateId);
-
-            public WalletSnapshot LoadWallet(DbScope scope)
-                => _inner.LoadWallet(scope);
-
-            public int GrantGold(DbScope scope, int amount)
-                => _inner.GrantGold(scope, amount);
-
-            public bool TrySpendGold(DbScope scope, int amount)
-                => _inner.TrySpendGold(scope, amount);
-
-            public void GrantLuckyStar(DbScope scope, int amount)
-                => _inner.GrantLuckyStar(scope, amount);
-
-            public bool TrySpendLuckyStar(DbScope scope, int amount)
-                => _inner.TrySpendLuckyStar(scope, amount);
-
-            public CharacterItemListSnapshot LoadSnapshot(DbScope scope)
-                => _inner.LoadSnapshot(scope);
         }
 
         private static void Check(string name, bool ok, ref int failures)

@@ -20,8 +20,7 @@ namespace DfoServer.Network.Handlers.Dungeon
     {
         internal const string ProtocolLogName = "GameProtocol";
 
-        private readonly IAssetService _assetService;
-        internal IAssetService AssetService => _assetService;
+        internal string ConnectionString { get; }
         internal SqliteSelectCharacterDataSource SelectCharacterDataSource { get; }
         internal IRentalTimeProvider RentalTimeProvider { get; }
         internal InventoryRefreshSender InventoryRefresh { get; }
@@ -49,30 +48,30 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal Game.Session.ISessionDirectory Sessions { get; }
 
         internal DungeonSharedServices(
-            IAssetService assetService,
             Game.ReviveCoin.ReviveCoinService reviveCoin,
             SqliteCharacterRepository characterRepository,
             SqliteSelectCharacterDataSource selectCharacterDataSource,
             IRentalTimeProvider rentalTimeProvider,
-            IInventoryStore inventoryStore,
+            string connectionString,
             InventoryRefreshSender inventoryRefresh,
             Game.Party.PartyManager partyManager = null,
             Game.Session.ISessionDirectory sessions = null,
             Game.Quests.QuestDropService questDropService = null,
             AccountExperienceProgressService accountExperience = null)
         {
-            _assetService = assetService
-                ?? throw new ArgumentNullException(nameof(assetService));
-            if (inventoryStore == null)
-                throw new ArgumentNullException(nameof(inventoryStore));
             ReviveCoin = reviveCoin ?? throw new ArgumentNullException(nameof(reviveCoin));
             CharacterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
+            ConnectionString = !string.IsNullOrWhiteSpace(connectionString)
+                ? connectionString
+                : throw new ArgumentException("A database connection string is required.", nameof(connectionString));
             PartyManager = partyManager;
             Sessions = sessions;
             SelectCharacterDataSource = selectCharacterDataSource ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
-            RentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
             InventoryRefresh = inventoryRefresh;
-            QuestDrops = questDropService ?? new Game.Quests.QuestDropService(assetService, inventoryRefresh);
+            RentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
+            QuestDrops = questDropService ?? new Game.Quests.QuestDropService(
+                inventoryRefresh,
+                ConnectionString);
             Subtype1Repository = new SqliteSubtype1Repository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             CharacterStateRepository = new SqliteCharacterStateRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             AntonNormal = new AntonNormalConquestNotifier(
@@ -85,8 +84,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             GrowthCapsuleSync = new GrowthCapsuleSyncService(CharacterRepository);
             CharacterExperience = new CharacterExperienceService(AccountExperience);
             DeathTower = new Game.DeathTower.DeathTowerHandler(
-                inventoryStore,
-                assetService,
+                ConnectionString,
                 sendExpGrantNotification: SendDeathTowerExpGrantNotificationAsync,
                 accountExperience: AccountExperience,
                 sendInDungeonLevelUpFollowups: SendInDungeonLevelUpFollowups,
@@ -96,10 +94,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                     ServerPaths.DatabasePath,
                     ServerPaths.SchemaFilePath));
             TowerOfDespairRewards =
-                new Game.Dungeon.TowerOfDespairRewardGrantService(assetService);
-            CardRewards = new Game.Dungeon.CardRewardService(this, assetService);
-            Drops = new Game.Dungeon.DropService(assetService, inventoryStore);
-            EntryCost = new Game.Dungeon.DungeonEntryCostService(assetService);
+                new Game.Dungeon.TowerOfDespairRewardGrantService();
+            CardRewards = new Game.Dungeon.CardRewardService();
+            Drops = new Game.Dungeon.DropService();
+            EntryCost = new Game.Dungeon.DungeonEntryCostService();
         }
 
         internal HonorLevelSummary ResolveHonorLevelForExp(
@@ -261,10 +259,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 var clearedFlags = new Game.Quests.QuestRepository(
                     SqliteDatabaseBootstrap.BuildConnectionString(ServerPaths.DatabasePath))
                     .LoadClearedFlags(session.Player.CharacterId);
-                var allowedCreatureKinds = SqliteInventoryStore.LoadEligiblePetCreatureEvolutionQuestKinds(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId);
+                var allowedCreatureKinds = InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
+                    ? PetCreatureEvolutionRuntimeService.LoadEligiblePetCreatureEvolutionQuestKinds(lease.Inventory)
+                    : new HashSet<int>();
 
                 var body = Builders.QuestListBodyBuilder.BuildBody(
                     session.Player.Level, rec.Job, rec.GrowType, clearedFlags, allowedCreatureKinds);

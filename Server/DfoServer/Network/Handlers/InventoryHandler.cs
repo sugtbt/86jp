@@ -13,7 +13,6 @@ namespace DfoServer.Network.Handlers
     public sealed partial class InventoryHandler
     {
         // 背包操作直连共享 store; 门面只保留选角初始化本职(称号簿/成就/水晶契约/全量快照/宠物快照)
-        private readonly IInventoryStore _inventoryStore;
         private readonly ExperienceItemUseService _experienceItemUseService;
         private readonly SqliteSelectCharacterDataSource _sqliteSelectCharacterDataSource;
         private readonly ICharacterRepository _characterRepository;
@@ -24,7 +23,6 @@ namespace DfoServer.Network.Handlers
         public string ProtocolName => "GameProtocol";
 
         internal InventoryHandler(
-            IInventoryStore inventoryStore,
             ExperienceItemUseService experienceItemUseService,
             SqliteSelectCharacterDataSource sqliteSelectCharacterDataSource,
             ICharacterRepository characterRepository,
@@ -32,7 +30,6 @@ namespace DfoServer.Network.Handlers
             ExperienceItemNotificationService experienceItemNotifications,
             Func<byte[], Task> broadcastGamePacket = null)
         {
-            _inventoryStore = inventoryStore ?? throw new ArgumentNullException(nameof(inventoryStore));
             _experienceItemUseService = experienceItemUseService
                 ?? throw new ArgumentNullException(nameof(experienceItemUseService));
             _sqliteSelectCharacterDataSource = sqliteSelectCharacterDataSource ?? throw new ArgumentNullException(nameof(sqliteSelectCharacterDataSource));

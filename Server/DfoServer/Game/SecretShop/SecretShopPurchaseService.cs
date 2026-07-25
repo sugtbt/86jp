@@ -22,23 +22,19 @@ namespace DfoServer.Game.SecretShop
 
     internal sealed class SecretShopPurchaseService
     {
-        private readonly IInventoryStore _inventoryStore;
-
-        internal SecretShopPurchaseService(IInventoryStore inventoryStore)
+        internal SecretShopPurchaseService()
         {
-            _inventoryStore = inventoryStore ?? throw new ArgumentNullException(nameof(inventoryStore));
         }
 
         internal bool TryPurchase(
-            int characterId,
-            int accountId,
+            InventoryService inventory,
             SecretShopOffer offer,
             int itemId,
             int requestedCount,
             out SecretShopPurchaseResult result)
         {
             result = null;
-            if (offer == null || !offer.IsSecretShop || characterId <= 0 || accountId <= 0 || itemId <= 0)
+            if (inventory == null || offer == null || !offer.IsSecretShop || itemId <= 0)
                 return false;
 
             InventoryMutationResult mutation = null;
@@ -54,9 +50,8 @@ namespace DfoServer.Game.SecretShop
 
                             var usesItemCurrency = item.RawFlag == 1;
                             var totalPrice = checked(item.Price * purchaseCount);
-                            return _inventoryStore.TryBuySecretShopItem(
-                                characterId,
-                                accountId,
+                            return InventoryShopRuntimeService.TryBuySecretShopItem(
+                                inventory,
                                 item.ItemId,
                                 purchaseCount,
                                 usesItemCurrency ? 0 : totalPrice,
@@ -90,7 +85,7 @@ namespace DfoServer.Game.SecretShop
             }
             catch (Exception ex)
             {
-                FileLogger.Log($"[SecretShop] purchase transaction failed: char={characterId} item={itemId} error={ex.Message}");
+                FileLogger.Log($"[SecretShop] purchase transaction failed: char={inventory?.CharacterId ?? 0} item={itemId} error={ex.Message}");
                 result = null;
                 return false;
             }

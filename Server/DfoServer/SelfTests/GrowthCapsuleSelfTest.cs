@@ -1,6 +1,5 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
-using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Infrastructure;
@@ -85,27 +84,28 @@ namespace DfoServer.SelfTests
                     alreadyFull.GrowthCapsule.TotalExp == required
                     && alreadyFull.GrowthCapsuleExpGain == 0);
 
-                var realAssetService = new SqliteAssetService(
-                    databasePath,
-                    ServerPaths.SchemaFilePath,
-                    new SqliteInventoryStore(databasePath, ServerPaths.SchemaFilePath));
-                var success = new GrowthCapsuleClaimService(realAssetService)
-                    .Claim(CharacterId, AccountId);
+                var claimService = new GrowthCapsuleClaimService(databasePath, ServerPaths.SchemaFilePath);
+                var successInventory = new InventoryService(CharacterId, AccountId);
+                var successLease = new InventoryLease(Guid.NewGuid(), CharacterId, successInventory, 1);
+                var success = claimService.Claim(successLease);
                 Check("successful claim grants configured item",
                     success.Success
-                    && CountItem(realAssetService, CharacterId, AccountId, GrowthCapsuleDataProvider.RewardItemId) == 1);
+                    && successInventory.CountMainItem(GrowthCapsuleDataProvider.RewardItemId) == 1);
                 Check("successful claim resets the single gage",
                     success.Summary.TotalExp == 0 && repository.LoadSummary(AccountId).TotalExp == 0);
 
                 SetGrowthCapsuleExp(connectionString, required);
-                var invalidOwner = new GrowthCapsuleClaimService(realAssetService)
-                    .Claim(ForeignCharacterId, AccountId);
+                var foreignInventory = new InventoryService(ForeignCharacterId, AccountId);
+                var foreignLease = new InventoryLease(Guid.NewGuid(), ForeignCharacterId, foreignInventory, 2);
+                var invalidOwner = claimService.Claim(foreignLease);
                 Check("claim rejects character from another account",
                     invalidOwner.Status == GrowthCapsuleClaimStatus.InvalidOwner
                     && repository.LoadSummary(AccountId).TotalExp == required);
 
-                var blocked = new GrowthCapsuleClaimService(
-                    new RejectingAssetService(realAssetService)).Claim(CharacterId, AccountId);
+                var fullInventory = new InventoryService(CharacterId, AccountId);
+                FillMainInventory(fullInventory);
+                var fullLease = new InventoryLease(Guid.NewGuid(), CharacterId, fullInventory, 3);
+                var blocked = claimService.Claim(fullLease);
                 Check("inventory failure reports full", blocked.Status == GrowthCapsuleClaimStatus.InventoryFull);
                 Check("inventory failure rolls back gage", repository.LoadSummary(AccountId).TotalExp == required);
 
@@ -216,14 +216,14 @@ PRAGMA user_version=19;";
             }
         }
 
-        private static int CountItem(
-            IAssetService assetService,
-            int characterId,
-            int accountId,
-            int itemId)
+        private static void FillMainInventory(InventoryService inventory)
         {
-            using (var scope = assetService.OpenScope(characterId, accountId))
-                return assetService.CountItem(scope, itemId);
+            for (short slot = InventoryService.MainSlotStart; slot <= InventoryService.MainSlotEnd; slot++)
+            {
+                var filler = ItemCore.Create(ItemCore.KindConsumable, 1000 + slot);
+                filler.Count = 1;
+                inventory.AttachItem(InventoryListType.Main, slot, filler);
+            }
         }
 
         private static void Check(string name, bool success)
@@ -241,30 +241,5 @@ PRAGMA user_version=19;";
             }
         }
 
-        private sealed class RejectingAssetService : IAssetService
-        {
-            private readonly IAssetService _inner;
-
-            public RejectingAssetService(IAssetService inner)
-            {
-                _inner = inner;
-            }
-
-            public DbScope OpenScope(int characterId, int accountId) => _inner.OpenScope(characterId, accountId);
-            public bool TryAddItem(DbScope scope, int itemTemplateId, int count, out short assignedSlot)
-            {
-                assignedSlot = -1;
-                return false;
-            }
-            public bool TryRemoveItem(DbScope scope, int itemTemplateId, int count, out short slot, out int remaining)
-                => _inner.TryRemoveItem(scope, itemTemplateId, count, out slot, out remaining);
-            public int CountItem(DbScope scope, int itemTemplateId) => _inner.CountItem(scope, itemTemplateId);
-            public WalletSnapshot LoadWallet(DbScope scope) => _inner.LoadWallet(scope);
-            public int GrantGold(DbScope scope, int amount) => _inner.GrantGold(scope, amount);
-            public bool TrySpendGold(DbScope scope, int amount) => _inner.TrySpendGold(scope, amount);
-            public void GrantLuckyStar(DbScope scope, int amount) => _inner.GrantLuckyStar(scope, amount);
-            public bool TrySpendLuckyStar(DbScope scope, int amount) => _inner.TrySpendLuckyStar(scope, amount);
-            public CharacterItemListSnapshot LoadSnapshot(DbScope scope) => _inner.LoadSnapshot(scope);
-        }
     }
 }

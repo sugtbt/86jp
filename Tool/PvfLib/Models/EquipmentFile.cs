@@ -95,6 +95,7 @@ namespace PvfLib
         public int PartSetIndex { get; set; } = -1;
         public int OutputIndex { get; set; } = -1;
         public int[] ForceResultItemRule { get; set; }
+        public int ClearAvatar { get; set; }
         
         public string UsableJob { get; set; }
         public string ImpossibleContents { get; set; }
@@ -185,6 +186,7 @@ namespace PvfLib
                     case "part set index": equ.PartSetIndex = ParseInt(data); break;
                     case "output index": equ.OutputIndex = ParseInt(data); break;
                     case "force result item rule": equ.ForceResultItemRule = ParseIntArray(data); break;
+                    case "clear avatar": equ.ClearAvatar = ParseInt(data); break;
                     case "usable job": equ.UsableJob = StripBacktick(data); break;
                     case "impossible contents":
                         equ.ImpossibleContents = data;

@@ -1,4 +1,5 @@
 using System;
+using DfoServer.Infrastructure;
 using DfoServer.GameWorld;
 using PvfLib;
 
@@ -178,6 +179,39 @@ namespace DfoServer.Game.ItemUpgrade
         public static int GetAmplificationRateByRarity(int rarity)
         {
             return GetIndexedInt(AmplifyItemConfig.Value.AmplificationRatesByRarity, rarity, 0);
+        }
+
+        public static bool TryRollInitialAmplifyOption(out AmplifyOptionType optionType)
+        {
+            optionType = AmplifyOptionType.None;
+            var options = AmplifyItemConfig.Value.OptionData;
+            if (options == null || options.Count == 0)
+                return false;
+
+            var totalWeight = 0d;
+            foreach (var option in options)
+            {
+                if (option != null && option.CumulativeWeight > totalWeight)
+                    totalWeight = option.CumulativeWeight;
+            }
+
+            if (totalWeight <= 0)
+                return false;
+
+            var roll = ServerRandom.Next(1_000_000) * totalWeight / 1_000_000d;
+            foreach (var option in options)
+            {
+                if (option == null)
+                    continue;
+
+                if (roll < option.CumulativeWeight)
+                {
+                    optionType = option.OptionType;
+                    return optionType != AmplifyOptionType.None;
+                }
+            }
+
+            return false;
         }
 
         public static int GetAmplifyEquipLevelConst()

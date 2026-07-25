@@ -8,72 +8,91 @@ namespace DfoServer.Game.Dungeon
     {
         internal TowerOfDespairGrantedReward(
             ClearRewardGenerator.CardReward reward,
+            InventoryListType listType,
             short slot)
         {
             Reward = reward;
+            ListType = listType;
             Slot = slot;
         }
 
         internal ClearRewardGenerator.CardReward Reward { get; }
+        internal InventoryListType ListType { get; }
         internal short Slot { get; }
     }
 
     internal sealed class TowerOfDespairRewardGrantService
     {
-        private readonly IAssetService _assetService;
-
-        internal TowerOfDespairRewardGrantService(IAssetService assetService)
-        {
-            _assetService = assetService
-                ?? throw new ArgumentNullException(nameof(assetService));
-        }
-
         internal IReadOnlyList<TowerOfDespairGrantedReward> Grant(
-            int characterId,
-            int accountId,
+            InventoryService inventory,
             IReadOnlyList<ClearRewardGenerator.CardReward> candidates)
         {
-            if (characterId <= 0 || candidates == null || candidates.Count == 0)
+            if (inventory == null
+                || candidates == null
+                || candidates.Count == 0)
                 return Array.Empty<TowerOfDespairGrantedReward>();
 
-            var granted =
-                new List<TowerOfDespairGrantedReward>(candidates.Count);
+            var requests =
+                new List<InventoryRewardGrantRequest>(candidates.Count);
+            foreach (var reward in candidates)
+            {
+                if (reward.IsGold
+                    || reward.ItemId <= 0
+                    || reward.StackCount <= 0)
+                {
+                    continue;
+                }
+
+                requests.Add(InventoryRewardGrantRequest.Create(
+                    reward.ItemId,
+                    reward.StackCount,
+                    ItemCreateReason.DungeonDrop));
+            }
+            if (requests.Count == 0)
+                return Array.Empty<TowerOfDespairGrantedReward>();
+
             try
             {
-                using (var scope = _assetService.OpenScope(
-                    characterId,
-                    accountId))
+                if (!InventoryRewardGrantService.TryGrantBatch(
+                        inventory,
+                        requests,
+                        out var batch)
+                    || !batch.Success
+                    || batch.Results.Count != requests.Count)
                 {
-                    foreach (var reward in candidates)
-                    {
-                        if (reward.IsGold
-                            || reward.ItemId <= 0
-                            || reward.StackCount <= 0
-                            || !_assetService.TryAddItem(
-                                scope,
-                                reward.ItemId,
-                                reward.StackCount,
-                                out var slot))
-                        {
-                            continue;
-                        }
-
-                        granted.Add(
-                            new TowerOfDespairGrantedReward(reward, slot));
-                    }
-
-                    scope.Commit();
+                    FileLogger.Log(
+                        $"[TowerOfDespair] reward batch rejected: " +
+                        $"cid={inventory.CharacterId} error={batch?.Error}");
+                    return Array.Empty<TowerOfDespairGrantedReward>();
                 }
+
+                var granted =
+                    new List<TowerOfDespairGrantedReward>(batch.Results.Count);
+                for (var index = 0; index < batch.Results.Count; index++)
+                {
+                    var result = batch.Results[index];
+                    if (!result.Success || result.SlotIndex < 0)
+                        continue;
+
+                    granted.Add(new TowerOfDespairGrantedReward(
+                        new ClearRewardGenerator.CardReward
+                        {
+                            ItemId = result.ItemTemplateId,
+                            StackCount = result.GrantedCount,
+                        },
+                        result.ListType,
+                        result.SlotIndex));
+                }
+
+                return granted;
             }
             catch (Exception ex)
             {
                 FileLogger.Log(
-                    $"[TowerOfDespair] reward grant rolled back: " +
-                    $"cid={characterId} error={ex.Message}");
+                    $"[TowerOfDespair] reward batch failed: " +
+                    $"cid={inventory.CharacterId} error={ex.Message}");
                 return Array.Empty<TowerOfDespairGrantedReward>();
             }
-
-            return granted;
         }
     }
 }

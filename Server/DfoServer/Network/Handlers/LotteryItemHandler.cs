@@ -1,3 +1,4 @@
+using DfoServer.Game.Inventory;
 using DfoServer.Game.Lottery;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
@@ -149,8 +150,15 @@ namespace DfoServer.Network.Handlers
             short slotIndex,
             out LotterySourceContext source)
         {
-            var (characterId, accountId) = SessionOwnerResolver.Resolve(session);
-            return _openService.CanOpen(characterId, accountId, slotIndex, out source);
+            var (characterId, _) = SessionOwnerResolver.Resolve(session);
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+            {
+                source = null;
+                return false;
+            }
+
+            lock (lease.SyncRoot)
+                return _openService.CanOpen(lease.Inventory, slotIndex, out source);
         }
 
         private async Task<bool> TryOpen(
@@ -160,22 +168,45 @@ namespace DfoServer.Network.Handlers
         {
             openPlan = openPlan ?? LotteryOpenPlan.ConfirmedRegular();
             var (characterId, accountId) = SessionOwnerResolver.Resolve(session);
-            if (!_openService.TryOpen(
-                    characterId,
-                    accountId,
-                    slotIndex,
-                    openPlan.UseDoubleReward,
-                    out var result))
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+                return false;
+
+            LotteryOpenResult result;
+            lock (lease.SyncRoot)
+            {
+                if (!_openService.TryOpen(
+                        lease.Inventory,
+                        slotIndex,
+                        openPlan.UseDoubleReward,
+                        RejectingInventoryOverflowRewardSink.Instance,
+                        out result))
+                    return false;
+            }
+
+            if (result == null)
             {
                 return false;
             }
 
-            await _responses.SendOpenResult(session, characterId, accountId, result);
+            await _responses.SendOpenResult(session, lease.Inventory, result);
             if (openPlan.RefreshPremiumAfterOpen)
                 await _responses.SendPremiumServiceRefresh(session, characterId, accountId);
 
             FileLogger.Log($"[{ProtocolName}] USE_LOTTERY_ITEM: source=0x{result.SourceItemTemplateId:X8} slot={result.SourceSlotIndex} remaining={result.SourceRemainingStackCount} gold={result.ConsumedGold}->{result.UpdatedGold} mode={openPlan.Mode} double={result.UsedDoubleReward} rewards={string.Join(",", result.Rewards.Select(reward => $"{reward.ListType}:0x{reward.ItemTemplateId:X8}x{reward.GrantedCount}@{reward.SlotIndex}"))}");
             return true;
+        }
+
+        private static bool TryGetOwnedInventoryLease(
+            EnhancedClientSession session,
+            int characterId,
+            out InventoryLease lease)
+        {
+            lease = null;
+            return session != null
+                && session.SessionId != Guid.Empty
+                && characterId > 0
+                && InventoryContext.TryGetLease(characterId, out lease)
+                && lease.IsOwnedBy(session.SessionId);
         }
 
         private static Task SendPhaseStart(EnhancedClientSession session)

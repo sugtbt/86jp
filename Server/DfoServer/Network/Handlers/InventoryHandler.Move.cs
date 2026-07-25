@@ -1,16 +1,15 @@
 using DfoServer.Game.Inventory;
 using DfoServer.Game.ItemUpgrade;
-using DfoServer.Game.SelectCharacter;
 using DfoServer.Network.Builders;
-using DfoServer.Network.Handlers.Pets;
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers
 {
     public sealed partial class InventoryHandler
     {
-        internal const string CharmQuickSlotLimitNoticeMessage = "快捷栏最多只能放置1个符咒。";
+        internal const string CharmQuickSlotLimitNoticeMessage = "\u5FEB\u6377\u680F\u6700\u591A\u53EA\u80FD\u653E\u7F6E1\u4E2A\u7B26\u5492\u3002";
 
         public async Task Handle_ENUM_CMDPACKET_MOVE_ITEMSPACE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
@@ -18,10 +17,7 @@ namespace DfoServer.Network.Handlers
             {
                 if (body != null && body.Length >= 4)
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013,
-                        MoveItemSpaceAckBuilder.BuildError(
-                            MoveItemSpaceAckBuilder.InvalidOperationErrorCode,
-                            body[0],
-                            body.Length > 11 ? body[11] : body[0])));
+                        MoveItemSpaceAckBuilder.BuildError(0x04, body[0], body.Length > 11 ? body[11] : body[0])));
                 return;
             }
 
@@ -42,72 +38,98 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log($"[{ProtocolName}] MOVE raw({body.Length}B): {BitConverter.ToString(body)}");
             FileLogger.Log($"[{ProtocolName}] MOVE fields: src=({request.SourceListType},slot{request.SourceSlotIndex},IV=0x{srcIV:X8},stk{srcStack}) dst=({request.DestinationListType},slot{request.DestinationSlotIndex},IV=0x{request.DestinationInstanceValue:X8},stk{dstStack})");
 
-            var (cid, aid) = ResolveOwner(session);
-            var petRuntimeMove = PetInventoryMoveCoordinator.Begin(session, request);
-
-            if (!_inventoryStore.TryMoveItem(cid, aid, request, out var result))
+            var (cid, _) = ResolveOwner(session);
+            if (!InventoryContext.TryGetLease(cid, out var lease) || !lease.IsOwnedBy(session.SessionId))
             {
-                if (result?.FailureReason == InventoryMoveFailureReason.CharmCarryLimit)
+                FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: ONLINE_INVENTORY_MISSING characterId={cid} session={session?.SessionId}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013,
+                    MoveItemSpaceAckBuilder.BuildError(0x04, (byte)request.SourceListType, (byte)request.DestinationListType)));
+                return;
+            }
+
+            InventoryMoveServiceResult moveResult;
+            bool moveOk;
+            lock (lease.SyncRoot)
+                moveOk = InventoryMoveService.TryMove(lease.Inventory, request, out moveResult);
+
+            if (!moveOk)
+            {
+                if (moveResult != null && moveResult.Error == InventoryMoveServiceError.ClientEcho)
                 {
-                    // 0x04 是“仓库空间不足”，符咒快捷栏上限使用通用移动失败响应。
+                    FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: CLIENT_ECHO ack-error src=({request.SourceListType},{request.SourceSlotIndex}) dst=({request.DestinationListType},{request.DestinationSlotIndex})");
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013,
-                        MoveItemSpaceAckBuilder.BuildError(
-                            MoveItemSpaceAckBuilder.InvalidOperationErrorCode,
-                            (byte)request.SourceListType,
-                            (byte)request.DestinationListType)));
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        (ushort)NotiPacketType.SERVER_NOTICE_MESSAGE,
-                        ServerNoticeMessageBuilder.Build(CharmQuickSlotLimitNoticeMessage)));
-                    FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: CHARM_LIMIT src=({request.SourceListType},{request.SourceSlotIndex}) dst=({request.DestinationListType},{request.DestinationSlotIndex})");
+                        MoveItemSpaceAckBuilder.BuildError(0x02, (byte)request.SourceListType, (byte)request.DestinationListType)));
                     return;
                 }
 
-                FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: FAILED src=({request.SourceListType},{request.SourceSlotIndex}) dst=({request.DestinationListType},{request.DestinationSlotIndex})");
+                FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: FAILED src=({request.SourceListType},{request.SourceSlotIndex}) dst=({request.DestinationListType},{request.DestinationSlotIndex}) error={moveResult?.Error} insertError={moveResult?.InsertError}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013,
-                    MoveItemSpaceAckBuilder.BuildError(
-                        MoveItemSpaceAckBuilder.InvalidOperationErrorCode,
-                        (byte)request.SourceListType,
-                        (byte)request.DestinationListType)));
+                    MoveItemSpaceAckBuilder.BuildError(MapMoveErrorCode(moveResult), (byte)request.SourceListType, (byte)request.DestinationListType)));
                 return;
             }
 
-            if (result.AckError)
-            {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013,
-                    MoveItemSpaceAckBuilder.BuildError(
-                        MoveItemSpaceAckBuilder.InvalidOperationErrorCode,
-                        (byte)request.SourceListType,
-                        (byte)request.DestinationListType)));
-                FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: ReverseError -> ERROR ACK (撤销反转包, 不卡住)");
-                return;
-            }
+            var ackResult = CreateMoveAckResult(request, moveResult);
+            FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: OK src=({ackResult.SourceListType},{ackResult.SourceSlotIndex}) dst=({ackResult.DestinationListType},{ackResult.DestinationSlotIndex}) moveVal={ackResult.MoveValue32}");
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013, MoveItemSpaceAckBuilder.Build(ackResult)));
+            await SendMoveSortLockSignals(session, lease, moveResult);
 
-            ApplySubtype0TailMutation(session, result.Subtype0TailMutation);
-
-            FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: OK src=({result.SourceListType},{result.SourceSlotIndex}) dst=({result.DestinationListType},{result.DestinationSlotIndex}) moveVal={result.MoveValue32}");
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013, MoveItemSpaceAckBuilder.Build(result)));
-            await SendMoveSortLockSignals(session, request, result);
-
-            await PetInventoryMoveCoordinator.CompleteAsync(session, result, petRuntimeMove, _refresh);
-
-            // In dungeon, weapon/title moves rely on the normal move ACK only; NOTI2 appearance rebuilds the pet actor.
-            if (!PetInventoryMoveCoordinator.HandlesDefaultAppearanceRefresh(result)
-                && ShouldSendSubtype0AppearanceUpdate(session, result))
-            {
-                // 先重载宠物字段再发 subtype0: 宠物ID不变时客户端只做原地更新,
-                // 不会重建宠物或重置技能冷却, 因此副本内也可以安全发送。
-                _refresh.ReloadSubtype0Tail(session);
+            if (ShouldSendSubtype0AppearanceUpdate(session, moveResult))
                 await _refresh.SendNoti2AppearanceUpdate(session);
+        }
+
+        private static InventoryMoveResult CreateMoveAckResult(InventoryMoveRequest request, InventoryMoveServiceResult result)
+        {
+            return new InventoryMoveResult
+            {
+                SourceListType = request.SourceListType,
+                SourceSlotIndex = request.SourceSlotIndex,
+                MoveValue32 = result != null && result.Mutated ? result.MoveCount : 0,
+                DestinationListType = result != null ? result.DestinationListType : request.DestinationListType,
+                DestinationSlotIndex = result != null ? result.DestinationSlotIndex : request.DestinationSlotIndex,
+                Mutated = result != null && result.Mutated,
+            };
+        }
+
+        private static byte MapMoveErrorCode(InventoryMoveServiceResult result)
+        {
+            if (result == null)
+                return 0x04;
+
+            switch (result.Error)
+            {
+                case InventoryMoveServiceError.InvalidDestinationSlot:
+                case InventoryMoveServiceError.DestinationRejected:
+                case InventoryMoveServiceError.CannotStack:
+                case InventoryMoveServiceError.CannotSplitSameSpaceStack:
+                case InventoryMoveServiceError.CannotSwap:
+                    return 0x02;
+                default:
+                    return 0x04;
             }
         }
 
-        private static bool ShouldSendSubtype0AppearanceUpdate(EnhancedClientSession session, InventoryMoveResult result)
+        private static bool ShouldSendSubtype0AppearanceUpdate(EnhancedClientSession session, InventoryMoveServiceResult result)
         {
-            return result != null
-                && result.Mutated
-                && !ShouldUseDungeonEquipmentOnlyRefresh(session, result.AffectedEquipmentSlot)
-                && IsAppearanceEquipmentSlot(result.AffectedEquipmentSlot);
+            if (result == null || !result.Mutated || result.Changes == null)
+                return false;
+
+            foreach (var change in result.Changes.Slots)
+            {
+                if (ShouldSendSubtype0AppearanceUpdateForSlot(session, change.ListType, change.SlotIndex))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool ShouldSendSubtype0AppearanceUpdateForSlot(
+            EnhancedClientSession session,
+            InventoryListType listType,
+            short slotIndex)
+        {
+            return listType == InventoryListType.Equipment
+                && !ShouldUseDungeonEquipmentOnlyRefresh(session, slotIndex)
+                && IsAppearanceEquipmentSlot(slotIndex);
         }
 
         private static bool ShouldUseDungeonEquipmentOnlyRefresh(EnhancedClientSession session, short slot)
@@ -119,37 +141,11 @@ namespace DfoServer.Network.Handlers
 
         private static bool IsAppearanceEquipmentSlot(short slot)
         {
-            // 客户端收到移动应答后不会自行更新外观, 这些槽位变动必须跟发 subtype0:
+            // 客户端收到移动应答后不会自行刷新外观，这些槽位变化必须跟发 subtype0。
             // 装扮0-10、武器11、称号12、宠物24、名称装饰卡28。
             return (slot >= (short)EquipmentType.HatAvatar && slot <= (short)EquipmentType.TitleName)
                 || slot == (short)EquipmentType.Creature
                 || slot == (short)EquipmentType.NameTag;
-        }
-
-        private static void ApplySubtype0TailMutation(EnhancedClientSession session, Subtype0TailMoveMutation mutation)
-        {
-            if (session?.Player == null || mutation == null)
-                return;
-
-            var tail = session.Player.Subtype0Tail ?? new UserInfoMinimumTailSnapshot();
-
-            if (mutation.ForgingChanged)
-                tail.Forging = mutation.Forging;
-
-            if (mutation.NameTagChanged)
-            {
-                tail.NameTagItemId = mutation.NameTagItemId;
-                tail.NameTagExpireTime = mutation.NameTagExpireTime;
-            }
-
-            if (mutation.EquippedCreatureChanged)
-            {
-                tail.EquippedCreatureItemId = mutation.EquippedCreatureItemId;
-                tail.EquippedCreatureNameBytes = mutation.EquippedCreatureNameBytes ?? Array.Empty<byte>();
-                tail.EquippedCreatureAliveState = mutation.EquippedCreatureAliveState;
-            }
-
-            session.Player.Subtype0Tail = tail;
         }
 
         public async Task Handle_ENUM_CMDPACKET_SORT_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -162,11 +158,18 @@ namespace DfoServer.Network.Handlers
             byte condition = body.Length > 2 ? body[2] : (byte)0;
             FileLogger.Log($"[{ProtocolName}] SORT_ITEM raw({body.Length}B): {BitConverter.ToString(body)}  listType={listType} category={category} condition={condition}(ignored)");
 
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
             try
             {
-                var ok = _inventoryStore.TrySortItems(cid, aid, listType, category);
-                FileLogger.Log($"[{ProtocolName}] SORT: TrySortItems({listType}, cat={category})={ok}");
+                if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+                    return;
+
+                InventorySortServiceResult sortResult;
+                bool ok;
+                lock (lease.SyncRoot)
+                    ok = InventorySortService.TrySort(lease.Inventory, listType, category, out sortResult);
+
+                FileLogger.Log($"[{ProtocolName}] SORT: InventorySortService.TrySort({listType}, cat={category})={ok} mutated={sortResult?.Mutated ?? false} affected={sortResult?.AffectedSlotCount ?? 0}");
                 if (!ok)
                     return;
 
@@ -189,9 +192,19 @@ namespace DfoServer.Network.Handlers
 
             var listType = (InventoryListType)body[0];
             var slotIndex = BitConverter.ToInt16(body, 1);
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
 
-            if (!_inventoryStore.TryToggleSortItemLock(cid, listType, slotIndex, out var entry))
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
+                return;
+
+            SortItemLockEntry entry;
+            lock (lease.SyncRoot)
+            {
+                if (!InventoryLockService.TryToggleSortItemLock(lease.Inventory, listType, slotIndex, out entry))
+                    return;
+            }
+
+            if (entry == null)
                 return;
 
             if (entry.State == 0)
@@ -210,12 +223,24 @@ namespace DfoServer.Network.Handlers
 
             var listType = (InventoryListType)body[0];
             var slotIndex = BitConverter.ToInt16(body, 1);
-            var (cid, aid) = ResolveOwner(session);
+            var (cid, _) = ResolveOwner(session);
 
-            if (!_inventoryStore.TryUnlockSortItemLock(cid, listType, slotIndex))
+            if (!TryGetOwnedInventoryLease(session, cid, out var lease))
                 return;
 
+            lock (lease.SyncRoot)
+                InventoryLockService.TryUnlockSortItemLock(lease.Inventory, listType, slotIndex);
+
             await SendSortItemUnlockAckAndRefresh(session, listType, slotIndex);
+        }
+
+        private static bool TryGetOwnedInventoryLease(EnhancedClientSession session, int characterId, out InventoryLease lease)
+        {
+            if (InventoryContext.TryGetLease(characterId, out lease) && lease.IsOwnedBy(session.SessionId))
+                return true;
+
+            FileLogger.Log($"[GameProtocol] inventory lease missing characterId={characterId} session={session?.SessionId}");
+            return false;
         }
 
         private async Task SendSortItemUnlockAckAndRefresh(EnhancedClientSession session, InventoryListType listType, short slotIndex)
@@ -224,33 +249,37 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x02CB, SortItemLockBuilder.BuildUnlock(notiListType, slotIndex)));
         }
 
-        private async Task SendMoveSortLockSignals(EnhancedClientSession session, InventoryMoveRequest request, InventoryMoveResult result)
+        private async Task SendMoveSortLockSignals(EnhancedClientSession session, InventoryLease lease, InventoryMoveServiceResult result)
         {
-            if (result == null || !result.Mutated)
+            if (lease == null || result == null || !result.Mutated || result.Changes == null || !result.Changes.HasChanges)
                 return;
 
-            var (cid, aid) = ResolveOwner(session);
-            await SendSortLockSignalIfSlotLocked(session, cid, aid, request.SourceListType, request.SourceSlotIndex);
-
-            if (request.SourceListType != request.DestinationListType
-                || request.SourceSlotIndex != request.DestinationSlotIndex)
-                await SendSortLockSignalIfSlotLocked(session, cid, aid, request.DestinationListType, request.DestinationSlotIndex);
-        }
-
-        private async Task SendSortLockSignalIfSlotLocked(EnhancedClientSession session, int characterId, int accountId, InventoryListType listType, short slotIndex)
-        {
-            if (!ShouldSendSortLockSignal(listType, slotIndex))
-                return;
-
-            if (!IsRefreshSlotSortLocked(characterId, accountId, listType, slotIndex))
-                return;
-
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x02CA, SortItemLockBuilder.BuildLock(new SortItemLockEntry
+            var lockedSlots = new List<SortItemLockEntry>();
+            lock (lease.SyncRoot)
             {
-                ListType = listType,
-                SlotIndex = slotIndex,
-                State = 1,
-            })));
+                foreach (var change in result.Changes.Slots)
+                {
+                    if (!ShouldSendSortLockSignal(change.ListType, change.SlotIndex))
+                        continue;
+
+                    var item = lease.Inventory.GetItem(change.ListType, change.SlotIndex);
+                    if (item == null || item.SortLockFlag != 1)
+                        continue;
+
+                    lockedSlots.Add(new SortItemLockEntry
+                    {
+                        ListType = InventoryRefreshSender.MapToSortLockListType(change.ListType),
+                        SlotIndex = change.SlotIndex,
+                        State = 1,
+                    });
+                }
+            }
+
+            foreach (var entry in lockedSlots)
+            {
+                FileLogger.Log($"[{ProtocolName}] MOVE sort-lock refresh: list={entry.ListType} slot={entry.SlotIndex}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x02CA, SortItemLockBuilder.BuildLock(entry)));
+            }
         }
 
         private static bool ShouldSendSortLockSignal(InventoryListType listType, short slotIndex)
@@ -259,41 +288,11 @@ namespace DfoServer.Network.Handlers
                 return false;
 
             if (listType == InventoryListType.Main
-                && slotIndex >= SqliteInventoryStore.QuickSlotStart
-                && slotIndex <= SqliteInventoryStore.QuickSlotEnd)
+                && slotIndex >= ItemSlotBoundService.MainQuickSlotStart
+                && slotIndex <= ItemSlotBoundService.MainQuickSlotEnd)
                 return false;
 
             return true;
-        }
-
-        private bool IsRefreshSlotSortLocked(int characterId, int accountId, InventoryListType listType, short slotIndex)
-        {
-            switch (listType)
-            {
-                case InventoryListType.Main:
-                case InventoryListType.PersonalCargo:
-                case InventoryListType.AccountCargo:
-                    var common = _inventoryStore.LoadCommonItemForRefresh(characterId, accountId, listType, slotIndex);
-                    return IsSortLockedTail(common?.TailData2F);
-
-                case InventoryListType.Avatar:
-                    var avatar = _inventoryStore.LoadAvatarItemForRefresh(characterId, slotIndex);
-                    return IsSortLockedTail(avatar?.TailData2F);
-
-                case InventoryListType.Pet:
-                    var pet = _inventoryStore.LoadPetItemForRefresh(characterId, slotIndex);
-                    return IsSortLockedTail(pet?.TailData2F);
-
-                default:
-                    return false;
-            }
-        }
-
-        private static bool IsSortLockedTail(byte[] tailData2F)
-        {
-            return tailData2F != null
-                && tailData2F.Length > 36
-                && tailData2F[36] == 1;
         }
     }
 }

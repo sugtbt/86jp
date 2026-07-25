@@ -108,15 +108,8 @@ namespace DfoServer.Game.Dungeon
 
         private static void AddDrop(List<DropInfo> drops, int itemId, ref ushort slotCounter)
         {
-            var meta = ItemMetadataResolver.Resolve(itemId);
             slotCounter++;
-            drops.Add(new DropInfo
-            {
-                SceneSlot = slotCounter,
-                TemplateId = (uint)itemId,
-                StackCount = 1,
-                Endurance = meta.Durability
-            });
+            drops.Add(DropInfo.CreateItem(slotCounter, itemId, 1));
         }
 
         private static void Load()

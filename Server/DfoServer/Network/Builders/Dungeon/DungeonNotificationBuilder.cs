@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 using DfoServer.GameWorld;
 using DfoServer.Network;
 
@@ -147,11 +148,11 @@ namespace DfoServer.Network.Builders
                 var e = extraEntries[i];
                 writer.WriteByte(e.ObjectIndex);     // +0  passive object index
                 writer.WriteUInt16(e.GlobalSeq);     // +1  global sequence
-                writer.WriteUInt32(e.ItemId);        // +3  item template id
-                writer.WriteUInt32(e.StackCount);    // +7  stack count
-                writer.WriteUInt16(e.Endurance);     // +11 endurance
-                writer.WriteByte(0);                 // +13 amplify type
-                writer.WriteUInt16(0);               // +14 amplify value
+                writer.WriteUInt32(ResolveTemplateId(e.Core, e.ItemId));        // +3  item template id
+                writer.WriteUInt32(ResolveDropValue(e.Core, e.StackCount));    // +7  value/count
+                writer.WriteUInt16(ResolveEndurance(e.Core, e.Endurance));     // +11 endurance
+                writer.WriteByte(e.Core != null ? e.Core.AmplifyType : (byte)0);                 // +13 amplify type
+                writer.WriteUInt16(e.Core != null ? e.Core.AmplifyValue : (ushort)0);               // +14 amplify value
                 writer.WriteUInt16(0);               // +16 extended
                 writer.WriteByte(0);                 // +18 extended
             }
@@ -216,16 +217,16 @@ namespace DfoServer.Network.Builders
             {
                 var d = drops[i];
                 w.WriteUInt16(d.SceneSlot);     // +0  sceneSlot
-                w.WriteUInt32(d.TemplateId);    // +2  templateId (0=gold)
-                w.WriteByte(d.UpgradeLevel);    // +6  upgradeLevel
-                w.WriteUInt32(d.StackCount);    // +7  stackCount
-                w.WriteUInt16(d.Endurance);     // +11 endurance
-                w.WriteUInt32(0);               // +13 sealFlag
-                w.WriteByte(0);                 // +17 refineLevel
-                w.WriteByte(0);                 // +18 separateSign
-                w.WriteUInt16(0);               // +19 amplifyAttr
-                w.WriteUInt32(0);               // +21 enchantCardId
-                w.WriteByte(0);                 // +25 socketCount
+                w.WriteUInt32(ResolveTemplateId(d.Core, d.TemplateId));    // +2  templateId (0=gold)
+                w.WriteByte(d.Core != null ? d.Core.Upgrade : d.UpgradeLevel);    // +6  upgradeLevel
+                w.WriteUInt32(ResolveDropValue(d.Core, d.StackCount));    // +7  value/count
+                w.WriteUInt16(ResolveEndurance(d.Core, d.Endurance));     // +11 endurance
+                w.WriteUInt32(0);               // +13 unknown32
+                w.WriteByte(d.Core != null ? d.Core.GenuineUpgrade : (byte)0);                 // +17 refineLevel
+                w.WriteByte(d.Core != null ? d.Core.AmplifyType : (byte)0);                 // +18 amplify type
+                w.WriteUInt16(d.Core != null ? d.Core.AmplifyValue : (ushort)0);               // +19 amplify value
+                w.WriteUInt32(d.Core != null ? unchecked((uint)d.Core.EnchantCardId) : 0);               // +21 enchantCardId
+                w.WriteByte(d.Core != null ? d.Core.EmblemSocketCount : (byte)0);                 // +25 socketCount
                 w.WriteUInt16(0);               // +26 extra16
                 w.WriteByte(0);                 // +28 listCount
                 w.WriteZeroBytes(8);            // +29 tailPadding (8B)
@@ -239,6 +240,27 @@ namespace DfoServer.Network.Builders
             w.WriteByte(0x00);
 
             return w.ToArray();
+        }
+
+        private static uint ResolveTemplateId(ItemCore core, uint fallback)
+        {
+            return core != null && core.ItemId > 0 ? (uint)core.ItemId : fallback;
+        }
+
+        private static uint ResolveDropValue(ItemCore core, uint fallbackStackCount)
+        {
+            if (core == null)
+                return fallbackStackCount;
+
+            if (!core.IsEquipmentItem())
+                return (uint)Math.Max(0, core.Count);
+
+            return unchecked((uint)core.Value);
+        }
+
+        private static ushort ResolveEndurance(ItemCore core, ushort fallback)
+        {
+            return core != null ? core.Durability : fallback;
         }
 
         public static byte[] BuildEnableClearDungeon()

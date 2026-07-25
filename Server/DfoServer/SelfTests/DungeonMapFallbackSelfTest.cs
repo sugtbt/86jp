@@ -199,6 +199,8 @@ namespace DfoServer.SelfTests
                 failures++;
             }
 
+            CheckTowerMirrorApcInfo(ref failures);
+
             try
             {
                 var floor15Start = DungeonData.GetDungeonMapMonsterSummaryInformation(
@@ -824,6 +826,164 @@ namespace DfoServer.SelfTests
         {
             Console.WriteLine($"[{(ok ? "OK" : "FAIL")}] {name}");
             if (!ok) failures++;
+        }
+
+        private static void CheckTowerMirrorApcInfo(ref int failures)
+        {
+            var expectedAppearance = new[]
+            {
+                510000, 510001, 510002, 510003, 510004,
+                510005, 510006, 510007, 510008, 510009,
+                511011,
+            };
+            var appearanceEntries =
+                new Game.Characters.CharacterAppearanceEntry[12];
+            for (byte slot = 0; slot < 10; slot++)
+            {
+                appearanceEntries[slot] =
+                    new Game.Characters.CharacterAppearanceEntry(
+                        slot,
+                        expectedAppearance[slot],
+                        4,
+                        Array.Empty<byte>(),
+                        0,
+                        0,
+                        0,
+                        0);
+            }
+            appearanceEntries[10] =
+                new Game.Characters.CharacterAppearanceEntry(
+                    10,
+                    599999,
+                    4,
+                    Array.Empty<byte>(),
+                    0,
+                    0,
+                    0,
+                    0);
+            appearanceEntries[11] =
+                new Game.Characters.CharacterAppearanceEntry(
+                    11,
+                    expectedAppearance[10],
+                    4,
+                    Array.Empty<byte>(),
+                    0,
+                    0,
+                    0,
+                    0);
+
+            var creatureName = new[]
+            {
+                (byte)'m', (byte)'i', (byte)'r',
+                (byte)'r', (byte)'o', (byte)'r',
+            };
+            const uint creatureItemId = 512345;
+            var player = new Game.Session.PlayerContext
+            {
+                Name = new[]
+                {
+                    (byte)'f', (byte)'l', (byte)'o',
+                    (byte)'o', (byte)'r', (byte)'1', (byte)'0',
+                },
+                Level = 86,
+                Job = 0,
+                GrowType = 1,
+                AppearanceEntries = appearanceEntries,
+                Subtype0Tail =
+                    new Game.SelectCharacter.UserInfoMinimumTailSnapshot
+                    {
+                        EquippedCreatureNameBytes = creatureName,
+                        EquippedCreatureItemId = creatureItemId,
+                    },
+            };
+
+            var built = Network.Builders.TowerOfDespairApcInfoBuilder.TryBuild(
+                11017,
+                player,
+                out var baseLayer,
+                out var currentLayer);
+            Check("tower of despair floor 10 builds base and current player-mirror APC data",
+                built
+                && IsTowerApcInfoBody(
+                    baseLayer,
+                    player,
+                    0,
+                    expectedAppearance,
+                    creatureName,
+                    creatureItemId)
+                && IsTowerApcInfoBody(
+                    currentLayer,
+                    player,
+                    10,
+                    expectedAppearance,
+                    creatureName,
+                    creatureItemId),
+                ref failures);
+        }
+
+        private static bool IsTowerApcInfoBody(
+            byte[] body,
+            Game.Session.PlayerContext player,
+            byte expectedLayer,
+            IReadOnlyList<int> expectedAppearance,
+            byte[] expectedCreatureName,
+            uint expectedCreatureItemId)
+        {
+            var name = player?.Name ?? Array.Empty<byte>();
+            expectedCreatureName = expectedCreatureName ?? Array.Empty<byte>();
+            if (body == null
+                || body.Length != 112 + name.Length + expectedCreatureName.Length
+                || body[0] != expectedLayer
+                || BitConverter.ToInt32(body, 1) != name.Length)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < name.Length; index++)
+            {
+                if (body[5 + index] != name[index])
+                    return false;
+            }
+
+            var offset = 5 + name.Length;
+            if (body[offset++] != player.Level
+                || body[offset++] != player.Job
+                || body[offset++] != player.GrowType)
+            {
+                return false;
+            }
+
+            var guildNameLength = BitConverter.ToInt32(body, offset);
+            offset += 4;
+            if (guildNameLength != 0 || BitConverter.ToInt32(body, offset) != 0)
+                return false;
+            offset += 4;
+
+            for (var index = 0; index < 22; index++)
+            {
+                var expectedItemId = index < expectedAppearance.Count
+                    ? expectedAppearance[index]
+                    : 0;
+                if (BitConverter.ToInt32(body, offset) != expectedItemId)
+                    return false;
+                offset += 4;
+            }
+
+            if (BitConverter.ToInt32(body, offset)
+                != expectedCreatureName.Length)
+            {
+                return false;
+            }
+            offset += 4;
+            for (var index = 0; index < expectedCreatureName.Length; index++)
+            {
+                if (body[offset + index] != expectedCreatureName[index])
+                    return false;
+            }
+
+            offset += expectedCreatureName.Length;
+            return BitConverter.ToUInt32(body, offset)
+                == expectedCreatureItemId;
         }
 
         private static void CheckSuitableLevelEligibility(ref int failures)

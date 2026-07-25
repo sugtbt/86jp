@@ -1,3 +1,6 @@
+using System;
+using DfoServer.Game.Inventory;
+
 namespace DfoServer.Game.Dungeon
 {
     public struct DropInfo
@@ -7,13 +10,72 @@ namespace DfoServer.Game.Dungeon
         public uint StackCount;
         public ushort Endurance;
         public byte UpgradeLevel;
+        internal ItemCore Core;
         public bool IsPlayerDropped;
-        public Inventory.DungeonInventoryDropPayload InventoryPayload;
 
         public bool IsGold => TemplateId == 0;
 
-        public uint PacketValue => InventoryPayload?.PacketItem != null
-            ? unchecked((uint)InventoryPayload.PacketItem.CountOrInstanceValue)
-            : StackCount;
+        public uint PacketValue
+        {
+            get
+            {
+                if (Core == null)
+                    return StackCount;
+
+                return InventoryStackRuleService.IsStackable(Core)
+                    ? StackCount
+                    : unchecked((uint)Core.Value);
+            }
+        }
+
+        internal static DropInfo CreateGold(ushort sceneSlot, int goldAmount)
+        {
+            return new DropInfo
+            {
+                SceneSlot = sceneSlot,
+                TemplateId = 0,
+                StackCount = (uint)Math.Max(0, goldAmount),
+            };
+        }
+
+        internal static DropInfo CreateItem(ushort sceneSlot, int itemId, int count)
+        {
+            var safeCount = Math.Max(1, count);
+            var drop = new DropInfo
+            {
+                SceneSlot = sceneSlot,
+                TemplateId = (uint)Math.Max(0, itemId),
+                StackCount = (uint)safeCount,
+            };
+
+            if (itemId <= 0)
+                return drop;
+
+            if (InventoryRewardGrantService.TryCreateOnly(
+                    itemId,
+                    ItemCreateReason.DungeonDrop,
+                    safeCount,
+                    out var created)
+                && created != null
+                && created.Core != null)
+            {
+                drop.Core = created.Core.Copy();
+                drop.TemplateId = (uint)drop.Core.ItemId;
+                drop.Endurance = drop.Core.Durability;
+                drop.UpgradeLevel = drop.Core.Upgrade;
+                return drop;
+            }
+
+            try
+            {
+                var metadata = ItemMetadataResolver.Resolve(itemId);
+                drop.Endurance = metadata != null ? metadata.Durability : (ushort)0;
+            }
+            catch
+            {
+            }
+
+            return drop;
+        }
     }
 }

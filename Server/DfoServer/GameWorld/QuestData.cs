@@ -750,17 +750,21 @@ namespace DfoServer.GameWorld
                 {
                     var fixedRewards = ParseItemPairs(
                         qst.RewardIntData, playerJob, playerGrowType, preserveGoldMarker: true);
+                    bool hasGoldMarker = false;
                     foreach (var fr in fixedRewards)
                     {
                         if (fr.ItemId == 0)
                         {
-                            gold = param.ComputeGoldReward(playerLevel, questMinLevel, qst.GoldMultiple, ignoreLevel);
+                            hasGoldMarker = true;
                         }
                         else
                         {
                             items.Add(fr);
                         }
                     }
+
+                    if (hasGoldMarker || qst.GoldMultiple > 0)
+                        gold = param.ComputeGoldReward(playerLevel, questMinLevel, qst.GoldMultiple, ignoreLevel);
 
                     if (rewardSelectIdx >= 0)
                     {

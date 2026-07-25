@@ -1,5 +1,6 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
+using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Premium;
@@ -12,6 +13,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Data.Sqlite;
 using DungeonData = DfoServer.GameWorld.Dungeon;
 
 namespace DfoServer.Network.Handlers.Dungeon
@@ -120,7 +122,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 paidGold = ClearRewardGenerator.GenerateGoldCard(
                     dungeonLevel, run.Difficulty, lcg);
-                paidItem = ClearRewardGenerator.GenerateItemCard(
+                paidItem = ClearRewardGenerator.GenerateEquipmentCard(
                     dungeonLevel, run.Difficulty, lcg);
             }
             run.CardRewards = shouldScheduleCardRewardFlow
@@ -163,9 +165,8 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             var clearTimeMilliseconds = (uint)Math.Max(0, clearTimeMs);
             var towerRewards = isTowerOfDespair
-                ? _svc.TowerOfDespairRewards.Grant(
-                    session.Player.CharacterId,
-                    session.Account?.AccountId ?? 0,
+                ? GrantTowerOfDespairRewards(
+                    session,
                     towerRewardCandidates)
                 : Array.Empty<TowerOfDespairGrantedReward>();
             if (towerRewards.Count > 0)
@@ -361,19 +362,61 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             try
             {
-                await _svc.InventoryRefresh.SendUpdateItemList(
-                    session,
-                    InventoryListType.Main,
-                    granted.Select(reward => reward.Slot));
+                foreach (var group in granted.GroupBy(
+                             reward => reward.ListType))
+                {
+                    await _svc.InventoryRefresh.SendUpdateItemList(
+                        session,
+                        group.Key,
+                        group.Select(reward => reward.Slot));
+                }
             }
             catch (Exception ex)
             {
-                // The rewards are already committed. A refresh failure must not
+                // The rewards are already applied. A refresh failure must not
                 // suppress TOD_CLEAR_REWARD or abort the remaining settlement flow.
                 FileLogger.Log(
                     $"[TowerOfDespair] inventory refresh failed after reward grant: " +
                     $"cid={session.Player.CharacterId} error={ex.Message}");
             }
+        }
+
+        private IReadOnlyList<TowerOfDespairGrantedReward>
+            GrantTowerOfDespairRewards(
+                EnhancedClientSession session,
+                IReadOnlyList<ClearRewardGenerator.CardReward> candidates)
+        {
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (characterId <= 0
+                || !InventoryContext.TryGetLease(
+                    characterId,
+                    out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"TOD_CLEAR_REWARD: online inventory missing " +
+                    $"cid={characterId}");
+                return Array.Empty<TowerOfDespairGrantedReward>();
+            }
+
+            IReadOnlyList<TowerOfDespairGrantedReward> granted;
+            lock (lease.SyncRoot)
+            {
+                granted = _svc.TowerOfDespairRewards.Grant(
+                    lease.Inventory,
+                    candidates);
+            }
+            if (granted.Count > 0
+                && !InventoryPersistenceService.SaveDirty(lease))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"TOD_CLEAR_REWARD: SaveDirty failed " +
+                    $"cid={characterId}");
+            }
+
+            return granted;
         }
 
         private static bool ShouldGeneratePaidCardRewards(int dungeonId)
@@ -841,17 +884,22 @@ namespace DfoServer.Network.Handlers.Dungeon
             ushort luckyStar;
             try
             {
-                using (var scope = _svc.AssetService.OpenScope(characterId, accountId))
+                using (var connection = new SqliteConnection(_svc.ConnectionString))
                 {
-                    var wallet = _svc.AssetService.LoadWallet(scope);
-                    if (wallet.LuckyStar >= RentalCatalogCodec.MaxLuckyStar)
+                    connection.Open();
+                    using (var transaction = connection.BeginTransaction())
                     {
-                        FileLogger.Log($"[DungeonHandler] SUITABLE_LUCKY_STAR skipped: cap reached char={characterId} dungeon={run.DungeonId} level={clearLevel}");
-                        return;
+                        var wallet = CurrencyService.LoadWallet(connection, transaction, characterId);
+                        if (wallet.LuckyStar >= RentalCatalogCodec.MaxLuckyStar)
+                        {
+                            FileLogger.Log($"[DungeonHandler] SUITABLE_LUCKY_STAR skipped: cap reached char={characterId} dungeon={run.DungeonId} level={clearLevel}");
+                            return;
+                        }
+
+                        CurrencyService.GrantLuckyStar(connection, transaction, accountId, 1);
+                        luckyStar = (ushort)Math.Min(RentalCatalogCodec.MaxLuckyStar, wallet.LuckyStar + 1);
+                        transaction.Commit();
                     }
-                    _svc.AssetService.GrantLuckyStar(scope, 1);
-                    luckyStar = (ushort)Math.Min(RentalCatalogCodec.MaxLuckyStar, wallet.LuckyStar + 1);
-                    scope.Commit();
                 }
             }
             catch (Exception ex)

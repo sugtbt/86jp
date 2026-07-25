@@ -19,10 +19,13 @@ namespace DfoServer.Network.Handlers
 
         public async Task HandleShopCoinEvent(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
-            var (characterId, accountId) = InventoryHandler.ResolveOwner(session);
+            var (characterId, _) = InventoryHandler.ResolveOwner(session);
 
             short assignedSlot;
-            if (characterId <= 0 || !_reviveCoin.TryGrantDaily(characterId, accountId, out assignedSlot))
+            if (characterId <= 0
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId)
+                || !_reviveCoin.TryGrantDaily(lease, out assignedSlot))
             {
                 await SendAck(session, ok: false, grantCount: 0);
                 return;
