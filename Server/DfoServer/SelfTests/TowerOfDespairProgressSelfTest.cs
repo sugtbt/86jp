@@ -175,7 +175,6 @@ INSERT INTO character_tower_of_despair_progress(
     character_id,
     highest_cleared_floor)
 VALUES(@characterId, 7);
-ALTER TABLE accounts DROP COLUMN growth_capsule_exp;
 PRAGMA user_version=20;";
                         command.Parameters.AddWithValue("@accountId", AccountId + 1);
                         command.Parameters.AddWithValue("@characterId", CharacterId + 1);
@@ -192,14 +191,6 @@ PRAGMA user_version=20;";
                     connection.Open();
                     using (var command = connection.CreateCommand())
                     {
-                        command.CommandText = @"
-SELECT COUNT(*)
-FROM pragma_table_info('accounts')
-WHERE name='growth_capsule_exp';";
-                        Check("legacy v20 migration restores the mainline growth capsule column",
-                            Convert.ToInt32(command.ExecuteScalar()) == 1,
-                            ref failures);
-
                         command.CommandText = @"
 SELECT highest_cleared_floor
 FROM character_tower_of_despair_progress

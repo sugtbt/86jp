@@ -281,19 +281,28 @@ namespace DfoServer.Network.Builders
         public static byte[] BuildTowerOfDespairClearReward(
             uint clearTimeMilliseconds,
             int floor,
-            int itemId,
-            int itemCount)
+            IReadOnlyList<ClearRewardGenerator.CardReward> rewards)
         {
+            const int rewardSlotCount = 10;
             var writer = new GamePacketWriter();
             writer.WriteUInt32(clearTimeMilliseconds);
             writer.WriteUInt16((ushort)Math.Clamp(floor, 1, 100));
-
-            var hasItemReward = itemId > 0 && itemCount > 0;
-            writer.WriteByte(hasItemReward ? (byte)1 : (byte)0);
-            if (hasItemReward)
+            writer.WriteByte(rewardSlotCount);
+            for (var i = 0; i < rewardSlotCount; i++)
             {
-                writer.WriteUInt32((uint)itemId);
-                writer.WriteUInt32((uint)itemCount);
+                if (rewards != null
+                    && i < rewards.Count
+                    && rewards[i].ItemId > 0
+                    && rewards[i].StackCount > 0)
+                {
+                    writer.WriteInt32(rewards[i].ItemId);
+                    writer.WriteInt32(rewards[i].StackCount);
+                }
+                else
+                {
+                    writer.WriteInt32(-1);
+                    writer.WriteInt32(0);
+                }
             }
 
             return writer.ToArray();
