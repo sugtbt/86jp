@@ -59,6 +59,9 @@ namespace DfoServer.GameWorld
             // START_MAP 对象类型。0..3 为怪物，5..8 为 APC/AICharacter，9 为特殊被动对象路径。
             public byte Type { get; set; }
 
+            // 仅 APC/AICharacter 有值；保留 PVF 阵营供副本清房策略判断，不改变通用解析语义。
+            public ApcFaction? Faction { get; set; }
+
             public bool IsBlocking { get; set; }
 
             // START_MAP 模板/波次字段。深渊隐藏行使用 map [hellparty] 的 order。
@@ -1442,6 +1445,7 @@ namespace DfoServer.GameWorld
                     Code = apc.Code,
                     Type = apcType,
                     Level = apcLevel,
+                    Faction = apc.Faction,
                     IsBlocking = IsBlockingAICharacter(apc),
                 });
             }

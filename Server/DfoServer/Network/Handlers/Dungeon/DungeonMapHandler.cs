@@ -294,6 +294,25 @@ namespace DfoServer.Network.Handlers.Dungeon
             } // end lock(run.SyncRoot)
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x001D, startMapBody));
+            if (TowerOfDespairApcInfoBuilder.TryBuild(
+                run.DungeonId,
+                session.Player,
+                out var towerBaseApcInfoBody,
+                out var towerCurrentApcInfoBody))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketType.USER_APC_INFO_TOD,
+                    towerBaseApcInfoBody));
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketType.USER_APC_INFO_TOD,
+                    towerCurrentApcInfoBody));
+                FileLogger.Log(
+                    $"[TowerOfDespair] base/current APC info sent after START_MAP: " +
+                    $"dungeon={run.DungeonId} layers=0,{towerCurrentApcInfoBody[0]} " +
+                    $"job={session.Player.Job} grow={session.Player.GrowType}");
+            }
             await SpecialDungeonNotifier.SendStartMapStateAsync(session);
 
             if (hellPartyMonsterInfoAfterStartMap != null && hellPartyMonsterInfoAfterStartMap.Count > 0)

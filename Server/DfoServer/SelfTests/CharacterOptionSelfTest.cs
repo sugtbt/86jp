@@ -309,7 +309,7 @@ PRAGMA user_version = 27;";
                     DfoServer.Sqlite.SqliteMigrations.Apply(conn);
                     cmd.CommandText = @"
 SELECT CASE WHEN
-    (SELECT user_version FROM pragma_user_version) = 28
+    (SELECT user_version FROM pragma_user_version) >= 28
     AND (SELECT COUNT(*) FROM character_subtype0_fields WHERE
         (character_id = 8201001 AND mood_value = 9 AND emotion_index = 0 AND action_byte = 0)
         OR (character_id = 8201002 AND mood_value = 7 AND emotion_index = 9 AND action_byte = 2)) = 2

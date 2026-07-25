@@ -313,7 +313,7 @@ namespace DfoServer.Network.Handlers
             try
             {
                 character.Subtype0Tail = _subtype0Repository.Load(character.CharacterId);
-                character.Appearance = Game.Appearance.AppearanceService.LoadCharacterAppearanceFromDb(character.CharacterId);
+                character.Appearance = Game.Appearance.AppearanceService.LoadCharacterAppearanceFromDb(character);
                 _honorLevel.ApplyToCharacterRecord(character, honorLevel);
 
                 var writer = new GamePacketWriter();

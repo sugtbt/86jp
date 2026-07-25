@@ -261,7 +261,11 @@ namespace DfoServer.Game.SelectCharacter
             if (characterRecord != null)
             {
                 // 选角初始化 USERINFO 同样必须使用当前穿戴栏重建外观，避免 characters.appearance_blob在新建角色或换装后滞留为空/旧值，导致城镇模型和选人/副本显示不一致。
-                characterRecord.Appearance = Game.Appearance.AppearanceService.LoadOnlineAppearanceFromInventory(characterId);
+                characterRecord.Appearance = Game.Appearance.AppearanceService.LoadOnlineAppearanceFromInventory(
+                    characterId,
+                    characterRecord.Job,
+                    characterRecord.GrowType,
+                    knightShieldDeck);
             }
 
             var accountCharacters = _characterRepository?.ListByAccount(accountId);

@@ -1567,6 +1567,123 @@ namespace DfoServer.Game.Inventory
             };
         }
 
+        internal static bool TryResetItemQuality(
+            InventoryService inventory,
+            ResetItemQualityRequest request,
+            out ResetItemQualityResult result)
+        {
+            result = CreateResetQualityErrorResult(request, ResetItemQualityResult.ErrorInvalidRequest);
+            if (inventory == null
+                || request == null
+                || request.TargetSlotIndex < 0
+                || request.MaterialSlotIndex < 0
+                || request.TargetSlotIndex == request.MaterialSlotIndex
+                || request.TargetItemTemplateId <= 0)
+            {
+                return false;
+            }
+
+            var target = inventory.GetItem(InventoryListType.Main, request.TargetSlotIndex);
+            if (target == null
+                || target.ItemId != request.TargetItemTemplateId
+                || target.ItemKind != ItemCore.KindEquipment)
+            {
+                result = CreateResetQualityErrorResult(request, ResetItemQualityResult.ErrorInvalidTarget);
+                return false;
+            }
+
+            if (IsItemLocked(inventory, target))
+            {
+                result = CreateResetQualityErrorResult(request, ResetItemQualityResult.ErrorLocked);
+                return false;
+            }
+
+            // 材料必须是可堆叠道具(非装备/时装/宠物); 具体是否为品级调整箱交给 policy resolver 按 PVF 裁决。
+            var material = inventory.GetItem(InventoryListType.Main, request.MaterialSlotIndex);
+            if (material == null
+                || material.Count <= 0
+                || material.ItemKind == ItemCore.KindUnknown
+                || material.ItemKind == ItemCore.KindEquipment
+                || material.ItemKind == ItemCore.KindCreature
+                || material.ItemKind == ItemCore.KindAvatar)
+            {
+                result = CreateResetQualityErrorResult(request, ResetItemQualityResult.ErrorInvalidMaterial);
+                return false;
+            }
+
+            if (!ItemMetadataResolver.TryLoadStackableFile(material.ItemId, out var stackable)
+                || !ResetItemQualityPolicyResolver.TryResolve(material.ItemId, stackable, out var policy))
+            {
+                result = CreateResetQualityErrorResult(request, ResetItemQualityResult.ErrorInvalidMaterial);
+                return false;
+            }
+
+            var metadata = ItemMetadataResolver.Resolve(target.ItemId);
+            var equipmentType = metadata != null
+                ? EquipmentTypeInfo.ParseOrUnknown(metadata.EquipmentType)
+                : EquipmentType.Unknown;
+            if (metadata == null || !policy.Allows(equipmentType))
+            {
+                result = CreateResetQualityErrorResult(request, ResetItemQualityResult.ErrorUnsupported);
+                return false;
+            }
+
+            var oldQualitySeed = target.Value;
+            var newQualitySeed = policy.Mode == ResetItemQualityMode.Highest
+                ? unchecked((int)ItemQuality.TopQualitySeed)
+                : RollRandomQualitySeed(oldQualitySeed);
+
+            var updatedTarget = target.Copy();
+            updatedTarget.Value = newQualitySeed;
+
+            if (!inventory.SetItem(InventoryListType.Main, request.TargetSlotIndex, updatedTarget))
+                return false;
+
+            if (!InventoryDeleteService.TryDecreaseStack(
+                    inventory,
+                    InventoryListType.Main,
+                    request.MaterialSlotIndex,
+                    1,
+                    out var delete))
+            {
+                result = CreateResetQualityErrorResult(request, ResetItemQualityResult.ErrorInvalidMaterial);
+                return false;
+            }
+
+            result = new ResetItemQualityResult
+            {
+                Request = request,
+                ErrorCode = 0,
+                Mode = policy.Mode,
+                TargetSlotIndex = request.TargetSlotIndex,
+                TargetItemTemplateId = request.TargetItemTemplateId,
+                MaterialSlotIndex = request.MaterialSlotIndex,
+                MaterialItemTemplateId = material.ItemId,
+                MaterialRemainingCount = delete.RemainingCount,
+                OldQualitySeed = oldQualitySeed,
+                NewQualitySeed = newQualitySeed,
+            };
+            return true;
+        }
+
+        private static int RollRandomQualitySeed(int currentQualitySeed)
+        {
+            var topQualitySeed = unchecked((int)ItemQuality.TopQualitySeed);
+            var qualitySeed = ServerRandom.Next(1, topQualitySeed);
+            if (qualitySeed == currentQualitySeed)
+                qualitySeed = qualitySeed + 1 < topQualitySeed ? qualitySeed + 1 : qualitySeed - 1;
+            return qualitySeed;
+        }
+
+        private static ResetItemQualityResult CreateResetQualityErrorResult(ResetItemQualityRequest request, byte errorCode)
+        {
+            return new ResetItemQualityResult
+            {
+                Request = request,
+                ErrorCode = errorCode,
+            };
+        }
+
         private sealed class EquipmentEffectTargetCandidate
         {
             public InventoryListType ListType { get; set; }

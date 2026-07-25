@@ -34,9 +34,9 @@ namespace DfoServer.Network.Handlers
 
         public async Task SendNoti2AppearanceUpdate(EnhancedClientSession session)
         {
-            var (cid, aid) = SessionOwnerResolver.Resolve(session);
             var noti2Body = AppearanceService.UpdateAndBroadcast(
-                session.Player, _dataSource, _characterRepository, cid, aid);
+                session.Player,
+                _characterRepository);
             FileLogger.Log($"[{ProtocolName}] NOTI 2 appearance update: {session.Player.AppearanceEntries.Length} entries, body={noti2Body.Length}B");
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0002, noti2Body));
         }

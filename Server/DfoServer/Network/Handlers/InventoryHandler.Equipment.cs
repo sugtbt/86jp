@@ -11,6 +11,62 @@ namespace DfoServer.Network.Handlers
 {
     public sealed partial class InventoryHandler
     {
+        public async Task Handle_ENCHANT_3RD_CHRONICLE_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        {
+            // The 86 client dispatches the refine result on the request opcode.
+            // 0x0173 is the response used by the older 70 protocol table.
+            var responseType = header.type;
+            if (!ChronicleRefineRequest.TryParse(body, out var request))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, responseType,
+                    ChronicleRefineAckBuilder.BuildError(ChronicleRefineResult.ErrorInvalidMaterial)));
+                return;
+            }
+
+            var (cid, _) = ResolveOwner(session);
+            var command = request.ToCommand(session.Player?.Job ?? 0, session.Player?.GrowType ?? 0);
+            FileLogger.Log($"[{ProtocolName}] ENCHANT_3RD_CHRONICLE_ITEM material=({request.MaterialSlotIndex},0x{request.MaterialItemTemplateId:X8}) target=({request.TargetSlotIndex},0x{request.TargetItemTemplateId:X8}) option={request.OptionNo} job={command.CharacterJob} grow={command.FirstGrowType} pad=0x{request.MaterialPadding:X2}");
+
+            ChronicleRefineResult result;
+            bool ok;
+            InventoryLease lease = null;
+            if (TryGetOwnedInventoryLease(session, cid, out lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = ChronicleRefineService.TryRefine(lease.Inventory, command, out result);
+            }
+            else
+            {
+                ok = false;
+                result = ChronicleRefineResult.Error(command, ChronicleRefineResult.ErrorInvalidMaterial);
+            }
+
+            if (!ok)
+            {
+                var errorCode = result != null ? result.ErrorCode : ChronicleRefineResult.ErrorInvalidMaterial;
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, responseType,
+                    ChronicleRefineAckBuilder.BuildError(errorCode)));
+                FileLogger.Log($"[{ProtocolName}] ENCHANT_3RD_CHRONICLE_ITEM: FAILED error=0x{errorCode:X2}");
+                return;
+            }
+
+            if (lease != null && !InventoryPersistenceService.SaveDirty(lease))
+                FileLogger.Log($"[{ProtocolName}] ENCHANT_3RD_CHRONICLE_ITEM: persistence failed cid={cid}");
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, responseType,
+                ChronicleRefineAckBuilder.BuildSuccess(result)));
+            await _refresh.SendUpdateItemList(session, InventoryListType.Main,
+                new[] { result.Command.TargetSlotIndex, result.Command.MaterialSlotIndex });
+            foreach (var reward in result.FailureRewards)
+            {
+                if (reward.SlotIndex != result.Command.TargetSlotIndex
+                    && reward.SlotIndex != result.Command.MaterialSlotIndex)
+                    await _refresh.SendUpdateItemList(session, InventoryListType.Main, reward.SlotIndex);
+            }
+
+            FileLogger.Log($"[{ProtocolName}] ENCHANT_3RD_CHRONICLE_ITEM: OK target={result.Command.TargetSlotIndex} option={result.Command.OptionNo} success={result.RefineSucceeded} destroyed={result.TargetDestroyed} probability={result.SuccessProbability} roll={result.ProbabilityRoll} count={result.OptionCount} materialLeft={result.MaterialRemainingStackCount} rewards={result.FailureRewards.Count}");
+        }
+
         public async Task Handle_ENUM_CMDPACKET_ENCHANT_BY_BEAD(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             if (!EnchantByBeadRequest.TryParse(body, out var request))

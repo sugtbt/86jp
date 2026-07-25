@@ -2,6 +2,7 @@ using DfoServer.Game.Characters;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.ItemUpgrade;
+using DfoServer.Game.KnightShield;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -19,26 +20,32 @@ namespace DfoServer.Game.Appearance
 
         public static byte[] UpdateAndBroadcast(
             PlayerContext player,
-            SqliteSelectCharacterDataSource dataSource,
-            ICharacterRepository characterRepository,
-            int characterId, int accountId)
+            ICharacterRepository characterRepository)
         {
-            var updated = LoadOnlineAppearanceFromInventory(characterId);
+            var updated = LoadOnlineAppearanceFromInventory(
+                player.CharacterId,
+                player.Job,
+                player.GrowType);
 
             player.AppearanceEntries = updated;
-            characterRepository.UpdateAppearance(characterId, updated);
+            characterRepository.UpdateAppearance(player.CharacterId, updated);
 
             return BuildNoti2Body(player);
         }
 
         public static byte[] RefreshPlayerAppearance(
             PlayerContext player,
-            ICharacterRepository characterRepository)
+            ICharacterRepository characterRepository,
+            KnightShieldDeckSnapshot knightShieldDeck)
         {
             if (player == null)
                 return Array.Empty<byte>();
 
-            var updated = LoadOnlineAppearanceFromInventory(player.CharacterId);
+            var updated = LoadOnlineAppearanceFromInventory(
+                player.CharacterId,
+                player.Job,
+                player.GrowType,
+                knightShieldDeck);
             player.AppearanceEntries = updated;
             if (characterRepository != null && player.CharacterId > 0)
                 characterRepository.UpdateAppearance(player.CharacterId, updated);
@@ -56,7 +63,10 @@ namespace DfoServer.Game.Appearance
             var tail = player.Subtype0Tail ?? new UserInfoMinimumTailSnapshot();
             tail.CloneTitleItemId = (uint)(cloneTitleItemId > 0 ? cloneTitleItemId : 0);
             player.Subtype0Tail = tail;
-            var updated = LoadOnlineAppearanceFromInventory(characterId);
+            var updated = LoadOnlineAppearanceFromInventory(
+                characterId,
+                player.Job,
+                player.GrowType);
 
             player.AppearanceEntries = updated;
             characterRepository.UpdateAppearance(characterId, updated);
@@ -80,7 +90,10 @@ namespace DfoServer.Game.Appearance
                 var tail = player.Subtype0Tail ?? new UserInfoMinimumTailSnapshot();
                 tail.CloneTitleItemId = (uint)(cloneTitleItemId > 0 ? cloneTitleItemId : 0);
                 player.Subtype0Tail = tail;
-                player.AppearanceEntries = LoadOnlineAppearanceFromInventory(player.CharacterId);
+                player.AppearanceEntries = LoadOnlineAppearanceFromInventory(
+                    player.CharacterId,
+                    player.Job,
+                    player.GrowType);
             }
 
             return BuildNoti2Body(player);
@@ -94,26 +107,33 @@ namespace DfoServer.Game.Appearance
             return ack;
         }
 
-        public static CharacterAppearanceEntry[] LoadAppearanceFromEquipEntries(int characterId)
-        {
-            return LoadOnlineAppearanceFromInventory(characterId);
-        }
-
-        public static CharacterAppearanceEntry[] LoadOnlineAppearanceFromInventory(int characterId)
+        public static CharacterAppearanceEntry[] LoadOnlineAppearanceFromInventory(
+            int characterId,
+            byte job,
+            int growType,
+            KnightShieldDeckSnapshot knightShieldDeck = null)
         {
             var projectionBuilder = new Noti2InventoryProjectionBuilder();
+            CharacterAppearanceEntry[] entries;
             if (InventoryContext.TryGetLease(characterId, out var lease))
             {
                 lock (lease.SyncRoot)
-                    return projectionBuilder.BuildAppearanceEntries(lease.Inventory);
+                    entries = projectionBuilder.BuildAppearanceEntries(lease.Inventory);
+
+                return ApplyKnightShieldAppearance(
+                    entries,
+                    characterId,
+                    job,
+                    growType,
+                    knightShieldDeck);
             }
 
             return Array.Empty<CharacterAppearanceEntry>();
         }
 
-        public static CharacterAppearanceEntry[] LoadCharacterAppearanceFromDb(int characterId)
+        public static CharacterAppearanceEntry[] LoadCharacterAppearanceFromDb(CharacterRecord character)
         {
-            if (characterId <= 0)
+            if (character == null || character.CharacterId <= 0)
                 return Array.Empty<CharacterAppearanceEntry>();
 
             var connectionString = SqliteDatabaseBootstrap.Initialize(
@@ -122,18 +142,34 @@ namespace DfoServer.Game.Appearance
             using (var connection = new SqliteConnection(connectionString))
             {
                 connection.Open();
-                var equippedItems = InventoryItemRepository.LoadEquippedItems(connection, characterId);
-                var avatarDetails = AvatarDetailRepository.LoadForCharacter(connection, characterId);
-                return new Noti2InventoryProjectionBuilder()
-                    .BuildAppearanceEntries(equippedItems, avatarDetails);
+                var equippedItems = InventoryItemRepository.LoadEquippedItems(connection, character.CharacterId);
+                var avatarDetails = AvatarDetailRepository.LoadForCharacter(connection, character.CharacterId);
+                var projectionBuilder = new Noti2InventoryProjectionBuilder();
+                var entries = projectionBuilder.BuildAppearanceEntries(equippedItems, avatarDetails);
+                KnightShieldDeckSnapshot deck = null;
+                if (KnightShieldDataProvider.IsEligibleCharacter(character.Job))
+                {
+                    deck = KnightShieldDeckRepository
+                        .FromConnectionString(connectionString)
+                        .Load(character.CharacterId);
+                }
+                return ApplyKnightShieldAppearance(
+                    entries,
+                    character.CharacterId,
+                    character.Job,
+                    character.GrowType,
+                    deck);
             }
         }
 
-        public static Dictionary<int, CharacterAppearanceEntry[]> LoadRosterAppearancesFromDb(int accountId)
+        public static Dictionary<int, CharacterAppearanceEntry[]> LoadRosterAppearancesFromDb(
+            int accountId,
+            IReadOnlyList<CharacterRecord> characters)
         {
             var result = new Dictionary<int, CharacterAppearanceEntry[]>();
             if (accountId <= 0)
                 return result;
+            characters = characters ?? Array.Empty<CharacterRecord>();
 
             var connectionString = SqliteDatabaseBootstrap.Initialize(
                 ServerPaths.DatabasePath,
@@ -159,11 +195,45 @@ namespace DfoServer.Game.Appearance
                 }
 
                 var projectionBuilder = new Noti2InventoryProjectionBuilder();
-                foreach (var pair in grouped)
-                    result[pair.Key] = projectionBuilder.BuildAppearanceEntries(pair.Value, avatarDetails);
+                var knightShieldRepository = KnightShieldDeckRepository.FromConnectionString(connectionString);
+                foreach (var character in characters)
+                {
+                    if (character == null || character.CharacterId <= 0)
+                        continue;
+
+                    grouped.TryGetValue(character.CharacterId, out var characterItems);
+                    var entries = characterItems != null
+                        ? projectionBuilder.BuildAppearanceEntries(characterItems, avatarDetails)
+                        : Array.Empty<CharacterAppearanceEntry>();
+                    var deck = KnightShieldDataProvider.IsEligibleCharacter(character.Job)
+                        ? knightShieldRepository.Load(character.CharacterId)
+                        : null;
+                    result[character.CharacterId] = ApplyKnightShieldAppearance(
+                        entries,
+                        character.CharacterId,
+                        character.Job,
+                        character.GrowType,
+                        deck);
+                }
             }
 
             return result;
+        }
+
+        private static CharacterAppearanceEntry[] ApplyKnightShieldAppearance(
+            CharacterAppearanceEntry[] entries,
+            int characterId,
+            byte job,
+            int growType,
+            KnightShieldDeckSnapshot knightShieldDeck)
+        {
+            if (!KnightShieldDataProvider.IsEligibleCharacter(job))
+                return entries ?? Array.Empty<CharacterAppearanceEntry>();
+
+            var deck = knightShieldDeck
+                ?? new KnightShieldDeckRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath)
+                    .Load(characterId);
+            return KnightShieldAppearanceSynchronizer.Apply(entries, job, growType, deck);
         }
 
         internal static CharacterAppearanceEntry[] BuildFromEquippedEntries(

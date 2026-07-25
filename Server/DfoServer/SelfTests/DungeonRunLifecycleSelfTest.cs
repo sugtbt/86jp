@@ -1,10 +1,15 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Net.Sockets;
 using System.Reflection;
+using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Handlers.Dungeon;
+using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
 {
@@ -56,6 +61,7 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             CheckTowerSettlementPolicy(ref failures);
+            CheckTowerRewardGrantPersistence(ref failures);
             // 3. BeginRun 建立新局
             DungeonRunLifecycle.BeginRun(session, 1002, 1);
             var run = player.CurrentRun;
@@ -249,13 +255,102 @@ namespace DfoServer.SelfTests
                     (bool)paidPolicy.Invoke(null, new object[] { 1002 }), ref failures);
             }
 
+            var cardFlowPolicy = typeof(DungeonSettlementHandler).GetMethod(
+                "ShouldScheduleCardRewardFlow",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Check("tower settlement exposes the standard card-flow policy",
+                cardFlowPolicy != null, ref failures);
+            if (cardFlowPolicy != null)
+            {
+                Check("tower of despair skips the delayed card layout and auto-flip",
+                    !(bool)cardFlowPolicy.Invoke(null, new object[] { 11008 }), ref failures);
+                Check("ordinary dungeons retain delayed card layout and auto-flip",
+                    (bool)cardFlowPolicy.Invoke(null, new object[] { 1002 }), ref failures);
+            }
+
+            var rewardFactory = typeof(DungeonSettlementHandler).GetMethod(
+                "BuildTowerOfDespairRewardCandidates",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[]
+                {
+                    typeof(int),
+                    typeof(Func<ClearRewardGenerator.CardReward>)
+                },
+                null);
+            Check("tower settlement exposes the original ten-slot reward policy",
+                rewardFactory != null, ref failures);
+            if (rewardFactory != null)
+            {
+                var nextItemId = 2600000;
+                var randomFactoryCallCount = 0;
+                Func<ClearRewardGenerator.CardReward> randomReward = () =>
+                    {
+                        randomFactoryCallCount++;
+                        return new ClearRewardGenerator.CardReward
+                        {
+                            ItemId = ++nextItemId,
+                            StackCount = 1,
+                        };
+                    };
+                var floor16 = (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(null, new object[] { 16, randomReward });
+                var floor16FactoryCalls = randomFactoryCallCount;
+                randomFactoryCallCount = 0;
+                var floor10 = (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(null, new object[] { 10, randomReward });
+                var floor10FactoryCalls = randomFactoryCallCount;
+                randomFactoryCallCount = 0;
+                var floor100 = (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(null, new object[] { 100, randomReward });
+                var floor100FactoryCalls = randomFactoryCallCount;
+
+                Check("ordinary despair floor rolls five item rewards",
+                    floor16FactoryCalls == 5
+                    && floor16.Count == 5,
+                    ref failures);
+                Check("player-mirror despair floor rolls nine items plus the synthesizer",
+                    floor10FactoryCalls == 9
+                    && floor10.Count == 10
+                    && floor10[9].ItemId == 1252
+                    && floor10[9].StackCount == 1,
+                    ref failures);
+                Check("floor 100 rolls five items plus the completion medal",
+                    floor100FactoryCalls == 5
+                    && floor100.Count == 6
+                    && floor100[5].ItemId == 3314
+                    && floor100[5].StackCount == 1,
+                    ref failures);
+
+                var fallbackFactoryCalls = 0;
+                Func<ClearRewardGenerator.CardReward> goldFallback = () =>
+                {
+                    fallbackFactoryCalls++;
+                    return new ClearRewardGenerator.CardReward
+                    {
+                        IsGold = true,
+                        GoldAmount = 123,
+                    };
+                };
+                var fallbackRewards =
+                    (IReadOnlyList<ClearRewardGenerator.CardReward>)
+                    rewardFactory.Invoke(
+                        null,
+                        new object[] { 16, goldFallback });
+                Check("invalid item fallbacks remain empty instead of becoming gold",
+                    fallbackFactoryCalls == 5
+                    && fallbackRewards.Count == 0,
+                    ref failures);
+            }
+
             var builder = typeof(DungeonSettlementHandler).GetMethod(
                 "TryBuildTowerOfDespairClearRewardWithTime",
                 BindingFlags.Static | BindingFlags.NonPublic,
                 null,
                 new[]
                 {
-                    typeof(int), typeof(uint), typeof(int), typeof(int),
+                    typeof(int), typeof(uint),
+                    typeof(IReadOnlyList<ClearRewardGenerator.CardReward>),
                     typeof(byte[]).MakeByRefType()
                 },
                 null);
@@ -264,20 +359,193 @@ namespace DfoServer.SelfTests
             if (builder == null)
                 return;
 
-            const int rewardItemId = 2600001;
-            var args = new object[] { 11013, 15750u, rewardItemId, 1, null };
+            var rewards = new List<ClearRewardGenerator.CardReward>();
+            for (var i = 0; i < 5; i++)
+            {
+                rewards.Add(new ClearRewardGenerator.CardReward
+                {
+                    ItemId = 2600001 + i,
+                    StackCount = i + 1,
+                });
+            }
+            var args = new object[] { 11013, 15750u, rewards, null };
             var built = (bool)builder.Invoke(null, args);
-            var body = args[4] as byte[];
-            Check("tower clear packet matches the client 015C wire layout",
+            var body = args[3] as byte[];
+            Check("tower clear packet keeps the original fixed ten-slot wire layout",
                 built
                 && body != null
-                && body.Length == 15
+                && body.Length == 87
                 && BitConverter.ToUInt32(body, 0) == 15750u
                 && BitConverter.ToUInt16(body, 4) == 6
-                && body[6] == 1
-                && BitConverter.ToUInt32(body, 7) == rewardItemId
-                && BitConverter.ToUInt32(body, 11) == 1u,
+                && body[6] == 10
+                && BitConverter.ToInt32(body, 7) == 2600001
+                && BitConverter.ToInt32(body, 11) == 1
+                && BitConverter.ToInt32(body, 39) == 2600005
+                && BitConverter.ToInt32(body, 43) == 5
+                && BitConverter.ToInt32(body, 47) == -1
+                && BitConverter.ToInt32(body, 51) == 0
+                && BitConverter.ToInt32(body, 79) == -1
+                && BitConverter.ToInt32(body, 83) == 0,
                 ref failures);
+        }
+
+        private static void CheckTowerRewardGrantPersistence(ref int failures)
+        {
+            const int accountId = 970021;
+            const int characterId = 970121;
+            const int synthesizerItemId = 1252;
+            const int completionMedalItemId = 3314;
+            var tempDb = Path.Combine(
+                Path.GetTempPath(),
+                $"tower-of-despair-reward-{Guid.NewGuid():N}.db");
+            try
+            {
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    tempDb,
+                    ServerPaths.SchemaFilePath);
+                SeedTowerRewardOwners(
+                    connectionString,
+                    new[] { (accountId, characterId) });
+                InventoryService inventory;
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    inventory = InventoryService.LoadFromDb(
+                        connection,
+                        characterId,
+                        accountId);
+                }
+
+                var lease = new InventoryLease(
+                    Guid.NewGuid(),
+                    characterId,
+                    inventory,
+                    version: 1);
+                var candidates = new List<ClearRewardGenerator.CardReward>
+                {
+                    new ClearRewardGenerator.CardReward
+                    {
+                        ItemId = synthesizerItemId,
+                        StackCount = 1,
+                    },
+                    new ClearRewardGenerator.CardReward
+                    {
+                        ItemId = completionMedalItemId,
+                        StackCount = 1,
+                    },
+                };
+
+                var service = new TowerOfDespairRewardGrantService();
+                var successful = service.Grant(inventory, candidates);
+                Check("tower reward grant uses the online inventory batch and reports actual changed slots",
+                    successful.Count == 2
+                    && successful[0].Reward.ItemId == synthesizerItemId
+                    && successful[1].Reward.ItemId == completionMedalItemId
+                    && successful[0].ListType == InventoryListType.Main
+                    && successful[0].Slot >= InventoryService.MainSlotStart
+                    && successful[1].ListType == InventoryListType.Main
+                    && successful[1].Slot >= InventoryService.MainSlotStart
+                    && inventory.CountMainItem(synthesizerItemId) == 1
+                    && inventory.CountMainItem(completionMedalItemId) == 1,
+                    ref failures);
+
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        InventoryPersistenceService.SaveDirtyInTransaction(
+                            connection,
+                            transaction,
+                            lease);
+                        transaction.Commit();
+                    }
+                }
+                inventory.ClearDirtyState();
+
+                InventoryService reloaded;
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    reloaded = InventoryService.LoadFromDb(
+                        connection,
+                        characterId,
+                        accountId);
+                }
+                Check("tower reward online-inventory mutations persist through the shared inventory persistence path",
+                    reloaded.CountMainItem(synthesizerItemId) == 1
+                    && reloaded.CountMainItem(completionMedalItemId) == 1,
+                    ref failures);
+
+                var rejectedInventory = new InventoryService(
+                    characterId + 1,
+                    accountId + 1);
+                var rejected = service.Grant(
+                    rejectedInventory,
+                    new[]
+                    {
+                        candidates[0],
+                        new ClearRewardGenerator.CardReward
+                        {
+                            ItemId = int.MaxValue,
+                            StackCount = 1,
+                        },
+                    });
+                Check("unsupported tower reward rejects the whole planned batch without partial inventory mutation",
+                    rejected.Count == 0
+                    && rejectedInventory.CountMainItem(synthesizerItemId) == 0,
+                    ref failures);
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                DeleteTempDatabase(tempDb);
+            }
+        }
+
+        private static void SeedTowerRewardOwners(
+            string connectionString,
+            IReadOnlyList<(int AccountId, int CharacterId)> owners)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                foreach (var owner in owners)
+                {
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+INSERT OR IGNORE INTO accounts (account_id, m_id, password_hash)
+VALUES (@aid, @memberId, '');
+
+INSERT OR IGNORE INTO characters (character_id, account_id, name)
+VALUES (@cid, @aid, @name);";
+                        command.Parameters.AddWithValue("@aid", owner.AccountId);
+                        command.Parameters.AddWithValue(
+                            "@memberId",
+                            $"tower-reward-{owner.AccountId}");
+                        command.Parameters.AddWithValue("@cid", owner.CharacterId);
+                        command.Parameters.AddWithValue(
+                            "@name",
+                            $"tower-reward-{owner.CharacterId}");
+                        command.ExecuteNonQuery();
+                    }
+                }
+            }
+        }
+
+        private static void DeleteTempDatabase(string databasePath)
+        {
+            foreach (var path in new[]
+            {
+                databasePath,
+                databasePath + "-wal",
+                databasePath + "-shm",
+            })
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
         }
 
         private static void Check(string name, bool ok, ref int failures)
