@@ -545,6 +545,88 @@ namespace DfoServer.SelfTests
                 "TimeCrack without related quest uses explicit Boss candidate pool",
                 normalSelectionsValid,
                 ref failures);
+
+            var bartholosisTargets =
+                GameWorld.QuestData.GetSeekingMonsterRewardTargets(1900);
+            Check(
+                "Bartholosis quest parses its seeking-item source monster",
+                bartholosisTargets.Count == 1
+                    && bartholosisTargets[0].DungeonId == 154
+                    && bartholosisTargets[0].MonsterCode == 63517
+                    && bartholosisTargets[0].ItemId == 10089081,
+                ref failures);
+
+            var ancientHeartMaze =
+                GameWorld.Dungeon.GetDungeonMaze(154, 0);
+            var bartholosisBossMap =
+                SpecialDungeonRunCoordinator.ResolveSelectedBossMapId(
+                    dungeonId: 154,
+                    mazeIndex: 0,
+                    maze: ancientHeartMaze,
+                    bossPos: new[] { 4, 1 },
+                    activeQuests: new List<ActiveQuest>
+                    {
+                        new ActiveQuest
+                        {
+                            QuestId = 1900,
+                            TriggerValue = 1,
+                        },
+                    });
+            Check(
+                "Active Bartholosis quest fixes Ancient Heart Boss room",
+                bartholosisBossMap == 8213
+                    && GameWorld.DungeonMapResolver.MapContainsMonsterCode(
+                        bartholosisBossMap,
+                        63517),
+                ref failures);
+
+            var bartholosisWithGlobalSeekingQuest =
+                SpecialDungeonRunCoordinator.ResolveSelectedBossMapId(
+                    dungeonId: 154,
+                    mazeIndex: 0,
+                    maze: ancientHeartMaze,
+                    bossPos: new[] { 4, 1 },
+                    activeQuests: new List<ActiveQuest>
+                    {
+                        new ActiveQuest
+                        {
+                            QuestId = 446,
+                            TriggerValue = 44,
+                        },
+                        new ActiveQuest
+                        {
+                            QuestId = 1900,
+                            TriggerValue = 1,
+                        },
+                    });
+            Check(
+                "Bartholosis story target outranks achievement drop sources",
+                GameWorld.QuestData.IsAchievementQuest(446)
+                    && !GameWorld.QuestData.IsAchievementQuest(1900)
+                    && bartholosisWithGlobalSeekingQuest == 8213,
+                ref failures);
+
+            var ordinaryRun = new DungeonRun(154, 0)
+            {
+                MazeIndex = 0,
+            };
+            SpecialDungeonRunCoordinator.ConfigureSelection(
+                ordinaryRun,
+                ancientHeartMaze,
+                new[] { 4, 1 },
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        QuestId = 1900,
+                        TriggerValue = 1,
+                    },
+                });
+            Check(
+                "Ordinary dungeon selection applies quest-bound Boss override",
+                ordinaryRun.SpecialDungeon == null
+                    && ordinaryRun.SelectedBossMapId == 8213,
+                ref failures);
         }
 
         private static bool BytesEqual(byte[] actual, params byte[] expected)

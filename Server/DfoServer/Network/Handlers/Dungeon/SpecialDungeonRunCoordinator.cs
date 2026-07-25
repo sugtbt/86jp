@@ -62,6 +62,12 @@ namespace DfoServer.Network.Handlers.Dungeon
                 || TimeSpiralDungeonCoordinator.IsDungeon(run.DungeonId);
             run.MeltdownHelpusHostages.Clear();
             run.SpecialMinimapIconGroups = null;
+            run.SelectedBossMapId = ResolveSelectedBossMapId(
+                run.DungeonId,
+                run.MazeIndex,
+                maze,
+                bossPos,
+                activeQuests);
 
             var special = run.SpecialDungeon;
             if (special == null)
@@ -92,16 +98,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                     maze,
                     bossPos,
                     special);
-            }
-
-            if (special.Kind == SpecialDungeonKind.TimeCrack)
-            {
-                run.SelectedBossMapId = ResolveSelectedBossMapId(
-                    run.DungeonId,
-                    run.MazeIndex,
-                    maze,
-                    bossPos,
-                    activeQuests);
             }
 
             FileLogger.Log(
@@ -328,12 +324,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (candidateMapIds.Count == 0)
                 return -1;
 
-            var matchesByMap =
-                new Dictionary<int, List<(ActiveQuest Quest, GameWorld.HuntMonsterQuestTarget Target)>>();
+            var seekingScoresByMap = new Dictionary<int, int>();
+            var huntScoresByMap = new Dictionary<int, int>();
             foreach (var activeQuest in activeQuests)
             {
                 if (activeQuest == null || activeQuest.TriggerValue == 0)
                     continue;
+                if (GameWorld.QuestData.IsAchievementQuest(
+                        activeQuest.QuestId))
+                {
+                    continue;
+                }
 
                 foreach (var target in
                     GameWorld.QuestData.GetHuntMonsterTargets(activeQuest.QuestId))
@@ -361,37 +362,63 @@ namespace DfoServer.Network.Handlers.Dungeon
                             continue;
                         }
 
-                        if (!matchesByMap.TryGetValue(
-                            candidateMapId,
-                            out var matches))
+                        AddCandidateScore(huntScoresByMap, candidateMapId);
+                    }
+                }
+
+                foreach (var target in
+                    GameWorld.QuestData.GetSeekingMonsterRewardTargets(
+                        activeQuest.QuestId))
+                {
+                    // A global (-1) profession/material drop must not reroute a
+                    // dungeon Boss room. Only a quest source explicitly scoped
+                    // to this dungeon is authoritative for Boss selection.
+                    if (target.DungeonId != dungeonId)
+                        continue;
+
+                    foreach (var candidateMapId in candidateMapIds)
+                    {
+                        if (!GameWorld.DungeonMapResolver.MapContainsMonsterCode(
+                                candidateMapId,
+                                target.MonsterCode))
                         {
-                            matches =
-                                new List<(ActiveQuest, GameWorld.HuntMonsterQuestTarget)>();
-                            matchesByMap[candidateMapId] = matches;
+                            continue;
                         }
-                        matches.Add((activeQuest, target));
+
+                        AddCandidateScore(
+                            seekingScoresByMap,
+                            candidateMapId);
                     }
                 }
             }
 
+            // A seeking quest whose required item has an explicit source
+            // monster is otherwise impossible to complete, so it outranks
+            // incidental hunt targets from other active quests.
+            var scoresByMap = seekingScoresByMap.Count > 0
+                ? seekingScoresByMap
+                : huntScoresByMap;
+            var selectionMode = seekingScoresByMap.Count > 0
+                ? "scoped_seeking"
+                : "hunt";
             var bestScore = 0;
             var bestMapIds = new List<int>();
             foreach (var candidateMapId in candidateMapIds)
             {
-                if (!matchesByMap.TryGetValue(
+                if (!scoresByMap.TryGetValue(
                         candidateMapId,
-                        out var matches))
+                        out var score))
                 {
                     continue;
                 }
 
-                if (matches.Count > bestScore)
+                if (score > bestScore)
                 {
-                    bestScore = matches.Count;
+                    bestScore = score;
                     bestMapIds.Clear();
                     bestMapIds.Add(candidateMapId);
                 }
-                else if (matches.Count == bestScore)
+                else if (score == bestScore)
                 {
                     bestMapIds.Add(candidateMapId);
                 }
@@ -404,10 +431,18 @@ namespace DfoServer.Network.Handlers.Dungeon
                 ? bestMapIds[0]
                 : bestMapIds[ServerRandom.Next(bestMapIds.Count)];
             FileLogger.Log(
-                $"[SpecialDungeonModule] TIME_CRACK quest boss map: " +
+                $"[SpecialDungeonModule] quest-bound boss map: " +
                 $"dungeon={dungeonId} map={selectedMapId} " +
-                $"matches={matchesByMap[selectedMapId].Count}");
+                $"mode={selectionMode} matches={scoresByMap[selectedMapId]}");
             return selectedMapId;
+        }
+
+        private static void AddCandidateScore(
+            Dictionary<int, int> scoresByMap,
+            int candidateMapId)
+        {
+            scoresByMap.TryGetValue(candidateMapId, out var score);
+            scoresByMap[candidateMapId] = score + 1;
         }
 
         private static void AppendConditionActors(

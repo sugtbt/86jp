@@ -212,6 +212,13 @@ namespace DfoServer.GameWorld
             return NormalizeQuestTag(qst.RewardType) == "title";
         }
 
+        internal static bool IsAchievementQuest(int questId)
+        {
+            var qst = GetQuestFile(questId);
+            return qst != null
+                && NormalizeQuestTag(qst.Grade) == "achievement";
+        }
+
         // The client rebuilds these native character effects from the completed
         // quest id and the QST's [special reward status] block.
         internal static bool HasSpecialRewardStatus(int questId)
@@ -537,6 +544,39 @@ namespace DfoServer.GameWorld
                     RequiredCount = requiredCount,
                     ChannelIndex = offset / stride,
                 });
+            }
+
+            return result;
+        }
+
+        internal static List<MonsterRewardItemEntry>
+            GetSeekingMonsterRewardTargets(int questId)
+        {
+            var result = new List<MonsterRewardItemEntry>();
+            var qst = GetQuestFile(questId);
+            if (qst?.MonsterRewardItems == null
+                || qst.MonsterRewardItems.Count == 0)
+            {
+                return result;
+            }
+
+            var seekingItems = GetSeekingConsumeItems(questId);
+            if (seekingItems.Count == 0)
+                return result;
+
+            foreach (var entry in qst.MonsterRewardItems)
+            {
+                if (entry == null
+                    || entry.MonsterCode <= 0
+                    || entry.ItemId <= 0
+                    || !seekingItems.Exists(
+                        item => item.ItemId == entry.ItemId
+                            && item.Count > 0))
+                {
+                    continue;
+                }
+
+                result.Add(entry);
             }
 
             return result;
