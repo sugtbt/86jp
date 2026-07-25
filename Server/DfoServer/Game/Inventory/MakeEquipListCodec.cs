@@ -84,7 +84,7 @@ namespace DfoServer.Game.Inventory
         
         public struct ChronicleOptionFields
         {
-            public int OptionId;
+            public int OptionId; // Protocol field: canonical base aura item id, not skill id.
             public byte CharacJob;
             public byte FirstGrowType;
             public byte EquipmentType;

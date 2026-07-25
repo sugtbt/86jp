@@ -10,6 +10,7 @@ namespace DfoServer
         // 自测注册表: 新增自测在这里加一行, 单跑参数与 --selftest-all 都会覆盖到。
         private static readonly (string Arg, Func<int> Run)[] SelfTestRegistry =
         {
+            ("--selftest-chronicle-refine", SelfTests.ChronicleRefineSelfTest.Run),
             ("--selftest-avatar-compound", SelfTests.AvatarCompoundSelfTest.Run),
             ("--selftest-cerashop", SelfTests.CeraShopSelfTest.Run),
             ("--selftest-pet-consumable", SelfTests.PetConsumableSelfTest.Run),
@@ -224,6 +225,7 @@ namespace DfoServer
             try
             {
                 GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
+                Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();
                 Game.Mercenary.StrikerDefaultAvatarDataProvider.Warmup();
                 Console.WriteLine("OK");
