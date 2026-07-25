@@ -21,6 +21,8 @@ namespace DfoServer.Game.Inventory
 
         public short SlotIndex { get; set; }
 
+        public byte EquipmentLockId { get; set; }
+
         public int RemainingSeconds { get; set; }
     }
 }

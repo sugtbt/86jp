@@ -20,7 +20,6 @@ namespace DfoServer.Game.Quests
         private readonly ISessionPacketSender _sender;
         private readonly string _connStr;
         private readonly string _databasePath;
-        private readonly IAssetService _assetService;
         private readonly QuestService _service;
         private readonly SqliteCharacterRepository _characterRepository;
         private readonly SqliteCharacterProgressRepository _progressRepository;
@@ -28,13 +27,12 @@ namespace DfoServer.Game.Quests
         private readonly SqliteSubtype0FieldsRepository _subtype0Repository;
         private readonly GrowthCapsuleProgressRepository _growthCapsuleRepository;
 
-        public QuestManager(ISessionPacketSender sender, string connStr, IAssetService assetService)
+        public QuestManager(ISessionPacketSender sender, string connStr)
         {
             _sender = sender;
             _connStr = connStr;
             _databasePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connStr).DataSource;
-            _assetService = assetService;
-            _service = new QuestService(connStr, assetService);
+            _service = new QuestService(connStr);
             _characterRepository = new SqliteCharacterRepository(_databasePath, ServerPaths.SchemaFilePath);
             _progressRepository = SqliteCharacterProgressRepository.FromConnectionString(connStr);
             _honorLevel = new HonorLevelSyncService(
@@ -375,10 +373,9 @@ namespace DfoServer.Game.Quests
             int growType = character != null ? character.GrowType : -1;
 
             var clearedFlags = new QuestRepository(_connStr).LoadClearedFlags(cid);
-            var allowedCreatureKinds = SqliteInventoryStore.LoadEligiblePetCreatureEvolutionQuestKinds(
-                ServerPaths.DatabasePath,
-                ServerPaths.SchemaFilePath,
-                cid);
+            var allowedCreatureKinds = InventoryContext.TryGetLease(cid, out var lease)
+                ? PetCreatureEvolutionRuntimeService.LoadEligiblePetCreatureEvolutionQuestKinds(lease.Inventory)
+                : new HashSet<int>();
             await _sender.SendNotiAsync(
                 0x0015,
                 QuestListBodyBuilder.BuildBody(level, job, growType, clearedFlags, allowedCreatureKinds));

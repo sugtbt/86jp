@@ -3,8 +3,10 @@ using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Handlers;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -69,10 +71,12 @@ namespace DfoServer.Network.Handlers.Pets
 
             try
             {
-                var current = PetCreatureSatietyService.LoadEquippedCreatureSatiety(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId);
+                if (!TryGetInventoryLease(session, out var lease))
+                    return;
+
+                PetCreatureSatietyUpdate current;
+                lock (lease.SyncRoot)
+                    current = PetCreatureSatietyService.LoadEquippedCreatureSatiety(lease.Inventory);
                 SetSessionCreatureAliveState(session, current.CreatureKey > 0 && current.Before > 0 ? (byte)1 : (byte)0);
                 FileLogger.Log($"[{ProtocolName}] PetCreatureSatiety: begin dungeon source={source} cid={session.Player.CharacterId} dungeon={dungeonId} key={current.CreatureKey} satiety={current.Before} foodRate={current.FoodConsumeRatePercent}% multiplier={current.FoodConsumeMultiplier:0.###}");
                 ScheduleDungeonDeathCheck(session, $"{source}:begin", now);
@@ -164,10 +168,12 @@ namespace DfoServer.Network.Handlers.Pets
             session.Player.PetCreatureSatietyDungeonId = session.Player.CurrentRun.DungeonId;
             session.Player.PetCreatureLastDeathCreatureKey = 0;
 
-            var current = PetCreatureSatietyService.LoadEquippedCreatureSatiety(
-                ServerPaths.DatabasePath,
-                ServerPaths.SchemaFilePath,
-                session.Player.CharacterId);
+            if (!TryGetInventoryLease(session, out var lease))
+                return;
+
+            PetCreatureSatietyUpdate current;
+            lock (lease.SyncRoot)
+                current = PetCreatureSatietyService.LoadEquippedCreatureSatiety(lease.Inventory);
             if (current.CreatureKey <= 0)
             {
                 ClearDungeonAnchor(session);
@@ -220,10 +226,9 @@ namespace DfoServer.Network.Handlers.Pets
             }
 
             var characterId = session.Player?.CharacterId ?? 0;
-            var allowedCreatureKinds = SqliteInventoryStore.LoadEligiblePetCreatureEvolutionQuestKinds(
-                ServerPaths.DatabasePath,
-                ServerPaths.SchemaFilePath,
-                characterId);
+            var allowedCreatureKinds = TryGetInventoryLease(session, out var lease)
+                ? PetCreatureEvolutionRuntimeService.LoadEligiblePetCreatureEvolutionQuestKinds(lease.Inventory)
+                : new HashSet<int>();
             if (allowedCreatureKinds.Count == 0)
             {
                 FileLogger.Log($"[{ProtocolName}] VERIFY_CREATURE_QUEST skipped: equipped creature has no pending evolution quest cid={characterId}");
@@ -245,11 +250,13 @@ namespace DfoServer.Network.Handlers.Pets
             PetCreatureExperienceUpdate update;
             try
             {
-                update = PetCreatureExperienceService.ApplyDungeonClearExperience(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId,
-                    consumedFatigue);
+                if (!TryGetInventoryLease(session, out var lease))
+                    return;
+
+                lock (lease.SyncRoot)
+                    update = PetCreatureExperienceService.ApplyDungeonClearExperience(
+                        lease.Inventory,
+                        consumedFatigue);
             }
             catch (Exception ex)
             {
@@ -351,10 +358,14 @@ namespace DfoServer.Network.Handlers.Pets
             PetCreatureSatietyUpdate current;
             try
             {
-                current = PetCreatureSatietyService.LoadEquippedCreatureSatiety(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId);
+                if (!TryGetInventoryLease(session, out var lease))
+                {
+                    CancelDeathCheck(session);
+                    return;
+                }
+
+                lock (lease.SyncRoot)
+                    current = PetCreatureSatietyService.LoadEquippedCreatureSatiety(lease.Inventory);
             }
             catch (Exception ex)
             {
@@ -475,12 +486,15 @@ namespace DfoServer.Network.Handlers.Pets
 
             try
             {
-                var update = PetCreatureSatietyService.ApplyDungeonElapsed(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId,
-                    startUtc,
-                    now);
+                if (!TryGetInventoryLease(session, out var lease))
+                    return;
+
+                PetCreatureSatietyUpdate update;
+                lock (lease.SyncRoot)
+                    update = PetCreatureSatietyService.ApplyDungeonElapsed(
+                        lease.Inventory,
+                        startUtc,
+                        now);
                 SetSessionCreatureAliveState(session, update.CreatureKey > 0 && update.After > 0 ? (byte)1 : (byte)0);
 
                 FileLogger.Log($"[{ProtocolName}] PetCreatureSatiety: dungeon persist source={source} cid={session.Player.CharacterId} dungeon={dungeonId} key={update.CreatureKey} elapsed={update.ElapsedSeconds:0.0}s foodRate={update.FoodConsumeRatePercent}% multiplier={update.FoodConsumeMultiplier:0.###} consumed={update.ConsumedSatiety} satiety={update.Before}->{update.After} changed={update.Changed}");
@@ -509,12 +523,15 @@ namespace DfoServer.Network.Handlers.Pets
 
             try
             {
-                var update = PetCreatureSatietyService.ApplyTownElapsed(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId,
-                    startUtc,
-                    now);
+                if (!TryGetInventoryLease(session, out var lease))
+                    return;
+
+                PetCreatureSatietyUpdate update;
+                lock (lease.SyncRoot)
+                    update = PetCreatureSatietyService.ApplyTownElapsed(
+                        lease.Inventory,
+                        startUtc,
+                        now);
                 SetSessionCreatureAliveState(session, update.CreatureKey > 0 && update.After > 0 ? (byte)1 : (byte)0);
                 session.Player.PetCreatureSatietyTownStartUtc = continueTiming
                     ? CalculateNextTownRecoveryAnchor(startUtc, now, update)
@@ -539,12 +556,15 @@ namespace DfoServer.Network.Handlers.Pets
 
             try
             {
-                var update = PetCreatureSatietyService.ApplyDungeonDeathIfExpired(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId,
-                    startUtc,
-                    now);
+                if (!TryGetInventoryLease(session, out var lease))
+                    return false;
+
+                PetCreatureSatietyUpdate update;
+                lock (lease.SyncRoot)
+                    update = PetCreatureSatietyService.ApplyDungeonDeathIfExpired(
+                        lease.Inventory,
+                        startUtc,
+                        now);
 
                 if (update.CreatureKey <= 0 || update.After > 0)
                     return false;
@@ -579,10 +599,11 @@ namespace DfoServer.Network.Handlers.Pets
             PetCreatureRevivalUpdate update;
             try
             {
-                update = PetCreatureSatietyService.ReviveEquippedCreatureIfDead(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath,
-                    session.Player.CharacterId);
+                if (!TryGetInventoryLease(session, out var lease))
+                    return;
+
+                lock (lease.SyncRoot)
+                    update = PetCreatureSatietyService.ReviveEquippedCreatureIfDead(lease.Inventory);
             }
             catch (Exception ex)
             {
@@ -621,19 +642,14 @@ namespace DfoServer.Network.Handlers.Pets
             var eventUniqueId = GetPetCreatureEventUniqueId(session.Player);
             writer.WriteUInt16(eventUniqueId);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x006A, writer.ToArray()));
+            SetSessionEquippedCreatureItemId(session.Player, evolution.EvolvedItemTemplateId);
 
             try
             {
-                var store = new SqliteInventoryStore(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
-                var item = store.LoadEquipmentCommonItemForRefresh(session.Player.CharacterId, evolution.EquipmentSlot);
-                if (item != null)
-                {
-                    var updateBody = BuildPetEvolutionEquipmentUpdate(item);
-                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x000E,
-                        updateBody));
-                }
+                await InventoryRefreshSender.SendOnlineUpdateItemList(
+                    session,
+                    InventoryListType.Equipment,
+                    evolution.EquipmentSlot);
             }
             catch (Exception ex)
             {
@@ -655,18 +671,14 @@ namespace DfoServer.Network.Handlers.Pets
             var eventUniqueId = GetPetCreatureEventUniqueId(sender.Player);
             writer.WriteUInt16(eventUniqueId);
             await sender.SendNotiAsync(0x006A, writer.ToArray());
+            SetSessionEquippedCreatureItemId(sender.Player, evolution.EvolvedItemTemplateId);
 
             try
             {
-                var store = new SqliteInventoryStore(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
-                var item = store.LoadEquipmentCommonItemForRefresh(sender.CharacterId, evolution.EquipmentSlot);
-                if (item != null)
-                {
-                    var updateBody = BuildPetEvolutionEquipmentUpdate(item);
-                    await sender.SendNotiAsync(
-                        0x000E,
-                        updateBody);
-                }
+                await InventoryRefreshSender.SendOnlineUpdateItemList(
+                    sender,
+                    InventoryListType.Equipment,
+                    evolution.EquipmentSlot);
             }
             catch (Exception ex)
             {
@@ -697,6 +709,16 @@ namespace DfoServer.Network.Handlers.Pets
             session.Player.Subtype0Tail = tail;
         }
 
+        private static void SetSessionEquippedCreatureItemId(PlayerContext player, int itemId)
+        {
+            if (player == null || itemId <= 0)
+                return;
+
+            var tail = player.Subtype0Tail ?? new UserInfoMinimumTailSnapshot();
+            tail.EquippedCreatureItemId = unchecked((uint)itemId);
+            player.Subtype0Tail = tail;
+        }
+
         private static ushort GetPetCreatureEventUniqueId(PlayerContext player)
         {
             if (player == null)
@@ -709,13 +731,6 @@ namespace DfoServer.Network.Handlers.Pets
 
         private static ushort NormalizeCreatureEventParam(int value)
             => (ushort)Math.Max(0, Math.Min(ushort.MaxValue, value));
-
-        private static byte[] BuildPetEvolutionEquipmentUpdate(CommonInventoryItem item)
-        {
-            if (item == null) throw new ArgumentNullException(nameof(item));
-
-            return ItemListUpdateBuilder.BuildEquipmentUpdates(new[] { item });
-        }
 
         private static void ClearDungeonAnchor(EnhancedClientSession session)
         {
@@ -744,6 +759,15 @@ namespace DfoServer.Network.Handlers.Pets
 
         private static bool HasCharacter(EnhancedClientSession session)
             => session?.Player != null && session.Player.CharacterId > 0;
+
+        private static bool TryGetInventoryLease(EnhancedClientSession session, out InventoryLease lease)
+        {
+            lease = null;
+            if (!HasCharacter(session))
+                return false;
+
+            return InventoryContext.TryGetLease(session.Player.CharacterId, out lease);
+        }
 
         private static bool IsPetRuntimeAffectingMoveRequest(InventoryMoveRequest request)
         {

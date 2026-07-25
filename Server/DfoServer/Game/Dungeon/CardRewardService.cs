@@ -2,9 +2,11 @@ using DfoServer.Game.Inventory;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Handlers;
 using DfoServer.Network.Handlers.Dungeon;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -12,24 +14,14 @@ namespace DfoServer.Game.Dungeon
 {
     internal sealed class CardRewardService
     {
-        private readonly DungeonSharedServices _svc;
-        private readonly IAssetService _assetService;
-
         private enum CardRewardSide
         {
             Free,
             Paid,
         }
 
-        internal CardRewardService(DungeonSharedServices svc, IAssetService assetService)
+        internal CardRewardService()
         {
-            _svc = svc ?? throw new ArgumentNullException(nameof(svc));
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
-        }
-
-        internal CardRewardService(IAssetService assetService)
-        {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
         }
 
         internal void ScheduleAutoFlow(EnhancedClientSession session, int layoutDelayMs, int autoFlipDelayMs)
@@ -89,6 +81,14 @@ namespace DfoServer.Game.Dungeon
 
             if (cardType > 1 || cardIndex > 3) return;
             if (cardType == 0) DungeonRunLifecycle.CancelAutoFlip(session);
+
+            if (cardType == 1
+                && cardIndex == 0
+                && !CanPayPaidCard(session, run))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0047, BuildCardInfoAck(session)));
+                return;
+            }
 
             if (!TrySelectCardSlot(run, cardType, cardIndex))
             {
@@ -234,28 +234,36 @@ namespace DfoServer.Game.Dungeon
             DungeonRun run,
             CardRewardSide side)
         {
+            var cid = session.Player.CharacterId;
+            var changes = new List<InventorySlotMutation>();
+            if (!TryGetOwnedInventory(session, out var lease))
+            {
+                FileLogger.Log($"[CardReward] online inventory missing cid={cid} side={side}");
+                return;
+            }
+
             var cards = ReserveCardRewards(run, side);
             if (cards == null)
                 return;
 
-            var cid = session.Player.CharacterId;
-            var aid = session.Account?.AccountId ?? 1;
-            var entries = new List<byte[]>();
-
-            if (side == CardRewardSide.Free)
+            var carryLimit = InventoryGoldCarryLimitLoader.Load(cid);
+            lock (lease.SyncRoot)
             {
-                CollectGoldReward(cid, aid, cards, 0, entries);
-                CollectItemReward(cid, aid, cards, 1, entries);
-            }
-            else
-            {
-                CollectGoldReward(cid, aid, cards, 4, entries);
-                CollectItemReward(cid, aid, cards, 5, entries);
+                if (side == CardRewardSide.Free)
+                {
+                    CollectGoldReward(lease.Inventory, carryLimit, cards, 0, changes);
+                    CollectItemReward(lease.Inventory, cards, 1, changes);
+                }
+                else
+                {
+                    if (SpendPaidCardGold(lease.Inventory, cards, 4, changes))
+                        CollectItemReward(lease.Inventory, cards, 5, changes);
+                }
             }
 
-            await SendItemUpdates(session, entries);
+            await SendItemUpdates(session, changes);
             ClearCardRewardsIfFinished(run);
-            FileLogger.Log($"[CardReward] {side} rewards delivered: {entries.Count} entries");
+            FileLogger.Log($"[CardReward] {side} rewards delivered: {changes.Count} entries");
         }
 
         private static List<ClearRewardGenerator.CardReward> ReserveCardRewards(
@@ -308,49 +316,147 @@ namespace DfoServer.Game.Dungeon
             }
         }
 
-        private void CollectGoldReward(int cid, int aid, List<ClearRewardGenerator.CardReward> cards, int index, List<byte[]> entries)
+        private static bool CanPayPaidCard(EnhancedClientSession session, DungeonRun run)
+        {
+            var cost = GetPaidCardGoldCost(run);
+            if (cost <= 0)
+                return true;
+            if (!TryGetOwnedInventory(session, out var lease))
+                return false;
+
+            lock (lease.SyncRoot)
+                return lease.Inventory.CountMainItem(0) >= cost;
+        }
+
+        private static void CollectGoldReward(
+            InventoryService inventory,
+            int carryLimit,
+            List<ClearRewardGenerator.CardReward> cards,
+            int index,
+            List<InventorySlotMutation> changes)
         {
             if (cards.Count <= index || !cards[index].IsGold || cards[index].GoldAmount <= 0) return;
             try
             {
-                using (var scope = _assetService.OpenScope(cid, aid))
-                {
-                    _assetService.GrantGold(scope, cards[index].GoldAmount);
-                    var wallet = _assetService.LoadWallet(scope);
-                    scope.Commit();
-                    entries.Add(ItemListUpdateBuilder.BuildRawItemEntry(0, 0, (uint)wallet.Gold));
-                }
+                if (!inventory.TryGrantGold(cards[index].GoldAmount, carryLimit, out _, out _))
+                    return;
+
+                AddChangedSlot(changes, InventoryListType.Main, InventoryService.MainVirtualCurrencySlotStart);
             }
             catch (Exception ex) { FileLogger.Log($"[CardReward] CollectGoldReward ERROR: {ex.Message}"); }
         }
 
-        private void CollectItemReward(int cid, int aid, List<ClearRewardGenerator.CardReward> cards, int index, List<byte[]> entries)
+        private static bool SpendPaidCardGold(
+            InventoryService inventory,
+            List<ClearRewardGenerator.CardReward> cards,
+            int index,
+            List<InventorySlotMutation> changes)
+        {
+            var cost = GetGoldAmount(cards, index);
+            if (cost <= 0)
+                return true;
+
+            try
+            {
+                if (!inventory.TryConsumeMainItem(0, cost, out var consumeResult)
+                    || !consumeResult.Success)
+                    return false;
+
+                AddChangedSlots(changes, consumeResult.Changes);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"[CardReward] SpendPaidCardGold ERROR: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static void CollectItemReward(
+            InventoryService inventory,
+            List<ClearRewardGenerator.CardReward> cards,
+            int index,
+            List<InventorySlotMutation> changes)
         {
             if (cards.Count <= index || cards[index].IsGold || cards[index].ItemId <= 0) return;
             var card = cards[index];
             try
             {
-                using (var scope = _assetService.OpenScope(cid, aid))
-                {
-                    if (!_assetService.TryAddItem(scope, card.ItemId, card.StackCount, out var slot)) return;
-                    scope.Commit();
-                    var sealFlag = card.IsEquipment && ItemMetadataResolver.Resolve(card.ItemId).IsSealed ? (byte)1 : (byte)0;
-                    entries.Add(card.IsEquipment
-                        ? ItemListUpdateBuilder.BuildRawEquipEntry(slot, (uint)card.ItemId, durability: card.Durability, sealFlag: sealFlag)
-                        : ItemListUpdateBuilder.BuildRawItemEntry(slot, (uint)card.ItemId, (uint)card.StackCount));
-                }
+                if (!InventoryRewardGrantService.TryCreateAndInsert(
+                        inventory,
+                        card.ItemId,
+                        ItemCreateReason.DungeonDrop,
+                        card.StackCount,
+                        out var grant)
+                    || !grant.Success)
+                    return;
+
+                AddChangedSlots(changes, grant.Changes);
             }
             catch (Exception ex) { FileLogger.Log($"[CardReward] CollectItemReward ERROR: {ex.Message}"); }
         }
 
-        private static async Task SendItemUpdates(EnhancedClientSession session, List<byte[]> entries)
+        private static async Task SendItemUpdates(EnhancedClientSession session, List<InventorySlotMutation> changes)
         {
-            if (entries.Count == 0) return;
-            var w = new GamePacketWriter();
-            w.WriteByte(0);
-            w.WriteUInt16((ushort)entries.Count);
-            foreach (var e in entries) w.WriteBytes(e);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, w.ToArray()));
+            if (changes.Count == 0) return;
+            foreach (var group in changes.GroupBy(change => change.ListType))
+            {
+                var slots = group.Select(change => change.SlotIndex).ToList();
+                await InventoryRefreshSender.SendOnlineUpdateItemList(session, group.Key, slots);
+            }
+        }
+
+        private static bool TryGetOwnedInventory(EnhancedClientSession session, out InventoryLease lease)
+        {
+            lease = null;
+            var cid = session?.Player?.CharacterId ?? 0;
+            return cid > 0
+                && InventoryContext.TryGetLease(cid, out lease)
+                && lease.IsOwnedBy(session.SessionId);
+        }
+
+        private static int GetPaidCardGoldCost(DungeonRun run)
+        {
+            if (run == null)
+                return 0;
+
+            lock (run.SyncRoot)
+                return GetGoldAmount(run.CardRewards, 4);
+        }
+
+        private static int GetGoldAmount(List<ClearRewardGenerator.CardReward> cards, int index)
+        {
+            return cards != null
+                && cards.Count > index
+                && cards[index].IsGold
+                ? Math.Max(0, cards[index].GoldAmount)
+                : 0;
+        }
+
+        private static void AddChangedSlots(
+            List<InventorySlotMutation> changes,
+            InventoryMutationSet mutation)
+        {
+            if (mutation == null)
+                return;
+
+            foreach (var slot in mutation.Slots)
+                AddChangedSlot(changes, slot.ListType, slot.SlotIndex);
+        }
+
+        private static void AddChangedSlot(
+            List<InventorySlotMutation> changes,
+            InventoryListType listType,
+            short slotIndex)
+        {
+            for (var index = 0; index < changes.Count; index++)
+            {
+                var existing = changes[index];
+                if (existing.ListType == listType && existing.SlotIndex == slotIndex)
+                    return;
+            }
+
+            changes.Add(new InventorySlotMutation(listType, slotIndex));
         }
 
         private static async Task SendCardLayout(EnhancedClientSession session)

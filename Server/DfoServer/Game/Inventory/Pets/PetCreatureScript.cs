@@ -1,7 +1,6 @@
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
-using Microsoft.Data.Sqlite;
 using PvfLib;
 using System;
 using System.Collections.Concurrent;
@@ -68,24 +67,12 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
-        internal static void UpsertWelcomeCache(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId,
-            int itemTemplateId)
+        internal static bool TryBuildWelcomeBody(int itemTemplateId, int characterId, out byte[] body)
         {
-            if (connection == null) throw new ArgumentNullException(nameof(connection));
-            if (transaction == null) throw new ArgumentNullException(nameof(transaction));
-            if (characterId <= 0)
-                return;
+            body = null;
+            if (characterId <= 0 || itemTemplateId <= 0)
+                return false;
 
-            if (itemTemplateId <= 0)
-            {
-                UpsertCacheRow(connection, transaction, characterId, 0, null);
-                return;
-            }
-
-            byte[] body = null;
             if (TryBuildWelcomeMessage(itemTemplateId, characterId, out var message))
             {
                 body = BuildNotiBody(
@@ -95,59 +82,13 @@ namespace DfoServer.Game.Inventory
                     messageBytes: message.MessageBytes);
 
                 FileLogger.Log(
-                    $"[PetCreatureScript] cache update cid={characterId} item=0x{message.ItemTemplateId:X8} " +
+                    $"[PetCreatureScript] welcome build cid={characterId} item=0x{message.ItemTemplateId:X8} " +
                     $"creature={message.CreatureId} script={message.ScriptFilePath} len={message.MessageBytes.Length}");
-            }
-            else
-            {
-                FileLogger.Log($"[PetCreatureScript] cache update empty cid={characterId} item=0x{itemTemplateId:X8}: no ambient room line");
+                return true;
             }
 
-            UpsertCacheRow(
-                connection,
-                transaction,
-                characterId,
-                itemTemplateId,
-                IsValidScriptMessageBody(body) ? body : null);
-        }
-
-        internal static bool TryLoadWelcomeCache(
-            string databasePath,
-            string schemaFilePath,
-            int characterId,
-            int itemTemplateId,
-            int occurrenceIndex,
-            out byte[] body)
-        {
-            body = null;
-            if (characterId <= 0 || itemTemplateId <= 0 || occurrenceIndex != BodyOccurrenceIndex)
-                return false;
-
-            var connectionString = SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
-            using (var connection = new SqliteConnection(connectionString))
-            {
-                connection.Open();
-                using (var cmd = connection.CreateCommand())
-                {
-                    cmd.CommandText = @"
-SELECT item_template_id, body
-FROM character_pet_welcome_cache
-WHERE character_id = @cid;";
-                    cmd.Parameters.AddWithValue("@cid", characterId);
-                    using (var reader = cmd.ExecuteReader())
-                    {
-                        if (!reader.Read() || reader.GetInt32(0) != itemTemplateId)
-                            return false;
-
-                        var cachedBody = reader.IsDBNull(1) ? null : (byte[])reader[1];
-                        if (!IsValidScriptMessageBody(cachedBody))
-                            return false;
-
-                        body = cachedBody;
-                        return true;
-                    }
-                }
-            }
+            FileLogger.Log($"[PetCreatureScript] welcome empty cid={characterId} item=0x{itemTemplateId:X8}: no ambient room line");
+            return false;
         }
 
         private static bool TryBuildWelcomeMessage(int itemTemplateId, int characterId, out PetCreatureWelcomeMessage message)
@@ -292,38 +233,6 @@ WHERE character_id = @cid;";
                 FileLogger.Log($"[PetCreatureScript] welcome script skipped path={scriptFilePath}: {ex.Message}");
                 return new List<string>();
             }
-        }
-
-        private static void UpsertCacheRow(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId,
-            int itemTemplateId,
-            byte[] body)
-        {
-            using (var cmd = connection.CreateCommand())
-            {
-                cmd.Transaction = transaction;
-                cmd.CommandText = @"
-INSERT INTO character_pet_welcome_cache(character_id, item_template_id, body)
-VALUES(@cid, @item, @body)
-ON CONFLICT(character_id)
-DO UPDATE SET item_template_id = excluded.item_template_id, body = excluded.body;";
-                cmd.Parameters.AddWithValue("@cid", characterId);
-                cmd.Parameters.AddWithValue("@item", itemTemplateId);
-                cmd.Parameters.AddWithValue("@body", (object)body ?? DBNull.Value);
-                cmd.ExecuteNonQuery();
-            }
-        }
-
-        private static bool IsValidScriptMessageBody(byte[] body)
-        {
-            if (body == null || body.Length < 8)
-                return false;
-
-            var messageLength = BitConverter.ToInt32(body, 4);
-            return messageLength >= 0
-                && body.Length == 8 + messageLength;
         }
 
         private static string ReadPvfText(params string[] paths)

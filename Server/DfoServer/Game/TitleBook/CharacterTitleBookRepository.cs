@@ -1,18 +1,17 @@
 using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.TitleBook
 {
     public sealed class CharacterTitleBookRepository
     {
         private readonly string _connectionString;
-        private readonly TitleBookStaticDataProvider _staticData;
 
         public CharacterTitleBookRepository(string connectionString)
         {
             _connectionString = connectionString ?? throw new ArgumentNullException(nameof(connectionString));
-            _staticData = TitleBookStaticDataProvider.LoadDefault();
         }
 
         public List<TitleBookCategorySnapshot> LoadSnapshots(int characterId)
@@ -20,68 +19,8 @@ namespace DfoServer.Game.TitleBook
             using (var connection = new SqliteConnection(_connectionString))
             {
                 connection.Open();
-                var result = new List<TitleBookCategorySnapshot>();
-                for (var category = 0; category < TitleBookStaticDataProvider.CategoryCapacities.Count; category++)
-                {
-                    var blob = LoadCategoryBlob(connection, null, characterId, category);
-                    var items = blob != null
-                        ? LoadCategoryItems(category, blob)
-                        : LoadLegacyCategoryItems(connection, null, characterId, category);
-
-                    if (blob == null && !HasAnyItem(items))
-                        items = LoadLegacyCategoryItems(connection, characterId, category);
-
-                    result.Add(BuildSnapshot(category, items));
-                }
-                return result;
+                return LoadModel(connection, characterId).BuildSnapshots();
             }
-        }
-
-        public TitleBookInventoryItem LoadItem(SqliteConnection connection, SqliteTransaction transaction, int characterId, int category, int bookIndex)
-        {
-            var capacity = GetCapacity(category);
-            if (bookIndex < 0 || bookIndex >= capacity)
-                return null;
-
-            var blob = LoadCategoryBlob(connection, transaction, characterId, category);
-            if (blob == null)
-            {
-                var legacy = LoadLegacyItem(connection, transaction, characterId, category, bookIndex);
-                return legacy ?? TitleBookInventoryItemCodec.CreateEmpty(category, (ushort)bookIndex);
-            }
-
-            blob = NormalizeCategoryBlob(blob, capacity);
-
-            if (blob.Length < (bookIndex + 1) * TitleBookInventoryItemCodec.PersistedRecordSize)
-                return TitleBookInventoryItemCodec.CreateEmpty(category, (ushort)bookIndex);
-
-            var record = new byte[TitleBookInventoryItemCodec.PersistedRecordSize];
-            Buffer.BlockCopy(blob, bookIndex * TitleBookInventoryItemCodec.PersistedRecordSize, record, 0, record.Length);
-            return TitleBookInventoryItemCodec.Deserialize(category, (ushort)bookIndex, record);
-        }
-
-        public void SaveItem(SqliteConnection connection, SqliteTransaction transaction, int characterId, TitleBookInventoryItem item)
-        {
-            if (item == null) throw new ArgumentNullException(nameof(item));
-
-            var capacity = GetCapacity(item.Category);
-            if (item.BookIndex >= capacity)
-                throw new ArgumentOutOfRangeException(nameof(item.BookIndex));
-
-            EnsureCharacterRow(connection, transaction, characterId);
-
-            var existingBlob = LoadCategoryBlob(connection, transaction, characterId, item.Category);
-            var blob = existingBlob == null
-                ? BuildBlobFromItems(LoadLegacyCategoryItems(connection, transaction, characterId, item.Category), capacity)
-                : NormalizeCategoryBlob(existingBlob, capacity);
-            var record = TitleBookInventoryItemCodec.Serialize(item);
-            Buffer.BlockCopy(record, 0, blob, item.BookIndex * TitleBookInventoryItemCodec.PersistedRecordSize, record.Length);
-            SaveCategoryBlob(connection, transaction, characterId, item.Category, blob);
-        }
-
-        public void ClearItem(SqliteConnection connection, SqliteTransaction transaction, int characterId, int category, int bookIndex)
-        {
-            SaveItem(connection, transaction, characterId, TitleBookInventoryItemCodec.CreateEmpty(category, (ushort)bookIndex));
         }
 
         public TitleBookCategorySnapshot LoadSnapshot(int characterId, int category)
@@ -95,155 +34,281 @@ namespace DfoServer.Game.TitleBook
 
         public TitleBookCategorySnapshot LoadSnapshot(SqliteConnection connection, SqliteTransaction transaction, int characterId, int category)
         {
-            var blob = LoadCategoryBlob(connection, transaction, characterId, category);
-            return BuildSnapshot(category, blob != null
-                ? LoadCategoryItems(category, blob)
-                : LoadLegacyCategoryItems(connection, transaction, characterId, category));
+            return LoadModel(connection, transaction, characterId).BuildSnapshot(category);
         }
 
-        private static List<TitleBookInventoryItem> LoadCategoryItems(int category, byte[] blob)
+        internal static TitleBookModel LoadModel(SqliteConnection connection, int characterId)
         {
-            var capacity = GetCapacity(category);
-            blob = NormalizeCategoryBlob(blob, capacity);
-            var items = new List<TitleBookInventoryItem>(capacity);
-            for (var index = 0; index < capacity; index++)
+            return LoadModel(connection, null, characterId);
+        }
+
+        internal static TitleBookModel LoadModel(SqliteConnection connection, SqliteTransaction transaction, int characterId)
+        {
+            var model = new TitleBookModel();
+            LoadNewItems(connection, transaction, characterId, model);
+            return model;
+        }
+
+        internal static void SaveSlot(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int category,
+            int slotIndex,
+            ItemCore core)
+        {
+            if (category < 0 || category >= TitleBookStaticDataProvider.CategoryCapacities.Count)
+                return;
+            if (slotIndex < 0 || slotIndex >= TitleBookStaticDataProvider.CategoryCapacities[category])
+                return;
+
+            if (core == null || core.IsEmpty)
             {
-                var record = new byte[TitleBookInventoryItemCodec.PersistedRecordSize];
-                Buffer.BlockCopy(blob, index * TitleBookInventoryItemCodec.PersistedRecordSize, record, 0, record.Length);
-                items.Add(TitleBookInventoryItemCodec.Deserialize(category, (ushort)index, record));
+                using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = @"
+DELETE FROM character_new_titlebook
+WHERE character_id = @cid AND category = @category AND slot_index = @slot;";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.Parameters.AddWithValue("@category", category);
+                    command.Parameters.AddWithValue("@slot", slotIndex);
+                    command.ExecuteNonQuery();
+                }
+                return;
             }
-            return items;
-        }
 
-        private static TitleBookCategorySnapshot BuildSnapshot(int category, List<TitleBookInventoryItem> items)
-        {
-            var snapshot = new TitleBookCategorySnapshot
-            {
-                InfoType = 0,
-                OwnerId16 = 0,
-                Category = category,
-            };
-
-            foreach (var item in items)
-            {
-                if (item == null || item.IsEmpty)
-                    continue;
-
-                snapshot.Entries.Add(TitleBookInventoryItemCodec.ToListEntry(item));
-            }
-
-            return snapshot;
-        }
-
-        private List<TitleBookInventoryItem> LoadLegacyCategoryItems(SqliteConnection connection, int characterId, int category)
-        {
-            return LoadLegacyCategoryItems(connection, null, characterId, category);
-        }
-
-        private List<TitleBookInventoryItem> LoadLegacyCategoryItems(SqliteConnection connection, SqliteTransaction transaction, int characterId, int category)
-        {
-            var items = new List<TitleBookInventoryItem>();
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
                 command.CommandText = @"
-SELECT entries_blob
-FROM character_achievement_chunks
-WHERE character_id = @cid AND chunk_index = @category;";
+INSERT INTO character_new_titlebook (
+    character_id, category, slot_index, item_core, updated_at
+) VALUES (
+    @cid, @category, @slot, @itemCore, CURRENT_TIMESTAMP
+)
+ON CONFLICT(character_id, category, slot_index)
+DO UPDATE SET
+    item_core = excluded.item_core,
+    updated_at = CURRENT_TIMESTAMP;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 command.Parameters.AddWithValue("@category", category);
-                var blob = command.ExecuteScalar() as byte[];
-                if (blob == null)
-                    return items;
+                command.Parameters.AddWithValue("@slot", slotIndex);
+                command.Parameters.AddWithValue("@itemCore", core.ToBytes());
+                command.ExecuteNonQuery();
+            }
+        }
 
-                for (var off = 0; off + TitleBookInventoryItemCodec.TitleBookListEntrySize <= blob.Length; off += TitleBookInventoryItemCodec.TitleBookListEntrySize)
+        internal static void MigrateLegacyToNewTable(SqliteConnection connection)
+        {
+            EnsureNewTable(connection);
+            using (var transaction = connection.BeginTransaction())
+            {
+                MigrateLegacyTitleBookBlobs(connection, transaction);
+                MigrateLegacyAchievementChunks(connection, transaction);
+                transaction.Commit();
+            }
+        }
+
+        private static int LoadNewItems(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            TitleBookModel model)
+        {
+            if (!TableExists(connection, "character_new_titlebook"))
+                return 0;
+
+            var count = 0;
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT category, slot_index, item_core
+FROM character_new_titlebook
+WHERE character_id = @cid
+ORDER BY category, slot_index;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                using (var reader = command.ExecuteReader())
                 {
-                    var bookIndex = BitConverter.ToUInt16(blob, off);
-                    var item = new TitleBookInventoryItem
+                    while (reader.Read())
                     {
-                        Category = category,
-                        BookIndex = bookIndex,
-                        Slot = bookIndex,
-                        ItemId = BitConverter.ToInt32(blob, off + 2),
-                        Value = BitConverter.ToInt32(blob, off + 6),
-                        Attr = blob[off + 10],
-                        Durability = BitConverter.ToUInt16(blob, off + 11),
-                        SealFlag = blob[off + 13],
-                        EnchantIndex = BitConverter.ToInt32(blob, off + 14),
-                        EnchantUpgradeCount = blob[off + 18],
-                        AmplifyType = blob[off + 19],
-                        AmplifyValue = BitConverter.ToUInt16(blob, off + 20),
-                    };
-                    items.Add(item);
+                        var data = reader.IsDBNull(2) ? null : (byte[])reader[2];
+                        if (data == null || data.Length < ItemCore.Size)
+                            continue;
+
+                        model.AttachItem(reader.GetInt32(0), reader.GetInt32(1), ItemCore.FromBytes(data));
+                        count++;
+                    }
                 }
+            }
+
+            return count;
+        }
+
+        private static void MigrateLegacyTitleBookBlobs(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            if (!TableExists(connection, "character_titlebook"))
+                return;
+
+            var pending = new List<Tuple<int, int, int, ItemCore>>();
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT character_id, general, specific, pvp, despair, event
+FROM character_titlebook;";
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        var characterId = reader.GetInt32(0);
+                        for (var category = 0; category < TitleBookStaticDataProvider.CategoryCapacities.Count; category++)
+                        {
+                            if (reader.IsDBNull(category + 1))
+                                continue;
+
+                            var blob = (byte[])reader[category + 1];
+                            foreach (var item in LoadCategoryItems(category, blob))
+                                pending.Add(Tuple.Create(characterId, category, item.Key, item.Value));
+                        }
+                    }
+                }
+            }
+
+            foreach (var item in pending)
+                InsertMigratedItem(connection, transaction, item.Item1, item.Item2, item.Item3, item.Item4);
+        }
+
+        private static void MigrateLegacyAchievementChunks(SqliteConnection connection, SqliteTransaction transaction)
+        {
+            if (!TableExists(connection, "character_achievement_chunks"))
+                return;
+
+            var pending = new List<Tuple<int, int, int, ItemCore>>();
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT character_id, chunk_index, entries_blob
+FROM character_achievement_chunks;";
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        if (reader.IsDBNull(2))
+                            continue;
+
+                        var characterId = reader.GetInt32(0);
+                        var category = reader.GetInt32(1);
+                        if (category < 0 || category >= TitleBookStaticDataProvider.CategoryCapacities.Count)
+                            continue;
+
+                        var blob = (byte[])reader[2];
+                        foreach (var item in ParseLegacyChunkItems(category, blob))
+                            pending.Add(Tuple.Create(characterId, category, item.Key, item.Value));
+                    }
+                }
+            }
+
+            foreach (var item in pending)
+                InsertMigratedItem(connection, transaction, item.Item1, item.Item2, item.Item3, item.Item4);
+        }
+
+        private static IEnumerable<KeyValuePair<int, ItemCore>> ParseLegacyChunkItems(int category, byte[] blob)
+        {
+            if (blob == null)
+                yield break;
+
+            for (var off = 0; off + LegacyTitleBookItemCodec.TitleBookListEntrySize <= blob.Length; off += LegacyTitleBookItemCodec.TitleBookListEntrySize)
+            {
+                if (!LegacyTitleBookItemCodec.TryDecodeListEntry(blob, off, out var bookIndex, out var core)
+                    || core == null
+                    || core.IsEmpty)
+                    continue;
+
+                yield return new KeyValuePair<int, ItemCore>(bookIndex, core);
+            }
+        }
+
+        private static void InsertMigratedItem(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int category,
+            int slotIndex,
+            ItemCore core)
+        {
+            if (core == null || core.IsEmpty)
+                return;
+
+            if (category < 0 || category >= TitleBookStaticDataProvider.CategoryCapacities.Count)
+                return;
+            if (slotIndex >= TitleBookStaticDataProvider.CategoryCapacities[category])
+                return;
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+INSERT OR IGNORE INTO character_new_titlebook (
+    character_id, category, slot_index, item_core, updated_at
+) VALUES (
+    @cid, @category, @slot, @itemCore, CURRENT_TIMESTAMP
+);";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@category", category);
+                command.Parameters.AddWithValue("@slot", (int)slotIndex);
+                command.Parameters.AddWithValue("@itemCore", core.ToBytes());
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private static void EnsureNewTable(SqliteConnection connection)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = @"
+CREATE TABLE IF NOT EXISTS character_new_titlebook (
+    character_id INTEGER NOT NULL,
+    category INTEGER NOT NULL,
+    slot_index INTEGER NOT NULL,
+    item_core BLOB NOT NULL CHECK(length(item_core) = 82),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, category, slot_index),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);";
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private static List<KeyValuePair<int, ItemCore>> LoadCategoryItems(int category, byte[] blob)
+        {
+            var capacity = GetCapacity(category);
+            blob = NormalizeCategoryBlob(blob, capacity);
+            var items = new List<KeyValuePair<int, ItemCore>>(capacity);
+            for (var index = 0; index < capacity; index++)
+            {
+                var record = new byte[LegacyTitleBookItemCodec.PersistedRecordSize];
+                Buffer.BlockCopy(blob, index * LegacyTitleBookItemCodec.PersistedRecordSize, record, 0, record.Length);
+                var core = LegacyTitleBookItemCodec.DecodePersistedRecord(record);
+                if (core == null || core.IsEmpty)
+                    continue;
+
+                items.Add(new KeyValuePair<int, ItemCore>(index, core));
             }
             return items;
         }
 
-        private TitleBookInventoryItem LoadLegacyItem(SqliteConnection connection, SqliteTransaction transaction, int characterId, int category, int bookIndex)
-        {
-            foreach (var item in LoadLegacyCategoryItems(connection, transaction, characterId, category))
-            {
-                if (item.BookIndex == bookIndex)
-                    return item;
-            }
-            return null;
-        }
-
-        private static bool HasAnyItem(List<TitleBookInventoryItem> items)
-        {
-            foreach (var item in items)
-            {
-                if (item != null && !item.IsEmpty)
-                    return true;
-            }
-            return false;
-        }
-
-        private static byte[] LoadCategoryBlob(SqliteConnection connection, SqliteTransaction transaction, int characterId, int category)
-        {
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = $"SELECT {ColumnName(category)} FROM character_titlebook WHERE character_id = @cid;";
-                command.Parameters.AddWithValue("@cid", characterId);
-                var value = command.ExecuteScalar();
-                return value == DBNull.Value ? null : value as byte[];
-            }
-        }
-
-        private static void SaveCategoryBlob(SqliteConnection connection, SqliteTransaction transaction, int characterId, int category, byte[] blob)
-        {
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = $"UPDATE character_titlebook SET {ColumnName(category)} = @blob, updated_at = CURRENT_TIMESTAMP WHERE character_id = @cid;";
-                command.Parameters.AddWithValue("@cid", characterId);
-                command.Parameters.AddWithValue("@blob", blob);
-                command.ExecuteNonQuery();
-            }
-        }
-
-        private static void EnsureCharacterRow(SqliteConnection connection, SqliteTransaction transaction, int characterId)
-        {
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = "INSERT OR IGNORE INTO character_titlebook (character_id, format_version) VALUES (@cid, 1);";
-                command.Parameters.AddWithValue("@cid", characterId);
-                command.ExecuteNonQuery();
-            }
-        }
-
         private static byte[] NormalizeCategoryBlob(byte[] blob, int capacity)
         {
-            var expected = capacity * TitleBookInventoryItemCodec.PersistedRecordSize;
+            var expected = capacity * LegacyTitleBookItemCodec.PersistedRecordSize;
             var result = new byte[expected];
             if (blob == null)
                 return result;
 
-            var legacySize = TitleBookInventoryItemCodec.CommonNetworkSize;
-            if (TitleBookInventoryItemCodec.PersistedRecordSize != legacySize
+            var legacySize = LegacyTitleBookItemCodec.CommonNetworkSize;
+            if (LegacyTitleBookItemCodec.PersistedRecordSize != legacySize
                 && blob.Length == capacity * legacySize)
             {
                 for (var index = 0; index < capacity; index++)
@@ -252,7 +317,7 @@ WHERE character_id = @cid AND chunk_index = @category;";
                         blob,
                         index * legacySize,
                         result,
-                        index * TitleBookInventoryItemCodec.PersistedRecordSize,
+                        index * LegacyTitleBookItemCodec.PersistedRecordSize,
                         legacySize);
                 }
                 return result;
@@ -260,20 +325,6 @@ WHERE character_id = @cid AND chunk_index = @category;";
 
             Buffer.BlockCopy(blob, 0, result, 0, Math.Min(blob.Length, result.Length));
             return result;
-        }
-
-        private static byte[] BuildBlobFromItems(List<TitleBookInventoryItem> items, int capacity)
-        {
-            var blob = NormalizeCategoryBlob(null, capacity);
-            foreach (var item in items)
-            {
-                if (item == null || item.BookIndex >= capacity)
-                    continue;
-
-                var record = TitleBookInventoryItemCodec.Serialize(item);
-                Buffer.BlockCopy(record, 0, blob, item.BookIndex * TitleBookInventoryItemCodec.PersistedRecordSize, record.Length);
-            }
-            return blob;
         }
 
         private static int GetCapacity(int category)
@@ -284,16 +335,13 @@ WHERE character_id = @cid AND chunk_index = @category;";
             return TitleBookStaticDataProvider.CategoryCapacities[category];
         }
 
-        private static string ColumnName(int category)
+        private static bool TableExists(SqliteConnection connection, string tableName)
         {
-            switch (category)
+            using (var command = connection.CreateCommand())
             {
-                case 0: return "general";
-                case 1: return "specific";
-                case 2: return "pvp";
-                case 3: return "despair";
-                case 4: return "event";
-                default: throw new ArgumentOutOfRangeException(nameof(category));
+                command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=@name;";
+                command.Parameters.AddWithValue("@name", tableName);
+                return Convert.ToInt64(command.ExecuteScalar()) > 0;
             }
         }
 

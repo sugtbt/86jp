@@ -15,6 +15,7 @@ namespace DfoServer.Game.ItemUpgrade
     public sealed class ItemUpgradeResult
     {
         public const byte ErrorInvalidTarget = 4;
+        public const byte ErrorInventoryFull = 21;
         public const byte ErrorInsufficientGold = 10;
         public const byte ErrorUnsupported = 13;
         public const byte ErrorRestriction = 19;

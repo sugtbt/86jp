@@ -1,6 +1,7 @@
 using PvfLib;
 using System;
 using System.Collections.Generic;
+using DfoServer.Infrastructure;
 
 namespace DfoServer.Game.Inventory
 {
@@ -66,7 +67,7 @@ namespace DfoServer.Game.Inventory
 
             var itemId = candidates.Count == 1
                 ? candidates[0]
-                : candidates[Random.Shared.Next(candidates.Count)];
+                : candidates[ServerRandom.Next(candidates.Count)];
             if (itemId <= 0)
                 return;
 
@@ -80,7 +81,7 @@ namespace DfoServer.Game.Inventory
                 return 1;
 
             var greatChance = ClampPercent(config.GreatChancePercent);
-            var roll = Random.Shared.NextDouble() * 100.0;
+            var roll = RollPercent();
             var divisor = roll < greatChance && config.GreatCountDivisor > 0
                 ? config.GreatCountDivisor
                 : config.NormalCountDivisor;
@@ -96,11 +97,11 @@ namespace DfoServer.Game.Inventory
             if (expand == null || !expand.Enabled || expand.ItemTemplateId <= 0)
                 return;
 
-            if (Random.Shared.NextDouble() * 100.0 >= ClampPercent(expand.NormalChancePercent))
+            if (RollPercent() >= ClampPercent(expand.NormalChancePercent))
                 return;
 
             var count = CalculateLevelDivisorCount(metadata?.MinimumLevel ?? 0, expand.LevelDivisor);
-            if (Random.Shared.NextDouble() * 100.0 < ClampPercent(expand.GreatChancePercent))
+            if (RollPercent() < ClampPercent(expand.GreatChancePercent))
                 count++;
 
             AddMaterial(result, expand.ItemTemplateId, count);
@@ -114,10 +115,20 @@ namespace DfoServer.Game.Inventory
             var value = Math.Max(1, level) / divisor;
             var count = (int)Math.Floor(value);
             var fraction = value - count;
-            if (Random.Shared.NextDouble() < fraction)
+            if (RollUnit() < fraction)
                 count++;
 
             return Math.Max(1, count);
+        }
+
+        private static double RollPercent()
+        {
+            return ServerRandom.Next(1_000_000) / 10000.0;
+        }
+
+        private static double RollUnit()
+        {
+            return ServerRandom.Next(1_000_000) / 1_000_000.0;
         }
 
         private static double ClampPercent(double value)

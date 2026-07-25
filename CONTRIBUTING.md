@@ -1,78 +1,65 @@
 # 贡献指南
 
-感谢你对项目的关注！为了提高协作效率，请在提交 PR 前阅读以下内容。
+欢迎参与项目。这里不讲长篇架构，只列提交代码前最容易踩坑的地方。背包系统的完整说明放在 `Docs/`，需要时再查。
 
-## 提交前准备
+## 先做这几件事
 
-1. **Rebase 到最新 main**：提交前确保你的分支已经 rebase 到最新的 main，避免冲突
-2. **确保编译通过**：`dotnet build Server/DfoServer/DfoServer.csproj -c Debug`
-3. **跑相关自测**：改动涉及背包/货币/任务时，跑对应的 `--selftest-*` 自测（列表见 Program.cs）
-4. **一个 PR 只做一件事**：不要在一个 PR 里混合多个不相关的功能或修复
+1. 先把分支同步到最新 `main`（建议使用 rebase）。新版背包已经合入，基于旧 `SqliteInventoryStore` 的代码不能直接提交。
+2. 构建服务端：
 
-## 工程红线
+   ```powershell
+   dotnet build Server/DfoServer/DfoServer.csproj -c Debug --nologo
+   ```
 
-以下每条都对应过真实事故，审查时会重点盯：
+3. 运行和改动有关的自测。可用参数见 `Server/DfoServer/Program.cs` 的 `SelfTestRegistry`。
 
-1. **Handler 层禁止直连 SQL**（不 import `Microsoft.Data.Sqlite`）——协议层只做
-   解析→Store→ACK→刷新，数据访问写到 `Game/Inventory/` 的 Store 层
-2. **货币列只能经 `CurrencyService.Grant*/TrySpend*`**——禁止 `UPDATE accounts SET cera=...`
-   之类绝对值写入或"先读再算再写"（曾导致点券清零）
-3. **删物品分两层**——handler/业务层调 Store 的现成方法（如 `TryDeleteItem`）；
-   在 Store 层新增删除逻辑时必须复用 `InventoryDbPrimitives.DeleteItem`（内含排序锁清理），
-   禁止自写 `DELETE FROM character_items`（曾留下孤儿排序锁）
-4. **禁止 `INSERT OR REPLACE INTO character_items`**——REPLACE 会把未列出的列清成默认值
-5. 涉及多张表的复合写必须在**同一事务**内（参考收集箱的 lambda 注入写法）
-6. 扣费失败必须返回失败 ACK，禁止兜底吞掉错误
-7. **不要自己 `new Random()`**——项目里的随机数只有两个合法来源：
-   - 掉落这类"客户端会拿同一个种子自己再算一遍"的随机，必须用当前房间的
-     `DnfLcg`（种子已经随开图包发给客户端，双方按同一序列取数；换了来源，
-     客户端算出来的结果就和服务端对不上了）；
-   - 其余由服务端自己拍板、结果只体现在后续下发数据里的随机（选哪套迷宫、
-     抽哪只冠军怪、出哪个神秘商店 NPC 等），用 `Infrastructure/ServerRandom`。
-   另外 `System.Random` 不是线程安全的：两个线程同时调用会把它弄坏，
-   坏掉之后会一直返回 0——这也是要收口到 ServerRandom（内部加锁）的原因
-8. **需要"每隔一段时间做某事"时，注册进 `Infrastructure/ClockService`，
-   不要自己开线程写 while 循环**。时钟回调里只做三类事：读数据、结算、
-   给在线玩家发包。不要把"只有时钟跑过才正确"的数据写进库——服务器停机
-   再开时，时钟不会补跑错过的时刻，这种数据就永久缺一块（正确做法参考
-   每日重置系统：数据在被读到的时候自己判断过期并补算，时钟只负责提醒在线玩家）
-9. **改到共享代码时，路过这段代码的旧功能必须复测**——自己的新功能跑通
-   不算完：diff 里改过的每个条件、每个分支，原本跑在上面的功能都要重新
-   验证一遍且行为不变（有自测的跑自测，没有的实机复测）。如果改变旧行为
-   正是本 PR 的目的，在描述里写明改了什么、为什么。曾有 PR 为保护新功能
-   收窄了共享的外观刷新条件，导致所有角色穿脱装备后外观不再更新
+   ```powershell
+   dotnet run --project Server/DfoServer/DfoServer.csproj -c Debug --no-build -- --selftest-<name>
+   ```
 
-## 数据库变更
+   新功能和问题修复要补对应自测；改到公共奖励、物品移动、保存、刷新或封包代码时，再跑 `--selftest-all`。如果主线本来就有失败，分别记录主线和当前分支的结果，不要新增失败。
 
-- 新增表：在 `Sqlite/item_schema.sql` 中添加 `CREATE TABLE IF NOT EXISTS`
-- 新增列/删列/改约束：**两边都要写**——
-  1) `Sqlite/item_schema.sql` 保持"新库的完整最终形态"；
-  2) `Sqlite/SqliteMigrations.cs` 的 `Steps` 末尾追加下一个版本号（旧库靠它升级，
-     已发布的条目禁止修改）。
-  加列用 `EnsureColumns`，删列用 `DropColumnsIfExist`，改约束参考 v6 的表重建模板。
-  详细守则见 `SqliteMigrations.cs` 头部注释。
+4. 一个 PR 只解决一个问题，不要顺手混入无关重构、格式化或生成文件。
+5. PR 描述写清楚实际跑过什么。没有自动化覆盖的功能，要说明实机验证了哪些场景。
 
-## 协议改动
+## 改背包时别绕路
 
-涉及新增或修改包格式时，请在 PR 描述中简要说明字段来源：
-- PVF 数据（标注文件路径）
-- 抓包实测（标注包体 hex 示例）
-- 推测/参考（说明参考了什么）
+碰到背包、仓库、装备、时装、宠物、物品奖励、商城或金币，先看：
 
-## 项目结构
+- `Docs/新版背包架构业务接入规范.md`
+- `Docs/GM工具_新背包表结构与ItemCore语义.md`（改数据库或 GM 工具时）
 
-```
-Server/DfoServer/
-  Game/Inventory/          背包系统（拆分为多个 Store）
-  Game/CharacterData/      角色数据 Repository
-  Game/Dungeon/            副本逻辑
-  Game/Skills/             技能系统
-  Network/Handlers/        协议处理（按域拆分子目录）
-  Network/Builders/        封包构建
-  Network/Protocol/        协议分发
-  GameWorld/               PVF 只读数据
-```
+如果只记五件事，请记这些：
 
-## 社区交流
+1. **在线背包只认 `InventoryService`。** 先取得属于当前连接的背包租约 `InventoryLease`，再在 `lease.SyncRoot` 内完成读取、判断和修改。拿不到租约就返回失败，不要偷偷改数据库兜底。
+2. **先找现成服务。** 发物品走 `InventoryRewardGrantService`，删除走 `InventoryDeleteService`，移动或穿戴走 `InventoryMoveService`，其他功能先找同类业务服务。协议处理器不要直接调用 `SetItem/RemoveItem` 或底层插入接口；业务服务完成规则校验后可以按需使用。
+3. **金币和其他虚拟数量不是普通物品。** 在线金币、复活币、胜点和晶体都由 `InventoryService` 管理，不要再造第二套在线状态，也不要给它们手工创建普通 `ItemCore`。
+4. **先改在线背包，再保存。** 普通变化会标记为待保存，由统一生命周期落库；只有必须在成功回包前落库的功能，才需要调用 `InventoryPersistenceService.SaveDirty(lease)`。不要先写 SQL，再想办法把结果塞回在线背包。
+5. **刷新走现成入口。** 需要额外刷新槽位时，使用 `InventoryRefreshSender` 的 0x0D/0x0E 方法；如果成功回包已经包含完整变化，则按客户端实际处理方式决定是否省略。金币、外观和装备锁也都有对应方法。不要在协议处理器里手拼完整物品数据，也不要把 `ItemCore.ToBytes()` 直接当成封包内容。
 
-Discord: https://discord.gg/3wct6SZp
+不要在 `lease.SyncRoot` 里 `await`、发包或做长时间 I/O。
+
+## 几条不能踩的线
+
+- 普通在线协议处理器和业务服务不得直接写新背包表或附加数据表。
+- 改数据库结构时，要同时更新 `Server/DfoServer/Sqlite/item_schema.sql` 和 `SqliteMigrations.Steps`。迁移版本只往末尾加，已经发布的版本不要修改、重排或复用。
+- 多张表组成的一次业务写入必须放在同一个事务里。
+- 扣费失败就返回失败回包，不能吞掉错误后继续发奖励。
+- 客户端会用相同种子复算的掉落使用房间的 `DnfLcg`；其他服务端随机使用 `Infrastructure/ServerRandom`，不要自行 `new Random()`。
+- 周期任务注册到 `Infrastructure/ClockService`，不要自己开线程写 `while` 循环。停机期间会错过的结算，还要能在下次读取或写入时补算。
+- 改到共享代码时，原来经过这条路径的旧功能也要复测。只证明新功能能跑，不足以说明共享改动可以合入。
+
+旧表和兼容代码只用于迁移、诊断和一次性修复。不要因为看到现有例外，就把新的在线业务接回旧 Store/DTO 或数据库直写路径。
+
+## 协议改动要拿证据说话
+
+86JP 客户端是协议字段的最终依据。动包格式前先查已有逆向结论和实现，PR 中标明证据来源：
+
+- 86JP IDA 数据流和地址
+- 抓包样本及十六进制包体
+- PVF 文件路径和字段
+- 仅作参考的旧服务端或其他客户端版本
+
+不要靠名称相似、字段对齐或相邻调用猜语义。还没坐实的结论就明确写“待确认”。
+
+自动化覆盖不了的客户端交互，要实机验证请求、回包、刷新和重登后的保存结果。拿不准实现方式时，先找同类业务，不要另起一套抽象。

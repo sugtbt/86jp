@@ -276,13 +276,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 if (extraEntries != null)
                 {
                     foreach (var e in extraEntries)
-                        run.Drops[e.GlobalSeq] = new DropInfo
-                        {
-                            SceneSlot = e.GlobalSeq,
-                            TemplateId = e.ItemId,
-                            StackCount = e.StackCount,
-                            Endurance = e.Endurance,
-                        };
+                        run.Drops[e.GlobalSeq] = e.ToDropInfo();
                 }
 
                 var ridableForRoom = GetRidableEntriesForRoom(session, maze.X, maze.Y);
@@ -588,12 +582,15 @@ namespace DfoServer.Network.Handlers.Dungeon
                     if (roll >= item.DropRate) continue;
 
                     itemSeqCounter++;
+                    var drop = DropInfo.CreateItem(itemSeqCounter, item.ItemId, 1);
                     result.Add(new PassiveObjectDropEntry
                     {
                         ObjectIndex = (byte)item.Index,
                         GlobalSeq = itemSeqCounter,
-                        ItemId = (uint)item.ItemId,
-                        StackCount = 1,
+                        ItemId = drop.TemplateId,
+                        StackCount = drop.StackCount,
+                        Endurance = drop.Endurance,
+                        Core = drop.Core != null ? drop.Core.Copy() : null,
                     });
                 }
 

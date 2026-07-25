@@ -61,6 +61,39 @@ namespace DfoServer.Game.Dungeon
             };
         }
 
+        public static CardReward GenerateEquipmentCard(int dungeonLevel, int difficulty, DnfLcg lcg)
+        {
+            int rarity = RollClearRewardRarity(lcg);
+            int itemId = MonsterDropConfig.ChooseEquipment(lcg, dungeonLevel, rarity);
+            if (itemId <= 0)
+            {
+                for (var fallbackRarity = 0; fallbackRarity <= 6; fallbackRarity++)
+                {
+                    if (fallbackRarity == rarity)
+                        continue;
+
+                    itemId = MonsterDropConfig.ChooseEquipment(lcg, dungeonLevel, fallbackRarity);
+                    if (itemId > 0)
+                        break;
+                }
+            }
+
+            if (itemId <= 0)
+            {
+                FileLogger.Log($"[ClearRewardGenerator] paid card equipment pool missing level={dungeonLevel} diff={difficulty}");
+                return default;
+            }
+
+            return new CardReward
+            {
+                IsGold = false,
+                ItemId = itemId,
+                StackCount = 1,
+                IsEquipment = true,
+                Durability = ItemMetadataResolver.Resolve(itemId).Durability
+            };
+        }
+
         private static int RollClearRewardRarity(DnfLcg lcg)
         {
             int roll = lcg.Next(1000000) + 1;

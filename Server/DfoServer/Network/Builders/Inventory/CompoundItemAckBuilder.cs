@@ -44,9 +44,7 @@ namespace DfoServer.Network.Builders
             for (var index = 0; index < count; index++)
             {
                 var reward = rewards[index];
-                var stackCount = reward.StackCount > 0
-                    ? reward.StackCount
-                    : Math.Max(1, reward.GrantedCount);
+                var stackCount = Math.Max(1, reward.GrantedCount);
                 writer.WriteByte((byte)reward.ListType);
                 writer.WriteInt16(reward.SlotIndex);
                 writer.WriteInt32(reward.ItemTemplateId);

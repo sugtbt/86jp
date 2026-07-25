@@ -1,12 +1,14 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Appearance;
 using DfoServer.Game.Characters;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Names;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers;
+using Microsoft.Data.Sqlite;
 using System;
 using System.Linq;
 using System.Text;
@@ -47,6 +49,66 @@ namespace DfoServer.Network.Handlers
                 if (s?.Player != null && s.Player.CharacterId > 0 && s.Player.UserId == uid)
                     return s;
             return null;
+        }
+
+        private static int ResolveAccountId(EnhancedClientSession session, CharacterRecord record)
+        {
+            if (session?.Account?.AccountId > 0)
+                return session.Account.AccountId;
+
+            return record?.AccountId ?? 0;
+        }
+
+        private InventoryService TryLoadInventoryForLease(int characterId, int accountId)
+        {
+            if (characterId <= 0 || accountId <= 0)
+                return null;
+
+            try
+            {
+                var connectionString = Infrastructure.SqliteDatabaseBootstrap.Initialize(
+                    Infrastructure.ServerPaths.DatabasePath,
+                    Infrastructure.ServerPaths.SchemaFilePath);
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    return InventoryService.LoadFromDb(connection, characterId, accountId);
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"[{ProtocolName}] inventory lease load failed cid={characterId} aid={accountId}: {ex}");
+                return null;
+            }
+        }
+
+        private static void SaveExistingInventoryLeaseBeforeReload(EnhancedClientSession session, int characterId)
+        {
+            if (session == null || characterId <= 0)
+                return;
+
+            if (InventoryContext.TryGetLease(characterId, out var lease)
+                && lease.IsOwnedBy(session.SessionId))
+                InventoryPersistenceService.SaveDirty(lease);
+        }
+
+        private void TryRegisterInventoryLease(
+            EnhancedClientSession session,
+            CharacterRecord record,
+            InventoryService inventory)
+        {
+            if (session == null || record == null || inventory == null)
+                return;
+
+            try
+            {
+                InventoryContext.Register(session.SessionId, record.CharacterId, inventory);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] inventory lease register failed cid={record.CharacterId} aid={inventory.AccountId}: {ex}");
+            }
         }
 
         public async Task Handle_ENUM_CMDPACKET_SELECT_CHARACTER(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -92,6 +154,13 @@ namespace DfoServer.Network.Handlers
 
                 if (record != null)
                 {
+                    SaveExistingInventoryLeaseBeforeReload(session, record.CharacterId);
+                    var inventory = TryLoadInventoryForLease(
+                        record.CharacterId,
+                        ResolveAccountId(session, record));
+                    session.Player.HydrateFrom(record);
+                    TryRegisterInventoryLease(session, record, inventory);
+
                     try
                     {
                         var tail = new Game.CharacterData.SqliteSubtype0FieldsRepository(
@@ -112,18 +181,21 @@ namespace DfoServer.Network.Handlers
                             _honorLevel.ApplyToSubtype0Tail(tail, session.Account.AccountId, null);
                         }
                         if (tail != null)
+                        {
                             record.Subtype0Tail = tail;
+                            session.Player.Subtype0Tail = tail;
+                        }
 
                         // 城镇模型使用会话内的 AppearanceEntries；不要使用可能过期/空的 characters.appearance_blob，
                         // 每次选角都从当前穿戴栏重建，避免角色选人/副本正确但城镇武器外观错误。
-                        record.Appearance = AppearanceService.LoadAppearanceFromEquipEntries(record.CharacterId);
+                        record.Appearance = AppearanceService.LoadOnlineAppearanceFromInventory(record.CharacterId);
                     }
                     catch (Exception ex)
                     {
                         FileLogger.Log($"[{ProtocolName}] Select character subtype0 load failed: {ex.Message}");
                     }
 
-                    session.Player.HydrateFrom(record);
+                    session.Player.AppearanceEntries = record.Appearance ?? Array.Empty<CharacterAppearanceEntry>();
                     _characterRepository.UpdatePosition(
                         session.Player.CharacterId,
                         session.Player.CurTownId,
@@ -497,7 +569,7 @@ namespace DfoServer.Network.Handlers
             var characters = _characterRepository.ListByAccount(accountId);
             var honorLevel = _honorLevel.LoadSummary(accountId, characters);
             var body = AccountCharacterListBodyBuilder.Build(
-                characters, _getUserInfoTemplate, out _, honorLevel);
+                characters, _getUserInfoTemplate, out _, honorLevel, accountId);
             return (body, honorLevel);
         }
     }

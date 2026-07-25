@@ -5,6 +5,7 @@ using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Progression;
 using DfoServer.Network;
+using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.DeathTower
 {
@@ -39,7 +40,8 @@ namespace DfoServer.Game.DeathTower
     }
 
     internal delegate ExperienceGrantResult DeathTowerExperienceGrantInTransaction(
-        DbScope scope,
+        SqliteConnection connection,
+        SqliteTransaction transaction,
         int characterId,
         int accountId,
         byte currentLevel,
@@ -48,30 +50,32 @@ namespace DfoServer.Game.DeathTower
 
     public sealed class DeathTowerSettlementService
     {
-        private readonly IAssetService _assetService;
+        private readonly string _connectionString;
         private readonly AccountExperienceProgressService _accountExperience;
         private readonly DeathTowerExperienceGrantInTransaction _grantExperienceInTransaction;
 
         public DeathTowerSettlementService(
-            IAssetService assetService,
+            string connectionString,
             AccountExperienceProgressService accountExperience = null)
-            : this(assetService, accountExperience, null)
+            : this(connectionString, accountExperience, null)
         {
         }
 
         internal DeathTowerSettlementService(
-            IAssetService assetService,
+            string connectionString,
             AccountExperienceProgressService accountExperience,
             DeathTowerExperienceGrantInTransaction grantExperienceInTransaction)
         {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
+            _connectionString = !string.IsNullOrWhiteSpace(connectionString)
+                ? connectionString
+                : throw new ArgumentException("A database connection string is required.", nameof(connectionString));
             _accountExperience = accountExperience
                 ?? throw new ArgumentNullException(nameof(accountExperience));
             _grantExperienceInTransaction = grantExperienceInTransaction
-                ?? ((scope, characterId, accountId, level, exp, rawGain) =>
+                ?? ((connection, transaction, characterId, accountId, level, exp, rawGain) =>
                     CharacterExperienceService.GrantInTransaction(
-                    scope.Connection,
-                    scope.Transaction,
+                    connection,
+                    transaction,
                     characterId,
                     accountId,
                     level,
@@ -100,13 +104,51 @@ namespace DfoServer.Game.DeathTower
             var items = new List<DeathTowerRewardItem>(rewardRollCount);
             var changedMainSlots = new List<short>(rewardRollCount);
             var changedMainSlotSet = new HashSet<short>();
+            var characterId = session.Player.CharacterId;
             var accountId = session.Account?.AccountId ?? 1;
             var updatedGold = 0;
+            if (!TryGetOwnedInventory(session, out var lease))
+                throw new InvalidOperationException($"Death tower settlement requires online inventory for character {characterId}.");
+
             ExperienceGrantResult expProgress;
-            using (var scope = _assetService.OpenScope(session.Player.CharacterId, accountId))
+            using (var connection = new SqliteConnection(_connectionString))
+            {
+                connection.Open();
+                using (var transaction = connection.BeginTransaction())
+                {
+                    expProgress = _grantExperienceInTransaction(
+                        connection,
+                        transaction,
+                        characterId,
+                        accountId,
+                        previousLevel,
+                        session.Player.Exp,
+                        expGained);
+                    var shouldPersistCharacter = expProgress.LeveledUp
+                        || expProgress.NormalExpGain > 0
+                        || expProgress.NormalizedMaxLevelExp;
+                    if (shouldPersistCharacter && !expProgress.Persisted)
+                    {
+                        throw new InvalidOperationException(
+                            $"Death tower settlement progress write failed for character {session.Player.CharacterId}.");
+                    }
+
+                    transaction.Commit();
+                }
+            }
+
+            var carryLimit = InventoryGoldCarryLimitLoader.Load(characterId);
+            lock (lease.SyncRoot)
             {
                 if (goldGained > 0)
-                    _assetService.GrantGold(scope, goldGained);
+                {
+                    if (!lease.Inventory.TryGrantGold(goldGained, carryLimit, out _, out updatedGold))
+                        FileLogger.Log($"[DeathTower] settlement gold skipped: cid={characterId} amount={goldGained}");
+                }
+                else
+                {
+                    updatedGold = lease.Inventory.GetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart)?.Count ?? 0;
+                }
 
                 for (var index = 0; index < rewardRollCount; index++)
                 {
@@ -117,34 +159,21 @@ namespace DfoServer.Game.DeathTower
                     if (itemId <= 0)
                         continue;
 
-                    if (!_assetService.TryAddItem(scope, itemId, 1, out var assignedSlot))
+                    if (!InventoryRewardGrantService.TryCreateAndInsert(
+                            lease.Inventory,
+                            itemId,
+                            ItemCreateReason.DungeonDrop,
+                            1,
+                            out var grant)
+                        || !grant.Success)
                     {
-                        FileLogger.Log($"[DeathTower] settlement item skipped: inventory full/unsupported cid={session.Player.CharacterId} item={itemId}");
+                        FileLogger.Log($"[DeathTower] settlement item skipped: inventory full/unsupported cid={characterId} item={itemId}");
                         continue;
                     }
 
                     items.Add(new DeathTowerRewardItem(itemId, 1));
-                    if (changedMainSlotSet.Add(assignedSlot))
-                        changedMainSlots.Add(assignedSlot);
+                    AddChangedMainSlots(changedMainSlots, changedMainSlotSet, grant.Changes);
                 }
-
-                updatedGold = _assetService.LoadWallet(scope).Gold;
-                expProgress = _grantExperienceInTransaction(
-                    scope,
-                    session.Player.CharacterId,
-                    accountId,
-                    previousLevel,
-                    session.Player.Exp,
-                    expGained);
-                var shouldPersistCharacter = expProgress.LeveledUp
-                    || expProgress.NormalExpGain > 0
-                    || expProgress.NormalizedMaxLevelExp;
-                if (shouldPersistCharacter && !expProgress.Persisted)
-                {
-                    throw new InvalidOperationException(
-                        $"Death tower settlement progress write failed for character {session.Player.CharacterId}.");
-                }
-                scope.Commit();
             }
 
             session.Player.Exp = expProgress.NewExp;
@@ -213,6 +242,39 @@ namespace DfoServer.Game.DeathTower
             if (value <= 0)
                 return 0;
             return value >= int.MaxValue ? int.MaxValue : (int)value;
+        }
+
+        private static bool TryGetOwnedInventory(EnhancedClientSession session, out InventoryLease lease)
+        {
+            lease = null;
+            var characterId = session?.Player?.CharacterId ?? 0;
+            return characterId > 0
+                && InventoryContext.TryGetLease(characterId, out lease)
+                && lease.IsOwnedBy(session.SessionId);
+        }
+
+        private static void AddChangedMainSlots(
+            List<short> changedMainSlots,
+            HashSet<short> changedMainSlotSet,
+            InventoryMutationSet changes)
+        {
+            if (changes == null)
+                return;
+
+            foreach (var change in changes.Slots)
+            {
+                if (change.ListType == InventoryListType.Main)
+                    AddChangedMainSlot(changedMainSlots, changedMainSlotSet, change.SlotIndex);
+            }
+        }
+
+        private static void AddChangedMainSlot(
+            List<short> changedMainSlots,
+            HashSet<short> changedMainSlotSet,
+            short slotIndex)
+        {
+            if (changedMainSlotSet.Add(slotIndex))
+                changedMainSlots.Add(slotIndex);
         }
 
     }

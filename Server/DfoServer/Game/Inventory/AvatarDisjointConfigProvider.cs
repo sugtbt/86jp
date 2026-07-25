@@ -1,4 +1,5 @@
 using DfoServer.GameWorld;
+using DfoServer.Infrastructure;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -109,7 +110,7 @@ namespace DfoServer.Game.Inventory
             if (total <= 0)
                 return null;
 
-            var roll = Random.Shared.NextInt64(total);
+            var roll = NextLong(total);
             foreach (var reward in rewards)
             {
                 roll -= Math.Max(0, reward.Weight);
@@ -117,6 +118,18 @@ namespace DfoServer.Game.Inventory
                     return reward;
             }
             return rewards[rewards.Count - 1];
+        }
+
+        private static long NextLong(long maxValue)
+        {
+            if (maxValue <= 0)
+                return 0;
+            if (maxValue <= int.MaxValue)
+                return ServerRandom.Next((int)maxValue);
+
+            var high = (long)ServerRandom.Next();
+            var low = (uint)ServerRandom.Next();
+            return ((high << 31) | low) % maxValue;
         }
 
         private static void AddOrMerge(List<DisjointMaterialResult> result, int itemId, int count)

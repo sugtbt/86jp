@@ -23,7 +23,7 @@ namespace DfoServer.Game.Inventory
             if (!BoosterMappings.Value.TryGetValue((grade, inputCount), out boosterItemTemplateId))
                 return false;
 
-            var booster = InventoryDbPrimitives.LoadStackableItem(boosterItemTemplateId);
+            var booster = StackableItemProvider.Load(boosterItemTemplateId);
             if (booster?.BoosterRewards == null || booster.BoosterRewards.Count == 0)
                 return false;
 

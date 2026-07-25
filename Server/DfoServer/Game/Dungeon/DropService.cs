@@ -1,5 +1,7 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.ItemUpgrade;
 using DfoServer.GameWorld;
+using DfoServer.Network;
 using System;
 using System.Collections.Generic;
 
@@ -7,13 +9,10 @@ namespace DfoServer.Game.Dungeon
 {
     internal sealed class DropService
     {
-        private readonly IAssetService _assetService;
-        private readonly IInventoryStore _inventoryStore;
+        private const int MaxGoldPerDrop = 1000;
 
-        internal DropService(IAssetService assetService, IInventoryStore inventoryStore)
+        internal DropService()
         {
-            _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
-            _inventoryStore = inventoryStore ?? throw new ArgumentNullException(nameof(inventoryStore));
         }
 
         internal static void WarmUpAbyssParty()
@@ -81,59 +80,102 @@ namespace DfoServer.Game.Dungeon
             return drops;
         }
 
-        internal PickupResult TryPickup(DungeonRun run, ushort srcSlot, int characterId, int accountId)
+        internal PickupResult TryPickup(DungeonRun run, ushort srcSlot, EnhancedClientSession session)
+        {
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (characterId <= 0
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+            {
+                FileLogger.Log($"[DropService] online inventory missing cid={characterId} sceneSlot={srcSlot}");
+                return PickupResult.PersistenceFailed;
+            }
+
+            return TryPickup(run, srcSlot, lease);
+        }
+
+        internal PickupResult TryPickup(DungeonRun run, ushort srcSlot, InventoryLease lease)
         {
             if (run == null || !run.Drops.TryGetValue(srcSlot, out var drop))
                 return PickupResult.NotFound;
+            if (lease == null)
+                return PickupResult.PersistenceFailed;
 
-            if (drop.IsGold)
+            var carryLimit = drop.IsGold
+                ? InventoryGoldCarryLimitLoader.Load(lease.CharacterId)
+                : int.MaxValue;
+            lock (lease.SyncRoot)
             {
-                var baseGold = (int)drop.StackCount;
-                var bonusPct = drop.IsPlayerDropped ? 0 : GetEquippedGoldBonus(characterId);
-                var extraGold = baseGold * bonusPct / 100;
-                var grantedGold = PersistGold(characterId, accountId, baseGold + extraGold);
-                if (!grantedGold.HasValue)
-                    return PickupResult.PersistenceFailed;
+                if (drop.IsGold)
+                {
+                    var baseGold = (int)drop.StackCount;
+                    var bonusPct = drop.IsPlayerDropped ? 0 : GetEquippedGoldBonus(lease.Inventory);
+                    var extraGold = baseGold * bonusPct / 100;
+                    if (!lease.Inventory.TryGrantGold(baseGold + extraGold, carryLimit, out var grantedGold, out _))
+                        return PickupResult.PersistenceFailed;
+
+                    run.Drops.Remove(srcSlot);
+                    var grantedBaseGold = Math.Min(baseGold, grantedGold);
+                    var grantedExtraGold = Math.Min(extraGold, Math.Max(0, grantedGold - grantedBaseGold));
+                    return new PickupResult
+                    {
+                        Success = true,
+                        IsGold = true,
+                        GoldAmount = grantedGold,
+                        ExtraGold = grantedExtraGold
+                    };
+                }
+
+                var pickupCount = NormalizePickupCount(drop.StackCount);
+                var pickedItemId = drop.Core != null ? drop.Core.ItemId : (int)drop.TemplateId;
+                InventoryRewardGrantResult grant;
+                bool inserted;
+                if (drop.Core != null)
+                {
+                    inserted = InventoryRewardGrantService.TryInsertExisting(
+                        lease.Inventory,
+                        drop.Core.Copy(),
+                        pickupCount,
+                        out grant);
+                }
+                else
+                {
+                    inserted = InventoryRewardGrantService.TryCreateAndInsert(
+                        lease.Inventory,
+                        (int)drop.TemplateId,
+                        ItemCreateReason.DungeonDrop,
+                        pickupCount,
+                        out grant);
+                }
+
+                if (!inserted || !grant.Success)
+                    return PickupResult.InventoryFull;
 
                 run.Drops.Remove(srcSlot);
-                var grantedBaseGold = Math.Min(baseGold, grantedGold.Value);
-                var grantedExtraGold = Math.Min(extraGold, Math.Max(0, grantedGold.Value - grantedBaseGold));
                 return new PickupResult
                 {
                     Success = true,
-                    IsGold = true,
-                    GoldAmount = grantedGold.Value,
-                    ExtraGold = grantedExtraGold
+                    IsGold = false,
+                    InventorySlot = grant.SlotIndex,
+                    PickedUpItemId = pickedItemId
                 };
             }
+        }
 
-            short invSlot;
-            CommonInventoryItem restoredItem = null;
-            if (drop.InventoryPayload != null)
-            {
-                if (!_inventoryStore.TryRestoreDungeonDrop(
-                        characterId,
-                        drop.InventoryPayload,
-                        out invSlot,
-                        out restoredItem))
-                {
-                    return PickupResult.InventoryFull;
-                }
-            }
-            else if (!TryPickupItemToInventory(characterId, accountId, (int)drop.TemplateId, (int)drop.StackCount, out invSlot))
-            {
-                return PickupResult.InventoryFull;
-            }
+        internal InventoryDropResult TryDropInventoryItem(
+            DungeonRun run,
+            EnhancedClientSession session,
+            InventoryListType listType,
+            short slotIndex,
+            int count)
+        {
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (characterId <= 0
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId))
+                return InventoryDropResult.InventoryRejected;
 
-            run.Drops.Remove(srcSlot);
-            return new PickupResult
-            {
-                Success = true,
-                IsGold = false,
-                InventorySlot = invSlot,
-                PickedUpItemId = (int)drop.TemplateId,
-                RestoredItem = restoredItem,
-            };
+            return TryDropInventoryItem(run, lease, listType, slotIndex, count);
         }
 
         internal InventoryDropResult TryDropInventoryItem(
@@ -143,52 +185,70 @@ namespace DfoServer.Game.Dungeon
             short slotIndex,
             int count)
         {
+            if (characterId <= 0 || !InventoryContext.TryGetLease(characterId, out var lease))
+                return InventoryDropResult.InventoryRejected;
+
+            return TryDropInventoryItem(run, lease, listType, slotIndex, count);
+        }
+
+        internal InventoryDropResult TryDropInventoryItem(
+            DungeonRun run,
+            InventoryLease lease,
+            InventoryListType listType,
+            short slotIndex,
+            int count)
+        {
             if (run == null
+                || lease == null
                 || listType != InventoryListType.Main
                 || slotIndex < 0
                 || count <= 0)
-            {
                 return InventoryDropResult.InvalidRequest;
-            }
 
-            if (!_inventoryStore.TryTakeDungeonDrop(
-                    characterId,
-                    listType,
-                    slotIndex,
-                    count,
-                    out var payload)
-                || payload == null
-                || payload.DroppedCount <= 0)
+            lock (lease.SyncRoot)
             {
-                return InventoryDropResult.InventoryRejected;
-            }
+                if (slotIndex == InventoryService.MainVirtualCurrencySlotStart)
+                    return TryDropGold(run, lease.Inventory, count);
 
-            DropInfo drop;
-            lock (run.SyncRoot)
-            {
-                run.SceneSlotCounter++;
-                if (run.SceneSlotCounter == 0)
-                    run.SceneSlotCounter++;
+                var source = lease.Inventory.GetItem(listType, slotIndex);
+                if (source == null)
+                    return InventoryDropResult.InventoryRejected;
 
-                drop = new DropInfo
+                if (IsEquipmentItemLocked(lease.Inventory, source))
+                    return InventoryDropResult.InventoryRejected;
+
+                var metadata = ItemMetadataResolver.Resolve(source.ItemId);
+                if (!CanDrop(source, metadata, out var rejectReason))
                 {
-                    SceneSlot = run.SceneSlotCounter,
-                    TemplateId = (uint)payload.ItemTemplateId,
-                    StackCount = (uint)payload.DroppedCount,
-                    Endurance = payload.PacketItem?.Durability ?? 0,
-                    UpgradeLevel = payload.PacketItem?.ExtData0 ?? 0,
-                    IsPlayerDropped = true,
-                    InventoryPayload = payload,
-                };
-                run.Drops[drop.SceneSlot] = drop;
-            }
+                    FileLogger.Log($"[DungeonDrop] REJECT: cid={lease.CharacterId} slot={slotIndex} item={source.ItemId} reason={rejectReason}");
+                    return InventoryDropResult.InventoryRejected;
+                }
 
-            return new InventoryDropResult
-            {
-                Success = true,
-                Drop = drop,
-                RemainingStackCount = payload.RemainingCount,
-            };
+                var stackable = InventoryStackRuleService.IsStackable(source);
+                var availableCount = stackable ? Math.Max(0, source.Count) : 1;
+                if (count > availableCount || (!stackable && count != 1))
+                    return InventoryDropResult.InventoryRejected;
+
+                var droppedCore = source.Copy();
+                var droppedCount = stackable ? count : 1;
+                if (stackable)
+                    droppedCore.Count = droppedCount;
+
+                InventoryDeleteResult delete;
+                var removed = stackable
+                    ? InventoryDeleteService.TryDecreaseStack(lease.Inventory, listType, slotIndex, count, out delete)
+                    : InventoryDeleteService.TryRemoveSlot(lease.Inventory, listType, slotIndex, out delete);
+                if (!removed || delete == null || !delete.Success)
+                    return InventoryDropResult.InventoryRejected;
+
+                var drop = RegisterInventoryDrop(run, droppedCore, droppedCount);
+                return new InventoryDropResult
+                {
+                    Success = true,
+                    Drop = drop,
+                    RemainingStackCount = delete.RemainingCount,
+                };
+            }
         }
 
         private static void RegisterDrops(DungeonRun run, List<DropInfo> drops)
@@ -198,65 +258,134 @@ namespace DfoServer.Game.Dungeon
                 run.Drops[drop.SceneSlot] = drop;
         }
 
-        private int? PersistGold(int characterId, int accountId, int goldGained)
+        private static InventoryDropResult TryDropGold(DungeonRun run, InventoryService inventory, int count)
         {
-            if (goldGained <= 0) return 0;
-            try
+            if (count > MaxGoldPerDrop)
+                return InventoryDropResult.InventoryRejected;
+
+            if (inventory == null
+                || !inventory.TryConsumeMainItem(InventoryService.MainVirtualCurrencySlotStart, count, out var consume)
+                || consume == null
+                || !consume.Success)
+                return InventoryDropResult.InventoryRejected;
+
+            var drop = RegisterInventoryDrop(run, null, count);
+            return new InventoryDropResult
             {
-                using (var scope = _assetService.OpenScope(characterId, accountId))
+                Success = true,
+                Drop = drop,
+                RemainingStackCount = consume.RemainingCount,
+            };
+        }
+
+        private static DropInfo RegisterInventoryDrop(DungeonRun run, ItemCore core, int count)
+        {
+            lock (run.SyncRoot)
+            {
+                run.SceneSlotCounter++;
+                if (run.SceneSlotCounter == 0)
+                    run.SceneSlotCounter++;
+
+                var drop = new DropInfo
                 {
-                    var granted = _assetService.GrantGold(scope, goldGained);
-                    scope.Commit();
-                    return granted;
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[DropService] PersistGold ERROR: {ex.Message}");
-                return null;
+                    SceneSlot = run.SceneSlotCounter,
+                    TemplateId = core != null ? unchecked((uint)core.ItemId) : 0,
+                    StackCount = unchecked((uint)Math.Max(0, count)),
+                    Endurance = core != null ? core.Durability : (ushort)0,
+                    UpgradeLevel = core != null ? core.Upgrade : (byte)0,
+                    Core = core != null ? core.Copy() : null,
+                    IsPlayerDropped = true,
+                };
+                run.Drops[drop.SceneSlot] = drop;
+                return drop;
             }
         }
 
-        private int GetEquippedGoldBonus(int characterId)
+        private static int NormalizePickupCount(uint stackCount)
         {
+            if (stackCount == 0)
+                return 1;
+
+            return stackCount > int.MaxValue ? int.MaxValue : (int)stackCount;
+        }
+
+        private static int GetEquippedGoldBonus(InventoryService inventory)
+        {
+            if (inventory == null)
+                return 0;
+
             var totalBonus = 0;
-            try
+            foreach (var pair in inventory.GetItems(InventoryListType.Equipment))
             {
-                using (var scope = _assetService.OpenScope(characterId, 0))
-                {
-                    using var cmd = scope.Connection.CreateCommand();
-                    cmd.CommandText = "SELECT item_id FROM character_equipped_entries WHERE character_id = @cid";
-                    cmd.Parameters.AddWithValue("@cid", characterId);
-                    using var reader = cmd.ExecuteReader();
-                    while (reader.Read())
-                    {
-                        var itemId = reader.GetInt32(0);
-                        if (GoldBonusEquipments.TryGetValue(itemId, out var bonus))
-                            totalBonus += bonus;
-                    }
-                }
+                var itemId = pair.Value?.ItemId ?? 0;
+                if (GoldBonusEquipments.TryGetValue(itemId, out var bonus))
+                    totalBonus += bonus;
             }
-            catch (Exception ex) { FileLogger.Log($"[DropService] GetEquippedGoldBonus ERROR: cid={characterId}: {ex.Message}"); }
+
             return totalBonus;
         }
 
-        private bool TryPickupItemToInventory(int characterId, int accountId, int itemTemplateId, int stackCount, out short assignedSlot)
+        private static bool IsEquipmentItemLocked(InventoryService inventory, ItemCore core)
         {
-            assignedSlot = -1;
-            try
+            return inventory != null
+                && core != null
+                && core.EquipmentLockId != 0
+                && inventory.EquipmentLocks.TryGet(core.EquipmentLockId, out var itemLock)
+                && itemLock != null
+                && itemLock.State != 0;
+        }
+
+        private static bool CanDrop(ItemCore item, ItemMetadata metadata, out string rejectReason)
+        {
+            rejectReason = null;
+            if (item == null || metadata == null || string.Equals(metadata.ItemKind, "special", StringComparison.Ordinal))
             {
-                using (var scope = _assetService.OpenScope(characterId, accountId))
-                {
-                    var result = _assetService.TryAddItem(scope, itemTemplateId, stackCount, out assignedSlot);
-                    if (result) scope.Commit();
-                    return result;
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[DropService] TryPickupItemToInventory ERROR: {ex.Message}");
+                rejectReason = "missing current-PVF metadata";
                 return false;
             }
+
+            if (metadata.Rarity > 2)
+            {
+                rejectReason = $"rarity {metadata.Rarity} exceeds 2";
+                return false;
+            }
+
+            var attachType = NormalizePvfToken(metadata.AttachType);
+            var allowedAttachType = attachType == "free"
+                || attachType == "sealing trade"
+                || attachType == "trade limit"
+                || (attachType == "sealing" && item.ItemKind == ItemCore.KindEquipment);
+            if (!allowedAttachType)
+            {
+                rejectReason = $"attach type [{attachType}]";
+                return false;
+            }
+
+            if (item.TradeRestriction != 0)
+            {
+                rejectReason = "instance trade restriction";
+                return false;
+            }
+
+            if (EquipmentTypeInfo.ParseOrUnknown(metadata.EquipmentType) == EquipmentType.TitleName)
+            {
+                rejectReason = "title equipment";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static string NormalizePvfToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var trimmed = value.Trim();
+            if (trimmed.Length >= 2 && trimmed[0] == '[' && trimmed[trimmed.Length - 1] == ']')
+                trimmed = trimmed.Substring(1, trimmed.Length - 2);
+
+            return trimmed.Trim().ToLowerInvariant();
         }
 
         private static readonly Dictionary<int, int> GoldBonusEquipments = new()
@@ -311,12 +440,19 @@ namespace DfoServer.Game.Dungeon
         public int ExtraGold;
         public short InventorySlot;
         public int PickedUpItemId;
-        public CommonInventoryItem RestoredItem;
         public PickupFailReason FailReason;
 
         internal static readonly PickupResult NotFound = new PickupResult { FailReason = PickupFailReason.NotFound };
         internal static readonly PickupResult InventoryFull = new PickupResult { FailReason = PickupFailReason.InventoryFull };
         internal static readonly PickupResult PersistenceFailed = new PickupResult { FailReason = PickupFailReason.PersistenceFailed };
+    }
+
+    internal enum PickupFailReason : byte
+    {
+        None,
+        NotFound,
+        InventoryFull,
+        PersistenceFailed
     }
 
     internal struct InventoryDropResult
@@ -342,13 +478,5 @@ namespace DfoServer.Game.Dungeon
         None,
         InvalidRequest,
         InventoryRejected,
-    }
-
-    internal enum PickupFailReason : byte
-    {
-        None,
-        NotFound,
-        InventoryFull,
-        PersistenceFailed,
     }
 }

@@ -323,6 +323,46 @@ namespace DfoServer.Game.Inventory
                 : null;
         }
 
+        internal static bool TryResolveItemKind(int itemTemplateId, out byte itemKind)
+        {
+            itemKind = ItemCore.KindUnknown;
+            if (itemTemplateId <= 0)
+                return false;
+
+            ItemMetadata metadata;
+            try
+            {
+                metadata = Resolve(itemTemplateId);
+            }
+            catch
+            {
+                return false;
+            }
+
+            return TryResolveItemKind(itemTemplateId, metadata, out itemKind);
+        }
+
+        internal static bool TryResolveItemKind(int itemTemplateId, ItemMetadata metadata, out byte itemKind)
+        {
+            itemKind = ItemCore.KindUnknown;
+            if (metadata == null)
+                return false;
+
+            if (string.Equals(metadata.ItemKind, "equipment", StringComparison.Ordinal))
+            {
+                itemKind = ResolveEquipmentItemKind(metadata);
+                return true;
+            }
+
+            if (metadata.IsStackable)
+            {
+                itemKind = ResolveStackableItemKind(itemTemplateId, metadata);
+                return true;
+            }
+
+            return false;
+        }
+
         public static byte ResolveEmblemSocketType(int itemTemplateId)
         {
             return EmblemSocketTypeCache.GetOrAdd(
@@ -747,10 +787,11 @@ namespace DfoServer.Game.Inventory
         /// </summary>
         public static bool IsCloneAvatarItem(int itemTemplateId)
         {
-            var equipmentEntry = EquipmentList.Value.GetById(itemTemplateId);
-            if (equipmentEntry == null) return false;
-            var equipment = EquipmentFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("equipment", equipmentEntry.FilePath)));
-            return string.Equals(equipment.ItemCategory, "clear avatar", StringComparison.OrdinalIgnoreCase);
+            if (!TryLoadEquipmentFile(itemTemplateId, out var equipment))
+                return false;
+
+            return equipment.ClearAvatar == 1
+                || string.Equals(equipment.ItemCategory, "clear avatar", StringComparison.OrdinalIgnoreCase);
         }
 
         public static bool IsNameTagItem(int itemTemplateId)
@@ -764,6 +805,19 @@ namespace DfoServer.Game.Inventory
         public static bool IsPetInventoryEquipment(int itemTemplateId)
         {
             return CreatureExtraResolver.IsPetInventoryEquipment(itemTemplateId);
+        }
+
+        internal static bool IsCreatureItem(int itemTemplateId)
+        {
+            try
+            {
+                return CreatureExtraResolver.HasCreatureExtra(itemTemplateId);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"[ItemMetadataResolver] IsCreatureItem(0x{itemTemplateId:X8}) failed: {ex.Message}");
+                return false;
+            }
         }
 
         internal static bool IsAvatarItem(ItemMetadata metadata)
@@ -784,6 +838,72 @@ namespace DfoServer.Game.Inventory
             var stackableType = metadata.StackableType.Replace("`", "").Trim();
             return stackableType.StartsWith("[creature]", StringComparison.OrdinalIgnoreCase)
                 || stackableType.StartsWith("[feed]", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static byte ResolveEquipmentItemKind(ItemMetadata metadata)
+        {
+            if (IsAvatarItem(metadata))
+                return ItemCore.KindAvatar;
+
+            var equipmentType = NormalizePvfKindTag(metadata.EquipmentType);
+            if (equipmentType == "creature")
+                return ItemCore.KindCreature;
+
+            if (equipmentType == "artifact red"
+                || equipmentType == "artifact blue"
+                || equipmentType == "artifact green")
+                return ItemCore.KindCreatureEquipment;
+
+            return ItemCore.KindEquipment;
+        }
+
+        private static byte ResolveStackableItemKind(int itemTemplateId, ItemMetadata metadata)
+        {
+            if (IsPetConsumableItem(metadata))
+                return ItemCore.KindCreatureConsumable;
+
+            var stackableType = NormalizePvfKindTag(metadata.StackableType);
+            if (stackableType == "avatar emblem")
+                return ItemCore.KindAvatarEmblem;
+
+            if (stackableType == "material expert job")
+                return ItemCore.KindExpertJobMaterial;
+
+            if (stackableType == "quest")
+                return ItemCore.KindQuest;
+
+            if (stackableType == "material")
+                return IsSpecialMaterialItem(itemTemplateId)
+                    ? ItemCore.KindSpecialMaterial
+                    : ItemCore.KindMaterial;
+
+            return ItemCore.KindConsumable;
+        }
+
+        private static bool IsSpecialMaterialItem(int itemTemplateId)
+        {
+            return itemTemplateId == 3033
+                || itemTemplateId == 3034
+                || itemTemplateId == 3035
+                || itemTemplateId == 3036
+                || itemTemplateId == 3037
+                || itemTemplateId == 3262;
+        }
+
+        private static string NormalizePvfKindTag(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var normalized = value.Replace("`", string.Empty).Trim();
+            if (normalized.Length >= 2 && normalized[0] == '[')
+            {
+                var end = normalized.IndexOf(']', 1);
+                if (end > 1)
+                    normalized = normalized.Substring(1, end - 1);
+            }
+
+            return normalized.Trim().ToLowerInvariant();
         }
     }
 }

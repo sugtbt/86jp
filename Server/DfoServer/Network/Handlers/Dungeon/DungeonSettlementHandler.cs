@@ -1,5 +1,6 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
+using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Premium;
@@ -12,6 +13,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.Data.Sqlite;
 using DungeonData = DfoServer.GameWorld.Dungeon;
 
 namespace DfoServer.Network.Handlers.Dungeon
@@ -111,7 +113,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 paidGold = ClearRewardGenerator.GenerateGoldCard(
                     dungeonLevel, run.Difficulty, lcg);
-                paidItem = ClearRewardGenerator.GenerateItemCard(
+                paidItem = ClearRewardGenerator.GenerateEquipmentCard(
                     dungeonLevel, run.Difficulty, lcg);
             }
             run.CardRewards = new List<ClearRewardGenerator.CardReward>
@@ -736,17 +738,22 @@ namespace DfoServer.Network.Handlers.Dungeon
             ushort luckyStar;
             try
             {
-                using (var scope = _svc.AssetService.OpenScope(characterId, accountId))
+                using (var connection = new SqliteConnection(_svc.ConnectionString))
                 {
-                    var wallet = _svc.AssetService.LoadWallet(scope);
-                    if (wallet.LuckyStar >= RentalCatalogCodec.MaxLuckyStar)
+                    connection.Open();
+                    using (var transaction = connection.BeginTransaction())
                     {
-                        FileLogger.Log($"[DungeonHandler] SUITABLE_LUCKY_STAR skipped: cap reached char={characterId} dungeon={run.DungeonId} level={clearLevel}");
-                        return;
+                        var wallet = CurrencyService.LoadWallet(connection, transaction, characterId);
+                        if (wallet.LuckyStar >= RentalCatalogCodec.MaxLuckyStar)
+                        {
+                            FileLogger.Log($"[DungeonHandler] SUITABLE_LUCKY_STAR skipped: cap reached char={characterId} dungeon={run.DungeonId} level={clearLevel}");
+                            return;
+                        }
+
+                        CurrencyService.GrantLuckyStar(connection, transaction, accountId, 1);
+                        luckyStar = (ushort)Math.Min(RentalCatalogCodec.MaxLuckyStar, wallet.LuckyStar + 1);
+                        transaction.Commit();
                     }
-                    _svc.AssetService.GrantLuckyStar(scope, 1);
-                    luckyStar = (ushort)Math.Min(RentalCatalogCodec.MaxLuckyStar, wallet.LuckyStar + 1);
-                    scope.Commit();
                 }
             }
             catch (Exception ex)

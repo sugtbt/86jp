@@ -4,7 +4,6 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using DfoServer.Game.Accounts;
-using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Infrastructure;
@@ -29,52 +28,61 @@ namespace DfoServer.SelfTests
             DeleteTempDatabase(tempDb);
             var connStr = SqliteDatabaseBootstrap.Initialize(tempDb, ServerPaths.SchemaFilePath);
             Seed(connStr);
-            var assetService = new SqliteAssetService(tempDb, ServerPaths.SchemaFilePath);
-            var service = new CardRewardService(assetService);
+            var service = new CardRewardService();
 
             using (var peer = ConnectedSession.Create())
             {
                 var session = peer.Session;
                 session.Player.CharacterId = CharacterId;
                 session.Account = new AccountRecord { AccountId = AccountId };
+                var inventory = new InventoryService(CharacterId, AccountId);
+                InventoryContext.Register(session.SessionId, CharacterId, inventory);
 
-                var run = BuildRun(freeGold: 10, paidGold: 20);
-                session.Player.CurrentRun = run;
+                try
+                {
+                    var run = BuildRun(freeGold: 10, paidGold: 20);
+                    session.Player.CurrentRun = run;
 
-                service.HandleSelectCard(session, new byte[] { 0, 0 }).GetAwaiter().GetResult();
-                CheckGold("free card grants once", connStr, 10, ref failures);
-                CheckGoldUpdatePacket("free card sends gold refresh packet", peer, 10, ref failures);
-                Check("free flag set, paid still pending",
-                    run.FreeCardRewardDelivered && !run.PaidCardRewardDelivered && run.CardRewards != null,
-                    ref failures);
+                    service.HandleSelectCard(session, new byte[] { 0, 0 }).GetAwaiter().GetResult();
+                    CheckGold("free card grants once", inventory, 10, ref failures);
+                    CheckGoldUpdatePacket("free card sends gold refresh packet", peer, 10, ref failures);
+                    Check("free flag set, paid still pending",
+                        run.FreeCardRewardDelivered && !run.PaidCardRewardDelivered && run.CardRewards != null,
+                        ref failures);
 
-                var shouldReturn = service.HandleEplpCommand(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
-                Check("EPLP requests return", shouldReturn, ref failures);
-                Check("EPLP does not auto-grant paid card or duplicate free card",
-                    LoadGold(connStr) == 10 && !run.PaidCardRewardDelivered,
-                    ref failures);
+                    var shouldReturn = service.HandleEplpCommand(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
+                    Check("EPLP requests return", shouldReturn, ref failures);
+                    Check("EPLP does not auto-grant paid card or duplicate free card",
+                        LoadGold(inventory) == 10 && !run.PaidCardRewardDelivered,
+                        ref failures);
 
-                service.HandleSelectCard(session, new byte[] { 0, 0 }).GetAwaiter().GetResult();
-                CheckGold("duplicate free-card click does not grant again", connStr, 10, ref failures);
+                    service.HandleSelectCard(session, new byte[] { 0, 0 }).GetAwaiter().GetResult();
+                    CheckGold("duplicate free-card click does not grant again", inventory, 10, ref failures);
 
-                var run2 = BuildRun(freeGold: 100, paidGold: 200);
-                session.Player.CurrentRun = run2;
-                service.HandleSelectCard(session, new byte[] { 0, 0 }).GetAwaiter().GetResult();
-                CheckGoldUpdatePacket("second free card sends gold refresh packet", peer, 110, ref failures);
-                service.HandleSelectCard(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
-                CheckGoldUpdatePacket("paid card sends gold refresh packet", peer, 310, ref failures);
-                CheckGold("explicit free+paid card clicks grant both once", connStr, 310, ref failures);
-                Check("card rewards clear after both sides delivered",
-                    run2.FreeCardRewardDelivered && run2.PaidCardRewardDelivered && run2.CardRewards == null,
-                    ref failures);
+                    var run2 = BuildRun(freeGold: 100, paidGold: 20);
+                    session.Player.CurrentRun = run2;
+                    service.HandleSelectCard(session, new byte[] { 0, 0 }).GetAwaiter().GetResult();
+                    CheckGoldUpdatePacket("second free card sends gold refresh packet", peer, 110, ref failures);
+                    service.HandleSelectCard(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
+                    CheckGoldUpdatePacket("paid card sends gold refresh packet", peer, 90, ref failures);
+                    CheckGold("explicit free card grant and paid card cost apply once", inventory, 90, ref failures);
+                    Check("card rewards clear after both sides delivered",
+                        run2.FreeCardRewardDelivered && run2.PaidCardRewardDelivered && run2.CardRewards == null,
+                        ref failures);
 
-                service.HandleSelectCard(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
-                CheckGold("duplicate paid-card click does not grant again", connStr, 310, ref failures);
+                    service.HandleSelectCard(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
+                    CheckGold("duplicate paid-card click does not spend again", inventory, 90, ref failures);
 
-                var run3 = BuildRun(freeGold: 5, paidGold: 7);
-                session.Player.CurrentRun = run3;
-                shouldReturn = service.HandleEplpCommand(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
-                Check("EPLP before any card reward does not grant", shouldReturn && LoadGold(connStr) == 310, ref failures);
+                    var run3 = BuildRun(freeGold: 5, paidGold: 7);
+                    session.Player.CurrentRun = run3;
+                    shouldReturn = service.HandleEplpCommand(session, new byte[] { 1, 0 }).GetAwaiter().GetResult();
+                    Check("EPLP before any card reward does not grant", shouldReturn && LoadGold(inventory) == 90, ref failures);
+                }
+                finally
+                {
+                    inventory.ClearDirtyState();
+                    InventoryContext.Unregister(session.SessionId, CharacterId);
+                }
             }
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
@@ -102,13 +110,9 @@ namespace DfoServer.SelfTests
             };
         }
 
-        private static int LoadGold(string connStr)
+        private static int LoadGold(InventoryService inventory)
         {
-            using (var conn = new SqliteConnection(connStr))
-            {
-                conn.Open();
-                return CurrencyService.LoadWallet(conn, null, CharacterId).Gold;
-            }
+            return inventory.GetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart)?.Count ?? 0;
         }
 
         private static void Seed(string connStr)
@@ -138,9 +142,9 @@ VALUES (@cid, @aid, 'card-reward-flow');";
                 failures++;
         }
 
-        private static void CheckGold(string name, string connStr, int expected, ref int failures)
+        private static void CheckGold(string name, InventoryService inventory, int expected, ref int failures)
         {
-            var actual = LoadGold(connStr);
+            var actual = LoadGold(inventory);
             Check($"{name} expected={expected} actual={actual}", actual == expected, ref failures);
         }
 

@@ -84,6 +84,8 @@ namespace PvfLib
         
         public string StackableType { get; set; }
         public List<string> AvatarEmblemTargetTypes { get; set; } = new List<string>();
+        // [usable equip type] 限定可作用的装备部位, 例如品级调整箱按武器/防具/首饰分箱。空表示不限部位。
+        public List<string> UsableEquipTypes { get; set; } = new List<string>();
         public byte AvatarEmblemSocketType { get; set; }
         public int SubType { get; set; } = -1;
         public string AttachType { get; set; }
@@ -216,6 +218,7 @@ namespace PvfLib
                         stk.AvatarEmblemTargetTypes = ParseStringList(node, content);
                         stk.AvatarEmblemSocketType = ResolveAvatarEmblemSocketType(stk.AvatarEmblemTargetTypes);
                         break;
+                    case "usable equip type": stk.UsableEquipTypes = ParseStringList(node, content); break;
                     case "sub type": stk.SubType = ParseInt(data); break;
                     case "attach type": stk.AttachType = StripBacktick(data); break;
                     case "item group name": stk.ItemGroupName = StripBacktick(data); break;

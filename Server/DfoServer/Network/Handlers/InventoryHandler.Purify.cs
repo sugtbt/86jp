@@ -22,8 +22,21 @@ namespace DfoServer.Network.Handlers
 
             FileLogger.Log($"[{ProtocolName}] PURIFY_ITEM raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")} target=({request.TargetSlotIndex},0x{request.TargetItemTemplateId:X8}) material=({request.MaterialSlotIndex},0x{request.MaterialItemTemplateId:X8})");
 
-            var (cid, aid) = ResolveOwner(session);
-            if (!_inventoryStore.TryPurifyItem(cid, aid, request, out var result))
+            var (cid, _) = ResolveOwner(session);
+            PurifyItemResult result;
+            bool ok;
+            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            {
+                lock (lease.SyncRoot)
+                    ok = InventoryEquipmentMutationService.TryPurifyItem(lease.Inventory, request, out result);
+            }
+            else
+            {
+                ok = false;
+                result = null;
+            }
+
+            if (!ok)
             {
                 var errorCode = result != null ? result.ErrorCode : PurifyItemResult.ErrorInvalidRequest;
                 FileLogger.Log($"[{ProtocolName}] PURIFY_ITEM: FAILED error=0x{errorCode:X2} targetSlot={request.TargetSlotIndex} materialSlot={request.MaterialSlotIndex}");

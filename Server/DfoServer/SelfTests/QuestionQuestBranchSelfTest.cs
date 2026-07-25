@@ -42,9 +42,8 @@ namespace DfoServer.SelfTests
                 Level = 86,
             });
 
-            var assetService = new SqliteAssetService(dbPath, schemaPath);
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
-            var questService = new QuestService(connStr, assetService);
+            var questService = new QuestService(connStr);
             var failures = 0;
 
             Check("1862 is question quest", GameWorld.QuestData.IsQuestionQuest(BranchQuestionQuestId), ref failures);

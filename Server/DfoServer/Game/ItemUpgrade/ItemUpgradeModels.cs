@@ -99,7 +99,6 @@ namespace DfoServer.Game.ItemUpgrade
     {
         public ItemUpgradeMode Mode { get; set; }
         public ItemUpgradeScene Scene { get; set; }
-        public InvenItem TargetItem { get; set; }
         public ItemUpgradeConsumableKind ConsumableKind { get; set; } = ItemUpgradeConsumableKind.None;
         public short TargetSlotIndex { get; set; }
         public int TargetItemTemplateId { get; set; }
