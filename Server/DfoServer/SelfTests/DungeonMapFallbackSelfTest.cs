@@ -412,6 +412,36 @@ namespace DfoServer.SelfTests
 
             try
             {
+                var iceCrystalUpperBoss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 145,
+                    x: 2,
+                    y: 0,
+                    mazeIndex: 0,
+                    bossPos: new[] { 2, 0 });
+                var iceCrystalRightBoss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 145,
+                    x: 3,
+                    y: 1,
+                    mazeIndex: 0,
+                    bossPos: new[] { 3, 1 });
+
+                Check("ice crystal forest upper boss coordinate skips ordinary map specification",
+                    iceCrystalUpperBoss.Index == 14153
+                    && ContainsMonster(iceCrystalUpperBoss, 65303),
+                    ref failures);
+                Check("ice crystal forest right boss coordinate skips ordinary map specification",
+                    iceCrystalRightBoss.Index == 14157
+                    && ContainsMonster(iceCrystalRightBoss, 65303),
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] ice crystal forest boss map selection: {ex.Message}");
+                failures++;
+            }
+
+            try
+            {
                 var issue227Boss = DungeonData.GetDungeonMapMonsterSummaryInformation(
                     dungeonId: 158,
                     x: 0,
