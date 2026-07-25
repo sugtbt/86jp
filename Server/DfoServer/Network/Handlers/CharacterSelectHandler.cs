@@ -188,7 +188,10 @@ namespace DfoServer.Network.Handlers
 
                         // 城镇模型使用会话内的 AppearanceEntries；不要使用可能过期/空的 characters.appearance_blob，
                         // 每次选角都从当前穿戴栏重建，避免角色选人/副本正确但城镇武器外观错误。
-                        record.Appearance = AppearanceService.LoadOnlineAppearanceFromInventory(record.CharacterId);
+                        record.Appearance = AppearanceService.LoadOnlineAppearanceFromInventory(
+                            record.CharacterId,
+                            record.Job,
+                            record.GrowType);
                     }
                     catch (Exception ex)
                     {

@@ -165,8 +165,11 @@ namespace DfoServer.Network.Handlers
             if (displayedMainShield == deck.MainShieldItemId)
                 return;
 
-            // deck 已经持久化；统一从标准装备快照重建外观，避免外观层复制盾牌业务规则。
-            var body = AppearanceService.RefreshPlayerAppearance(session.Player, _characterRepository);
+            // 直接使用本次变更后的权威 deck，避免刷新外观时再次读取数据库。
+            var body = AppearanceService.RefreshPlayerAppearance(
+                session.Player,
+                _characterRepository,
+                deck);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0002, body));
             FileLogger.Log(
                 $"[GameProtocol] KNIGHT_SHIELD appearance refresh: "

@@ -237,6 +237,16 @@ namespace DfoServer.SelfTests
                         appearanceEntries,
                         entry => entry.Slot == KnightShieldEquipmentSnapshotSynchronizer.SupportWeaponSlot
                             && entry.DisplayItemId == 113370003));
+                var unifiedInventoryAppearance = KnightShieldAppearanceSynchronizer.Apply(
+                    Array.Empty<CharacterAppearanceEntry>(),
+                    character.Job,
+                    character.GrowType,
+                    repository.Load(CharacterId));
+                Check("unified inventory appearance merges the deck main shield into slot 23",
+                    Array.Exists(
+                        unifiedInventoryAppearance,
+                        entry => entry.Slot == KnightShieldEquipmentSnapshotSynchronizer.SupportWeaponSlot
+                            && entry.DisplayItemId == 113370003));
                 var subtype1Body = UserInfoSubtype1Builder.BuildFromSnapshot(
                     subtype1,
                     new SkillInfoSnapshot());
