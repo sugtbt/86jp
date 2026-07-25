@@ -326,6 +326,7 @@ namespace DfoServer.Network
             d[0x0050] = _inventoryHandler.Handle_ENUM_CMDPACKET_UPGRADE_ITEM;      //80
             d[0x0051] = _inventoryHandler.Handle_ENUM_CMDPACKET_RESET_ITEM_ATTR;   //81 装备品级调整箱(万花镜)
             d[0x00A0] = _inventoryHandler.Handle_OPEN_SELECTABLE_PACKAGE;
+            d[(ushort)CmdPacketType.UPGRADE_CHRONICLE] = _inventoryHandler.Handle_UPGRADE_CHRONICLE;
             d[(ushort)CmdPacketType.ENCHANT_3RD_CHRONICLE_ITEM] = _inventoryHandler.Handle_ENCHANT_3RD_CHRONICLE_ITEM;
             d[0x0110] = _inventoryHandler.Handle_ENUM_CMDPACKET_ENCHANT_BY_BEAD;   //272
             d[0x0191] = _inventoryHandler.Handle_UNSEAL_RANDOM_OPTION;             //401
