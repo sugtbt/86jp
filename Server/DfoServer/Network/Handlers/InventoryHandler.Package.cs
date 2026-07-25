@@ -1,3 +1,4 @@
+using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Inventory;
@@ -681,6 +682,7 @@ namespace DfoServer.Network.Handlers
 
         private async Task SendBoosterUseResult(EnhancedClientSession session, ushort responseType, BoosterUseResult result)
         {
+            var wallet = PersistHappyTokenCeraRewards(session, result);
             var useNativeMagicBoxBatchAck = responseType == 0x03F3 && ShouldUseNativeMagicBoxBatchAck(result);
             var grantedItems = responseType == 0x03F3 && !useNativeMagicBoxBatchAck
                 ? ToPackageGrantedItems(result)
@@ -736,12 +738,46 @@ namespace DfoServer.Network.Handlers
                 await _refresh.SendEmptyUpdateItemList(session, InventoryListType.Main, result.SourceSlotIndex);
 
             await SendBoosterMainItemUpdates(session, result, result.SourceRemainingStackCount > 0);
+            if (wallet != null)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    0x0035,
+                    CeraUpdateBuilder.Build(
+                        wallet.Cera,
+                        wallet.TokenCera,
+                        wallet.HappyTokenCera)));
+                FileLogger.Log(
+                    $"[{ProtocolName}] HAPPY_TOKEN_CERA_UPDATE: cera={wallet.Cera} " +
+                    $"token={wallet.TokenCera} happy={wallet.HappyTokenCera}");
+            }
             await SendAvatarOrPetUpdateListForBoosterRewards(session, result);
             if (ShouldSendCreatureListRefreshForBoosterRewards(result))
                 await _refresh.SendCreatureItemListRefresh(session);
 
             if (result.ActivatedPremiums.Count > 0)
                 await Game.Premium.PremiumService.ActivateAndNotify(session, result.ActivatedPremiums);
+        }
+
+        private static WalletSnapshot PersistHappyTokenCeraRewards(
+            EnhancedClientSession session,
+            BoosterUseResult result)
+        {
+            if (result?.Rewards?.Any(
+                    reward => reward?.SpecialOutcome?.Kind == SpecialRewardKind.HappyTokenCera) != true)
+                return null;
+
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (characterId <= 0
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId)
+                || !InventoryPersistenceService.SaveDirtyAndLoadWallet(lease, out var wallet))
+            {
+                FileLogger.Log($"[{nameof(InventoryHandler)}] happy-token reward persistence failed cid={characterId}");
+                return null;
+            }
+
+            return wallet;
         }
 
         private static async Task SendBoosterMaterialNotice(EnhancedClientSession session, BoosterUseResult result)
@@ -899,7 +935,11 @@ namespace DfoServer.Network.Handlers
 
             foreach (var reward in result.Rewards)
             {
-                if (reward != null && reward.ListType == InventoryListType.Main)
+                if (reward != null
+                    && reward.ListType == InventoryListType.Main
+                    && reward.SlotIndex >= 0
+                    && (reward.SpecialOutcome == null
+                        || reward.SpecialOutcome.Kind == SpecialRewardKind.ReviveCoin))
                     slots.Add(reward.SlotIndex);
             }
 
