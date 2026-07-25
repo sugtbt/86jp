@@ -345,6 +345,13 @@ namespace DfoServer.GameWorld
                     return firstCandidates.Length > 1
                         ? firstCandidates[Infrastructure.ServerRandom.Next(firstCandidates.Length)]
                         : firstCandidates[0];
+
+                // The boss-only lookup at the start of ResolveMapId must not fall
+                // through to an ordinary "map" specification. Returning the normal
+                // map here prevents the directory index from selecting a boss
+                // variant at the same coordinate (for example Ice Crystal Forest).
+                if (!allowMapTypeForBossRoom)
+                    return -1;
             }
 
             foreach (var item in maze.MapSpecifications)

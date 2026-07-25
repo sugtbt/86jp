@@ -87,6 +87,27 @@ namespace PvfLib
         public List<int> Values { get; set; } = new List<int>();
     }
 
+    public sealed class EquipmentLevelEmancipateProbability
+    {
+        public int MaximumLevel { get; set; }
+        public int Weight { get; set; }
+    }
+
+    public sealed class EquipmentLevelEmancipateCondition
+    {
+        public List<int> Rarities { get; set; } = new List<int>();
+        public int MinimumLevel { get; set; } = -1;
+        public int MaximumLevel { get; set; } = -1;
+    }
+
+    public sealed class EquipmentLevelEmancipateInfo
+    {
+        public List<EquipmentLevelEmancipateProbability> Probabilities { get; set; } = new List<EquipmentLevelEmancipateProbability>();
+        public int UpgradeLevel { get; set; } = -1;
+        public EquipmentLevelEmancipateCondition Condition { get; set; } = new EquipmentLevelEmancipateCondition();
+        public List<int> IgnoreIndexes { get; set; } = new List<int>();
+    }
+
     
     
     
@@ -179,6 +200,11 @@ namespace PvfLib
         public string BoosterCategoryName { get; set; }
         public List<BoosterRewardEntry> BoosterRewards { get; set; } = new List<BoosterRewardEntry>();
         public List<BoosterRewardEntry> BoosterSelectionRewards { get; set; } = new List<BoosterRewardEntry>();
+        public int EmancipateTicket { get; set; } = -1;
+        public EquipmentLevelEmancipateInfo EquipmentLevelEmancipate { get; set; }
+        public int EmancipateGradeMax { get; set; } = -1;
+        public int EmancipateAmplifyMax { get; set; } = -1;
+        public int EmancipateGenuineGradeMax { get; set; } = -1;
 
         #endregion
 
@@ -291,6 +317,11 @@ namespace PvfLib
                     case "enchant random": stk.EnchantRandomUpgrade = ParseEnchantRandomUpgrade(node, content); break;
                     case "amplification random value": stk.AmplificationRandomValues = ParseAmplificationRandomValues(node, content); break;
                     case "check usable itemlevel": stk.CheckUsableItemLevels = ParseIntList(node, content); break;
+                    case "emancipate ticket": stk.EmancipateTicket = ParseInt(data); break;
+                    case "equipment level emancipate": stk.EquipmentLevelEmancipate = ParseEquipmentLevelEmancipate(node, content); break;
+                    case "emancipate grade max": stk.EmancipateGradeMax = ParseInt(data); break;
+                    case "emancipate amplify max": stk.EmancipateAmplifyMax = ParseInt(data); break;
+                    case "emancipate genuinegrade max": stk.EmancipateGenuineGradeMax = ParseInt(data); break;
                     case "booster info": stk.BoosterInfo = data; break;
                     case "booster category num": stk.BoosterCategoryNum = ParseInt(data); break;
                     case "booster selection num": stk.BoosterSelectionNum = ParseInt(data); break;
@@ -1143,6 +1174,76 @@ namespace PvfLib
         {
             var values = ParseIntList(node, content);
             return values.Count > 0 ? values[0] : -1;
+        }
+
+        private static EquipmentLevelEmancipateInfo ParseEquipmentLevelEmancipate(ScriptNode node, string content)
+        {
+            var info = new EquipmentLevelEmancipateInfo();
+            if (node == null)
+                return info;
+
+            foreach (var child in node.Children)
+            {
+                switch (child.Tag.ToLowerInvariant())
+                {
+                    case "probability":
+                        var probabilityValues = ParseIntList(child, content);
+                        for (var i = 0; i + 1 < probabilityValues.Count; i += 2)
+                        {
+                            info.Probabilities.Add(new EquipmentLevelEmancipateProbability
+                            {
+                                MaximumLevel = probabilityValues[i],
+                                Weight = probabilityValues[i + 1],
+                            });
+                        }
+                        break;
+                    case "equipment upgrade level":
+                        info.UpgradeLevel = ParseFirstInt(child, content);
+                        break;
+                    case "equipment condition":
+                        info.Condition = ParseEquipmentLevelEmancipateCondition(child, content);
+                        break;
+                    case "ignore index":
+                        info.IgnoreIndexes = ParseIntList(child, content);
+                        break;
+                }
+            }
+
+            return info;
+        }
+
+        private static EquipmentLevelEmancipateCondition ParseEquipmentLevelEmancipateCondition(ScriptNode node, string content)
+        {
+            var condition = new EquipmentLevelEmancipateCondition();
+            if (node == null)
+                return condition;
+
+            foreach (var child in node.Children)
+            {
+                switch (child.Tag.ToLowerInvariant())
+                {
+                    case "rarity": condition.Rarities = ParseIntList(child, content); break;
+                    case "minimum level": condition.MinimumLevel = ParseFirstInt(child, content); break;
+                    case "maximum level": condition.MaximumLevel = ParseFirstInt(child, content); break;
+                }
+            }
+
+            // ScriptParser's legacy nested-block boundary can leave the final
+            // unclosed scalar child without a DataItem. Keep the compatibility
+            // local to this new PVF model so existing parsers retain their behavior.
+            if (condition.MaximumLevel < 0)
+                condition.MaximumLevel = ParseTaggedInt(node.GetContent(content), "maximum level");
+            return condition;
+        }
+
+        private static int ParseTaggedInt(string block, string tag)
+        {
+            if (string.IsNullOrWhiteSpace(block) || string.IsNullOrWhiteSpace(tag))
+                return -1;
+
+            var match = Regex.Match(block,
+                @"(?im)^\s*\[" + Regex.Escape(tag) + @"\]\s*\r?\n\s*(?<value>-?\d+)");
+            return match.Success && int.TryParse(match.Groups["value"].Value, out var value) ? value : -1;
         }
 
         private static List<int> ParseEnchantTableIndexes(ScriptNode node, string content)

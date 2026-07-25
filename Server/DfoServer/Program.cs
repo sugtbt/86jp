@@ -11,6 +11,7 @@ namespace DfoServer
         private static readonly (string Arg, Func<int> Run)[] SelfTestRegistry =
         {
             ("--selftest-auction-service", SelfTests.AuctionServiceNotificationSelfTest.Run),
+            ("--selftest-chronicle-growth", SelfTests.ChronicleGrowthSelfTest.Run),
             ("--selftest-chronicle-refine", SelfTests.ChronicleRefineSelfTest.Run),
             ("--selftest-avatar-compound", SelfTests.AvatarCompoundSelfTest.Run),
             ("--selftest-cerashop", SelfTests.CeraShopSelfTest.Run),
