@@ -224,6 +224,15 @@ namespace DfoServer.Network.Handlers
             var characterList = BuildCharacterList(ownerAcctId);
             var routingByte = _getUserInfoTemplate != null ? _getUserInfoTemplate.Pkt0RoutingByte7 : (byte)0;
 
+            // Character selection rebuilds the current character's complete skill state.
+            // Keep reconciliation explicit because shared snapshot loads also serve non-skill refreshes.
+            if (_selectCharacterDataSource is SqliteSelectCharacterDataSource sqliteDataSource)
+            {
+                sqliteDataSource.PrepareForSkillSynchronization(
+                    ownerCharId,
+                    ownerAcctId);
+            }
+
             foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(_selectCharacterDataSource, ownerCharId, ownerAcctId))
                 await session.SendPacketAsync(packet);
 

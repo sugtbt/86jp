@@ -157,8 +157,7 @@ namespace DfoServer.Game.Skills
                     {
                         if (effectiveLevel < 0)
                             effectiveLevel = level + Premium.PremiumEffectProvider.GetCombinedEffects(repo.ConnectionString, accountId).OverSkillLevel;
-                        var reqLevelForTarget = sd.RequiredLevel + (newLevel - 1) * sd.LevelInterval;
-                        if (reqLevelForTarget > effectiveLevel)
+                        if (newLevel > sd.GetMaxLearnableLevel(effectiveLevel, firstGrow, secondGrow))
                         {
                             result.Success = false;
                             result.ErrorCode = 18;

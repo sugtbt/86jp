@@ -433,6 +433,9 @@ namespace DfoServer.Game.Quests
             {
                 var dataSource = new SqliteSelectCharacterDataSource(
                     _databasePath, ServerPaths.SchemaFilePath, _characterRepository);
+                dataSource.PrepareForSkillSynchronization(
+                    characterId,
+                    _sender.AccountId);
                 var snapshot = dataSource.Load(characterId, _sender.AccountId);
                 var skillBytes = SkillInfoBodyBuilder.BuildFrom(snapshot.InitializationSnapshot.SkillInfo);
                 await _sender.SendNotiAsync(0x0013, skillBytes);

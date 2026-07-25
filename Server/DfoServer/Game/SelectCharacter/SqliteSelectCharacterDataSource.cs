@@ -315,6 +315,14 @@ namespace DfoServer.Game.SelectCharacter
             };
         }
 
+        internal void PrepareForSkillSynchronization(int characterId, int accountId)
+        {
+            Skills.ExpertContractSkillReconciler.ReconcileExpiredContractSkills(
+                _initDataRepository,
+                characterId,
+                accountId);
+        }
+
         private static void ApplyOnlineItemLockList(int characterId, SelectCharacterInitializationSnapshot initSnapshot)
         {
             initSnapshot.ItemLockList = new ItemLockListSnapshot();

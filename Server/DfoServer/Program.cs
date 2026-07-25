@@ -29,6 +29,7 @@ namespace DfoServer
             ("--selftest-card-reward-flow", SelfTests.CardRewardFlowSelfTest.Run),
             ("--selftest-monster-card-drop", SelfTests.MonsterCardDropSelfTest.Run),
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),
+            ("--selftest-expert-contract-skill", SelfTests.ExpertContractSkillSelfTest.Run),
             ("--selftest-crystal-contract", SelfTests.CrystalContractSelfTest.Run),
             ("--selftest-slot-expansion-quest", SelfTests.SlotExpansionQuestSelfTest.Run),
             ("--selftest-character-slot-policy", SelfTests.CharacterSlotPolicySelfTest.Run),

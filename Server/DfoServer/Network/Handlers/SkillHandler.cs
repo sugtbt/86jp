@@ -318,7 +318,9 @@ namespace DfoServer.Network.Handlers
                 var dataSource = new SqliteSelectCharacterDataSource(
                     Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath,
                     _characterRepository);
-                var snapshot = dataSource.Load(cid, session.Account?.AccountId ?? 1);
+                var accountId = session.Account?.AccountId ?? 1;
+                dataSource.PrepareForSkillSynchronization(cid, accountId);
+                var snapshot = dataSource.Load(cid, accountId);
                 var skillBytes = SkillInfoBodyBuilder.BuildFrom(snapshot.InitializationSnapshot.SkillInfo);
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0013, skillBytes));
 
