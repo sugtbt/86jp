@@ -11,6 +11,10 @@ namespace DfoServer.Game.Lottery
 
         public int GoldCost { get; set; }
 
+        public int RequiredItemTemplateId { get; set; }
+
+        public int RequiredItemCount { get; set; }
+
         public IReadOnlyList<PvfLib.BoosterRewardEntry> RewardPool { get; set; }
     }
 
@@ -34,6 +38,12 @@ namespace DfoServer.Game.Lottery
         public int ConsumedGold { get; set; }
 
         public int UpdatedGold { get; set; }
+
+        public int ConsumedRequiredItemTemplateId { get; set; }
+
+        public int ConsumedRequiredItemCount { get; set; }
+
+        public List<short> RequiredItemChangedSlots { get; } = new List<short>();
 
         public bool UsedDoubleReward { get; set; }
 

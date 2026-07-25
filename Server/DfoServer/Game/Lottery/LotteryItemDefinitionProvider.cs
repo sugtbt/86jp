@@ -65,6 +65,8 @@ namespace DfoServer.Game.Lottery
                 ItemTemplateId = itemTemplateId,
                 StackableType = stackableType,
                 GoldCost = Math.Max(0, stackable.LotteryUseCost),
+                RequiredItemTemplateId = Math.Max(0, stackable.LotteryUseNeedItemId),
+                RequiredItemCount = Math.Max(0, stackable.LotteryUseNeedItemCount),
                 RewardPool = validRewards,
             };
             return true;
