@@ -164,11 +164,11 @@ namespace DfoServer.Network.Handlers
 
             var (cid, _) = ResolveOwner(session);
             InventoryMutationResult result;
-            bool ok;
+            int code;
             if (TryGetOwnedInventoryLease(session, cid, out var lease))
             {
                 lock (lease.SyncRoot)
-                    ok = InventoryShopRuntimeService.TrySellItem(
+                    code = InventoryShopRuntimeService.TrySellItem(
                         lease.Inventory,
                         listType,
                         slotIndex,
@@ -177,14 +177,35 @@ namespace DfoServer.Network.Handlers
             }
             else
             {
-                ok = false;
+                code = 1;
                 result = null;
             }
 
-            if (!ok)
+            if (code != 0)
             {
                 FileLogger.Log($"[{ProtocolName}] SELL_ITEM: FAILED listType={listType} slot={slotIndex} count={sellCount}");
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0016, SellItemBuilder.BuildError(0x11)));
+
+                // 60 公告 个人商店开设中，无法出售物品
+                // 77 公告 无法与加入黑名单的角色进行聊天
+                // 105 公告 为了保护您的账号安全， 登录 0 秒后才可以交易
+                // 114 公告 处于限制交易状态，系统将取消相关请求
+                // 115 公告 对方处于限制交易状态，无法进行物品交易
+                // 134 公告 因需要二级密码认证，此次操作被取消，请重新操作
+                // 206 公告 您被禁闭在赛丽亚旅馆，无法进行该操作
+                // 208 公告 为了保护长时间未登录的休眠账号，系统将限制您游戏内的各类交易和技能学习。若申请二级密码、手机令牌、密保卡其中之一，即可正常使用。
+                // 0xd2 您的账户现在处于安全模式中，不能进行任何的交易、丢弃等敏感操作。如需解除安全模式，请点击下方的确定解除按钮。
+                // 0xd6 公告 在物品已锁定状态下，您无法进行当前操作。
+                // 0xe5 长时间断开连接会有盗号风险，为了保护游戏内财务安全，您的部分交易功能已被限制。 为了保护账号而对您造成的不便，请您谅解，并请在本人确认后使用。 **韩服**
+                // 0xe6 公告 您目前处于限制交易状态，无法使用该功能。
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0016, SellItemBuilder.BuildError((byte)code)));
+                if (code == 22)
+                {
+                    var writer = new GamePacketWriter();
+                    writer.WriteByte(3);
+                    writer.WriteUInt32(0);
+                    writer.WriteUInt32(0);
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0, (ushort)NotiPacketType.MONEY_FULL, writer.ToArray()));
+                }
                 return;
             }
 
