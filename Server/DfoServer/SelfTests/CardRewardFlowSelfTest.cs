@@ -85,6 +85,30 @@ namespace DfoServer.SelfTests
                 }
             }
 
+            using (var peer = ConnectedSession.Create())
+            {
+                var session = peer.Session;
+                session.Player.CharacterId = CharacterId;
+                session.Account = new AccountRecord { AccountId = AccountId };
+                session.Player.CurrentRun = new DungeonRun(11008, 0)
+                {
+                    Phase = DungeonRunPhase.ResultShown,
+                    CardRewards = null,
+                };
+
+                var shouldReturn = service
+                    .HandleEplpCommand(session, new byte[] { 1, 1 })
+                    .GetAwaiter()
+                    .GetResult();
+                var sentExitAck = peer.TryReadPacket(out var packet)
+                    && packet.Command == 0x01
+                    && packet.Type == 0x0048;
+                Check(
+                    "EPLP exits immediately when settlement intentionally has no card flow",
+                    shouldReturn && sentExitAck,
+                    ref failures);
+            }
+
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
         }

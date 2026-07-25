@@ -195,7 +195,7 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
-        internal static bool TrySellItem(
+        internal static int TrySellItem(
             InventoryService inventory,
             InventoryListType listType,
             short slotIndex,
@@ -204,16 +204,16 @@ namespace DfoServer.Game.Inventory
         {
             result = null;
             if (inventory == null || !IsSupportedSellListType(listType))
-                return false;
+                return 1;
 
             var source = inventory.GetItem(listType, slotIndex);
             if (source == null || IsItemLocked(inventory, source))
-                return false;
+                return 0xd6;
 
             var metadata = ItemMetadataResolver.Resolve(source.ItemId);
             var appliedCount = NormalizeSellRemovalCount(source, sellCount);
             if (appliedCount <= 0)
-                return false;
+                return 1;
 
             var goldDelta = (int)Math.Min(
                 int.MaxValue,
@@ -222,7 +222,7 @@ namespace DfoServer.Game.Inventory
             var carryLimit = LoadGoldCarryLimit(inventory.CharacterId);
             var targetGold = (long)currentGold + goldDelta;
             if (targetGold > carryLimit)
-                return false;
+                return 22;
 
             if (!InventoryDeleteService.TryDecreaseStack(
                     inventory,
@@ -233,12 +233,12 @@ namespace DfoServer.Game.Inventory
                 || delete == null
                 || !delete.Success)
             {
-                return false;
+                return 1;
             }
 
             var finalGold = (int)Math.Min(int.MaxValue, Math.Max(0L, targetGold));
             if (!inventory.SetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart, finalGold))
-                return false;
+                return 22;
 
             result = new InventoryMutationResult
             {
@@ -254,7 +254,7 @@ namespace DfoServer.Game.Inventory
                 RequestedCount = sellCount,
                 AppliedCount = (short)Math.Min(short.MaxValue, appliedCount),
             };
-            return true;
+            return 0;
         }
 
         internal static bool CanRentWeapon(InventoryService inventory, int itemTemplateId)

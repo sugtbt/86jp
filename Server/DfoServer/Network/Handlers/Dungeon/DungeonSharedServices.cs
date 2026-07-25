@@ -23,11 +23,11 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal string ConnectionString { get; }
         internal SqliteSelectCharacterDataSource SelectCharacterDataSource { get; }
         internal IRentalTimeProvider RentalTimeProvider { get; }
+        internal InventoryRefreshSender InventoryRefresh { get; }
 
         internal Game.ReviveCoin.ReviveCoinService ReviveCoin { get; }
         internal Game.DeathTower.DeathTowerHandler DeathTower { get; }
         internal Game.Quests.QuestDropService QuestDrops { get; }
-        internal InventoryRefreshSender InventoryRefresh { get; }
         internal AntonNormalConquestNotifier AntonNormal { get; }
 
         // 副本域用到的仓储集中在这里构造一次, 各方法不再就地 new。
@@ -41,6 +41,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal GrowthCapsuleSyncService GrowthCapsuleSync { get; }
         internal CharacterExperienceService CharacterExperience { get; }
         internal Game.Dungeon.TowerOfDespairProgressService TowerOfDespairProgress { get; }
+        internal Game.Dungeon.TowerOfDespairRewardGrantService TowerOfDespairRewards { get; }
 
         // 组队副本联机用: 检测队伍 + 定位队员会话(可空; 未接线时副本 fan-out 优雅跳过=单人不回归)。
         internal Game.Party.PartyManager PartyManager { get; }
@@ -92,6 +93,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 new Game.Dungeon.TowerOfDespairProgressRepository(
                     ServerPaths.DatabasePath,
                     ServerPaths.SchemaFilePath));
+            TowerOfDespairRewards =
+                new Game.Dungeon.TowerOfDespairRewardGrantService();
             CardRewards = new Game.Dungeon.CardRewardService();
             Drops = new Game.Dungeon.DropService();
             EntryCost = new Game.Dungeon.DungeonEntryCostService();

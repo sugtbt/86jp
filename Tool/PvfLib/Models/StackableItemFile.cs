@@ -49,6 +49,32 @@ namespace PvfLib
         public List<EnchantRandomUpgradeEntry> EnchantEntries { get; set; } = new List<EnchantRandomUpgradeEntry>();
     }
 
+    public sealed class ThreeChronicleSkillOption
+    {
+        public int OptionNo { get; set; } = -1;
+        public string Job { get; set; }
+        public int SkillId { get; set; } = -1;
+    }
+
+    public sealed class ThreeChronicleEnchantInfo
+    {
+        public List<int> Probabilities { get; set; } = new List<int>();
+        public List<ThreeChronicleEnchantCheck> Checks { get; set; } = new List<ThreeChronicleEnchantCheck>();
+        public List<ThreeChronicleSkillOption> Skills { get; set; } = new List<ThreeChronicleSkillOption>();
+
+        public ThreeChronicleSkillOption GetSkill(int optionNo)
+        {
+            return Skills.Find(skill => skill.OptionNo == optionNo);
+        }
+    }
+
+    public sealed class ThreeChronicleEnchantCheck
+    {
+        public List<int> Values { get; set; } = new List<int>();
+        public string EquipmentType { get; set; }
+        public List<ThreeChronicleSkillOption> Skills { get; set; } = new List<ThreeChronicleSkillOption>();
+    }
+
     public sealed class AmplificationRandomValueEntry
     {
         public int UpgradeLevel { get; set; }
@@ -133,6 +159,8 @@ namespace PvfLib
         #region 强化/合成
 
         public int EnchantIndex { get; set; } = -1;
+        public int Type { get; set; } = -1;
+        public ThreeChronicleEnchantInfo ThreeChronicleEnchant { get; set; }
         public List<int> EnchantTable { get; set; } = new List<int>();
         // [action type] `[xxx]` p1 p2 ...: ActionTypeName="[xxx]", ActionTypeParams=[p1,p2,...]
         public string ActionTypeName { get; set; }
@@ -254,6 +282,8 @@ namespace PvfLib
 
                     
                     case "enchant index": stk.EnchantIndex = ParseInt(data); break;
+                    case "type": stk.Type = ParseInt(data); break;
+                    case "3choro enchant": stk.ThreeChronicleEnchant = ParseThreeChronicleEnchant(root, node, content); break;
                     case "enchant table": stk.EnchantTable = ParseEnchantTableIndexes(node, content); break;
                     case "action type": ParseActionType(node, content, stk); break;
                     case "equipment reinforcement ticket": stk.EquipmentReinforcementTicket = ParseUpgradeTicket(node, content); break;
@@ -982,6 +1012,89 @@ namespace PvfLib
                         info.EnchantEntries = ParseEnchantRandomEntries(child, content);
                         break;
                 }
+            }
+
+            return info;
+        }
+
+        private static ThreeChronicleEnchantInfo ParseThreeChronicleEnchant(ScriptNode root, ScriptNode node, string content)
+        {
+            var info = new ThreeChronicleEnchantInfo();
+            if (node == null)
+                return info;
+
+            var probability = node.GetChild("probability") ?? root?.GetChild("probability");
+            if (probability != null)
+                info.Probabilities = ParseIntList(probability, content);
+
+            var checks = new List<ScriptNode>();
+            checks.AddRange(node.GetChildren("check"));
+            if (root != null)
+            {
+                foreach (var rootCheck in root.GetChildren("check"))
+                {
+                    if (!checks.Contains(rootCheck))
+                        checks.Add(rootCheck);
+                }
+            }
+            if (checks.Count == 0)
+                return info;
+
+            foreach (var check in checks)
+            {
+                var parsedCheck = new ThreeChronicleEnchantCheck();
+                foreach (var item in check.DataItems)
+                {
+                    var raw = item.GetContent(content).Trim();
+                    var values = System.Text.RegularExpressions.Regex.Matches(raw, @"-?\d+");
+                    foreach (System.Text.RegularExpressions.Match value in values)
+                    {
+                        if (int.TryParse(value.Value, out var parsed))
+                            parsedCheck.Values.Add(parsed);
+                    }
+
+                    var equipmentType = System.Text.RegularExpressions.Regex.Match(raw, @"`(?<type>[^`]+)`");
+                    if (equipmentType.Success && parsedCheck.EquipmentType == null)
+                    {
+                        parsedCheck.EquipmentType = equipmentType.Groups["type"].Value.Trim();
+                    }
+                    else if (values.Count == 0)
+                    {
+                        var token = StripBacktick(raw);
+                        if (!string.IsNullOrWhiteSpace(token) && parsedCheck.EquipmentType == null)
+                            parsedCheck.EquipmentType = token.Trim();
+                    }
+                }
+
+                foreach (var skillNode in check.GetChildren("skill"))
+                {
+                    if (skillNode.DataItems.Count == 0)
+                        continue;
+
+                    var definition = string.Empty;
+                    foreach (var item in skillNode.DataItems)
+                        definition += " " + item.GetContent(content).Trim();
+                    var match = System.Text.RegularExpressions.Regex.Match(
+                        definition,
+                        @"^\s*(?<optionNo>-?\d+)\s+`?\[(?<job>[^\]]+)\]`?\s+(?<skillId>-?\d+)",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (!match.Success
+                        || !int.TryParse(match.Groups["optionNo"].Value, out var optionNo)
+                        || optionNo < 0
+                        || !int.TryParse(match.Groups["skillId"].Value, out var skillId))
+                        continue;
+
+                    var skill = new ThreeChronicleSkillOption
+                    {
+                        OptionNo = optionNo,
+                        Job = "[" + match.Groups["job"].Value.Trim().ToLowerInvariant() + "]",
+                        SkillId = skillId,
+                    };
+                    parsedCheck.Skills.Add(skill);
+                    info.Skills.Add(skill);
+                }
+
+                info.Checks.Add(parsedCheck);
             }
 
             return info;

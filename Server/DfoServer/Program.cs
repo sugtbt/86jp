@@ -11,6 +11,7 @@ namespace DfoServer
         private static readonly (string Arg, Func<int> Run)[] SelfTestRegistry =
         {
             ("--selftest-auction-service", SelfTests.AuctionServiceNotificationSelfTest.Run),
+            ("--selftest-chronicle-refine", SelfTests.ChronicleRefineSelfTest.Run),
             ("--selftest-avatar-compound", SelfTests.AvatarCompoundSelfTest.Run),
             ("--selftest-cerashop", SelfTests.CeraShopSelfTest.Run),
             ("--selftest-pet-consumable", SelfTests.PetConsumableSelfTest.Run),
@@ -225,6 +226,7 @@ namespace DfoServer
             try
             {
                 GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
+                Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();
                 Game.Mercenary.StrikerDefaultAvatarDataProvider.Warmup();
                 Console.WriteLine("OK");

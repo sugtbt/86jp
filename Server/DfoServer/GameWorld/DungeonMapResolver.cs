@@ -77,14 +77,10 @@ namespace DfoServer.GameWorld
             var maplst = Dungeon.LoadLstFile(Path.Combine("map", "map.lst"));
             var loaded = Dungeon.LoadDungeonFileWithPath(dungeonId);
 
-            if (loaded.File.TowerOfDespair > 0)
-            {
-                var towerMapId = Dungeon.TryGetTowerOfDespairFloor(dungeonId, out var floor)
-                    ? ResolveTowerOfDespairMapId(maplst, floor)
-                    : -1;
-                if (towerMapId > 0)
-                    return towerMapId;
-            }
+            var towerFloor = loaded.File.TowerOfDespair > 0
+                             && Dungeon.TryGetTowerOfDespairFloor(dungeonId, out var floor)
+                ? floor
+                : 0;
 
             var mapDirCandidates = Dungeon.BuildMapDirCandidates(maplst, maze, loaded.FilePath);
 
@@ -134,6 +130,16 @@ namespace DfoServer.GameWorld
             int mapId = ResolveFromMapSpecification(maplst, maze, x, y, isBossRoom);
             if (mapId > 0)
                 return mapId;
+
+            // Multi-room Tower of Despair floors use the base map for room zero and
+            // same-floor "_x" map variants for later rooms. Keep the base map as a
+            // fallback only after explicit MapSpecification candidates were checked.
+            if (towerFloor > 0)
+            {
+                mapId = ResolveTowerOfDespairMapId(maplst, towerFloor, x);
+                if (mapId > 0)
+                    return mapId;
+            }
 
             // Step 2+3: Directory index (coordinate + type pool)
             mapId = ResolveFromDirectoryIndex(index, x, y, isStartRoom, isBossRoom, isQuestConnected);
@@ -257,10 +263,23 @@ namespace DfoServer.GameWorld
             }
         }
 
-        private static int ResolveTowerOfDespairMapId(LstFile maplst, int floor)
+        private static int ResolveTowerOfDespairMapId(LstFile maplst, int floor, int x)
         {
             if (maplst == null || floor <= 0)
                 return -1;
+
+            var expectedRoomMapSuffix = $"despair{floor:000}_{x}.map";
+            foreach (var entry in maplst.Entries)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.FilePath))
+                    continue;
+
+                var normalizedPath = entry.FilePath.Replace('\\', '/');
+                if ((normalizedPath.StartsWith("towerofdespair_down/", StringComparison.OrdinalIgnoreCase)
+                     || normalizedPath.StartsWith("towerofdespair_up/", StringComparison.OrdinalIgnoreCase))
+                    && normalizedPath.EndsWith(expectedRoomMapSuffix, StringComparison.OrdinalIgnoreCase))
+                    return entry.Id;
+            }
 
             var expectedMapSuffix = $"despair{floor:000}.map";
             foreach (var entry in maplst.Entries)

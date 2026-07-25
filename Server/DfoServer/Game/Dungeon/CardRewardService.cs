@@ -121,7 +121,11 @@ namespace DfoServer.Game.Dungeon
             byte option = body[1];
             var run = session.Player.CurrentRun;
 
-            if (run != null && run.Phase == DungeonRunPhase.ResultShown)
+            // ResultShown does not guarantee a card phase: Tower of Despair keeps
+            // this phase while intentionally using only its dedicated clear reward.
+            if (run != null
+                && run.Phase == DungeonRunPhase.ResultShown
+                && run.CardRewards != null)
             {
                 DungeonRunLifecycle.CancelAutoFlip(session);
                 await SendCardLayout(session);
