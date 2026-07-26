@@ -25,6 +25,10 @@ namespace DfoServer.Game.Inventory
         public byte CreatureType { get; set; }
 
         public int ExpireTime { get; set; }
+
+        public AvatarDetail AvatarDetailTemplate { get; set; }
+
+        public CreatureDetail CreatureDetailTemplate { get; set; }
     }
 
     internal sealed class InventoryCreateResult
@@ -209,6 +213,7 @@ namespace DfoServer.Game.Inventory
                 if (result.AvatarDetail == null)
                     return false;
 
+                ApplyAvatarDetailTemplate(result.AvatarDetail, options?.AvatarDetailTemplate);
                 ApplyCreateReason(result, reason, options);
                 return true;
             }
@@ -222,12 +227,42 @@ namespace DfoServer.Game.Inventory
                 if (result.CreatureDetail == null)
                     return false;
 
+                ApplyCreatureDetailTemplate(result.CreatureDetail, options?.CreatureDetailTemplate);
                 ApplyCreateReason(result, reason, options);
                 return true;
             }
 
             ApplyCreateReason(result, reason, options);
             return true;
+        }
+
+        private static void ApplyAvatarDetailTemplate(AvatarDetail target, AvatarDetail template)
+        {
+            if (target == null || template == null)
+                return;
+
+            target.ExpireDate = template.ExpireDate;
+            target.ClearAvatarId = template.ClearAvatarId;
+            target.JewelSocket = template.JewelSocket;
+            target.Color1 = template.Color1;
+            target.Color2 = template.Color2;
+            target.DeleteDate = template.DeleteDate;
+        }
+
+        private static void ApplyCreatureDetailTemplate(CreatureDetail target, CreatureDetail template)
+        {
+            if (target == null || template == null)
+                return;
+
+            target.NameBytes = template.NameBytes;
+            target.Field04 = template.Field04;
+            target.ModeFlag = template.ModeFlag;
+            target.Mode1Field0A = template.Mode1Field0A;
+            target.Mode1Field0B = template.Mode1Field0B;
+            target.ProgressValue32 = template.ProgressValue32;
+            target.FieldAfterValue32 = template.FieldAfterValue32;
+            target.ExpireDate = template.ExpireDate;
+            target.TailFlag = template.TailFlag;
         }
 
         internal static void DetachCreatedDetails(

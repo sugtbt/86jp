@@ -4,6 +4,7 @@ using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Lottery;
+using DfoServer.Game.Mailbox;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -144,7 +145,13 @@ namespace DfoServer.Network
             _skillHandler = new SkillHandler(characterRepository, _inventoryRefreshSender);
             _luckyStarHandler = new LuckyStarHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             _rentalHandler = new RentalHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
-            _mailboxHandler = new MailboxHandler();
+            var mailboxRepository = new MailboxRepository(databasePath, schemaFilePath);
+            var mailboxService = new MailboxService(mailboxRepository);
+            _mailboxHandler = new MailboxHandler(
+                characterRepository,
+                mailboxService,
+                sessionDirectory,
+                _inventoryRefreshSender);
             _collectionBoxHandler = new CollectionBoxHandler(_inventoryRefreshSender);
             _shopCoinEventHandler = new ShopCoinEventHandler(reviveCoinService, _inventoryRefreshSender);
             _mercenaryHandler = new MercenaryHandler(characterRepository);
@@ -494,7 +501,12 @@ namespace DfoServer.Network
 
         private void RegisterMailboxHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
+            d[0x005E] = _mailboxHandler.HandleSendMailbox;
+            d[0x005F] = _mailboxHandler.HandleClaimMailbox;
             d[0x0060] = _mailboxHandler.HandleOpenMailbox;
+            d[0x0086] = _mailboxHandler.HandleChangeLetterStatMailbox;
+            d[0x013B] = _mailboxHandler.HandleSendMultiMailbox;
+            d[0x0144] = _mailboxHandler.HandleQueryCharacterInfoMailbox;
         }
 
         private void RegisterCollectionBoxHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)

@@ -753,6 +753,153 @@ CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS mailbox_messages (
+    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_character_id INTEGER NOT NULL,
+    sender_account_id INTEGER NOT NULL DEFAULT 0,
+    sender_name TEXT NOT NULL DEFAULT '',
+    receiver_character_id INTEGER NOT NULL,
+    receiver_account_id INTEGER NOT NULL DEFAULT 0,
+    receiver_name TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    gold INTEGER NOT NULL DEFAULT 0 CHECK(gold >= 0),
+    fee_gold INTEGER NOT NULL DEFAULT 0 CHECK(fee_gold >= 0),
+    mail_type INTEGER NOT NULL DEFAULT 0,
+    source_protocol INTEGER NOT NULL DEFAULT 0,
+    idempotency_key TEXT,
+    request_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    unlimited_flag INTEGER NOT NULL DEFAULT 0 CHECK(unlimited_flag IN (0, 1)),
+    expire_at TEXT NOT NULL,
+    deleted_by_sender INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (receiver_character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mailbox_messages_receiver_created
+    ON mailbox_messages(receiver_character_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_mailbox_messages_sender_created
+    ON mailbox_messages(sender_character_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_mailbox_messages_expiry
+    ON mailbox_messages(mail_type, expire_at, message_id);
+
+CREATE TABLE IF NOT EXISTS mailbox_recipients (
+    recipient_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    character_id INTEGER NOT NULL,
+    folder INTEGER NOT NULL DEFAULT 0,
+    read_flag INTEGER NOT NULL DEFAULT 0,
+    saved_flag INTEGER NOT NULL DEFAULT 0,
+    deleted_flag INTEGER NOT NULL DEFAULT 0,
+    received_gold_flag INTEGER NOT NULL DEFAULT 0 CHECK(received_gold_flag IN (0, 1, 2)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    read_at TEXT,
+    saved_at TEXT,
+    deleted_at TEXT,
+    UNIQUE(message_id, character_id, folder),
+    FOREIGN KEY (message_id) REFERENCES mailbox_messages(message_id) ON DELETE CASCADE,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mailbox_recipients_character_folder
+    ON mailbox_recipients(character_id, folder, deleted_flag, created_at);
+
+CREATE TABLE IF NOT EXISTS mailbox_attachments (
+    attachment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    item_type INTEGER NOT NULL DEFAULT 0,
+    source_list_type INTEGER NOT NULL DEFAULT 0,
+    source_slot_index INTEGER NOT NULL DEFAULT 0,
+    source_item_uid INTEGER NOT NULL DEFAULT 0,
+    item_template_id INTEGER NOT NULL CHECK(item_template_id > 0),
+    item_kind TEXT NOT NULL DEFAULT 'unknown',
+    item_count INTEGER NOT NULL CHECK(item_count > 0),
+    instance_value INTEGER NOT NULL DEFAULT 0,
+    durability INTEGER NOT NULL DEFAULT 0,
+    seal_flag INTEGER NOT NULL DEFAULT 0,
+    option_value INTEGER NOT NULL DEFAULT 0,
+    equipment_lock_id INTEGER NOT NULL DEFAULT 0,
+    expire_time INTEGER NOT NULL DEFAULT 0,
+    marker_16 INTEGER NOT NULL DEFAULT -1,
+    pet_serial_or_handle INTEGER NOT NULL DEFAULT 0,
+    extra_json TEXT NOT NULL DEFAULT '{}',
+    item_core BLOB,
+    detail_json TEXT NOT NULL DEFAULT '',
+    claimed_flag INTEGER NOT NULL DEFAULT 0 CHECK(claimed_flag IN (0, 1, 2)),
+    claimed_at TEXT,
+    FOREIGN KEY (message_id) REFERENCES mailbox_messages(message_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mailbox_attachments_message
+    ON mailbox_attachments(message_id, ordinal);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mailbox_attachments_message_ordinal
+    ON mailbox_attachments(message_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS mailbox_campaigns (
+    campaign_id TEXT PRIMARY KEY,
+    payload_hash TEXT NOT NULL,
+    status INTEGER NOT NULL DEFAULT 0 CHECK(status IN (0, 1)),
+    last_character_id INTEGER NOT NULL DEFAULT 0,
+    max_character_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS mailbox_campaign_deliveries (
+    campaign_id TEXT NOT NULL,
+    character_id INTEGER NOT NULL,
+    message_id INTEGER,
+    delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (campaign_id, character_id),
+    FOREIGN KEY (campaign_id) REFERENCES mailbox_campaigns(campaign_id) ON DELETE CASCADE,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE,
+    FOREIGN KEY (message_id) REFERENCES mailbox_messages(message_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS mailbox_system_mail_audit (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL UNIQUE,
+    actor_account_id INTEGER NOT NULL DEFAULT 0,
+    actor_character_id INTEGER NOT NULL DEFAULT 0,
+    actor_name TEXT NOT NULL DEFAULT '',
+    audit_reason TEXT NOT NULL DEFAULT '',
+    receiver_account_id INTEGER NOT NULL DEFAULT 0,
+    receiver_character_id INTEGER NOT NULL,
+    receiver_name TEXT NOT NULL DEFAULT '',
+    gold INTEGER NOT NULL DEFAULT 0 CHECK(gold >= 0),
+    attachment_count INTEGER NOT NULL DEFAULT 0 CHECK(attachment_count >= 0),
+    mail_type INTEGER NOT NULL DEFAULT 0,
+    source_protocol INTEGER NOT NULL DEFAULT 0,
+    idempotency_key TEXT,
+    request_hash TEXT NOT NULL DEFAULT '',
+    unlimited_flag INTEGER NOT NULL DEFAULT 0 CHECK(unlimited_flag IN (0, 1)),
+    expire_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_mailbox_system_mail_audit_receiver_created
+    ON mailbox_system_mail_audit(receiver_character_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_mailbox_system_mail_audit_actor_created
+    ON mailbox_system_mail_audit(actor_account_id, actor_character_id, created_at);
+
+CREATE TABLE IF NOT EXISTS mailbox_system_mail_audit_attachments (
+    audit_attachment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    audit_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    item_template_id INTEGER NOT NULL CHECK(item_template_id > 0),
+    item_kind TEXT NOT NULL DEFAULT 'unknown',
+    item_count INTEGER NOT NULL CHECK(item_count > 0),
+    instance_value INTEGER NOT NULL DEFAULT 0,
+    seal_flag INTEGER NOT NULL DEFAULT 0,
+    expire_time INTEGER NOT NULL DEFAULT 0,
+    pet_serial_or_handle INTEGER NOT NULL DEFAULT 0,
+    extra_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(audit_id, ordinal),
+    FOREIGN KEY (audit_id) REFERENCES mailbox_system_mail_audit(audit_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS account_settings (
     account_id INTEGER PRIMARY KEY,
     main_game_option BLOB,

@@ -96,6 +96,44 @@ ON CONFLICT (character_id, counter_key) DO UPDATE SET value = value + 1 WHERE va
             }
         }
 
+        // 原子增加任意额度。适用于金币、积分等“本次增量 + 已用值不得超过上限”的业务。
+        // 调用方把本方法放进自己的事务，可保证额度占用与实际业务写入一起提交或回滚。
+        public static bool TryAddCounterAtomic(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            string key,
+            long delta,
+            long cap,
+            string period = PeriodDay)
+        {
+            ValidatePeriod(period);
+            if (characterId <= 0 || string.IsNullOrWhiteSpace(key) || delta < 0 || cap < 0 || delta > cap)
+                return false;
+
+            EnsureRowAndRollover(conn, tx, characterId);
+            if (delta == 0)
+                return true;
+
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = @"
+INSERT INTO character_daily_counters (character_id, counter_key, period, value)
+VALUES (@cid, @key, @period, @delta)
+ON CONFLICT (character_id, counter_key) DO UPDATE SET value = value + @delta
+WHERE character_daily_counters.period = @period
+  AND character_daily_counters.value >= 0
+  AND character_daily_counters.value <= @cap - @delta;";
+                cmd.Parameters.AddWithValue("@cid", characterId);
+                cmd.Parameters.AddWithValue("@key", key);
+                cmd.Parameters.AddWithValue("@period", period);
+                cmd.Parameters.AddWithValue("@delta", delta);
+                cmd.Parameters.AddWithValue("@cap", cap);
+                return cmd.ExecuteNonQuery() > 0;
+            }
+        }
+
         // 无条件累加(如道具补充当日额度)。与扣道具并入同一事务时用 (conn,tx) 变体。
         public void AddCounter(int characterId, string key, int delta, string period = PeriodDay)
         {

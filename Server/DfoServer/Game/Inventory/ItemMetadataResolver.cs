@@ -22,6 +22,9 @@ namespace DfoServer.Game.Inventory
 
         public int SellGold { get; set; }
 
+        /// <summary>PVF item weight used by inventory-capacity checks.</summary>
+        public int Weight { get; set; }
+
         public ushort Durability { get; set; }
 
         public int StackLimit { get; set; }
@@ -41,6 +44,13 @@ namespace DfoServer.Game.Inventory
         public string ItemCategory { get; set; }
 
         public string AttachType { get; set; }
+
+        /// <summary>
+        /// Maximum number of successful transfers for PVF [trade limit] items.
+        /// The 86 client stores the remaining count in the high three bits of
+        /// the common inventory attr/extData0 byte.
+        /// </summary>
+        public int TradeLimitMax { get; set; }
 
         public IReadOnlyList<string> ImpossibleContents { get; set; } = Array.Empty<string>();
 
@@ -201,6 +211,7 @@ namespace DfoServer.Game.Inventory
                     PvfFilePath = equipmentEntry.FilePath,
                     BuyGold = buyGold,
                     SellGold = sellGold,
+                    Weight = Math.Max(0, equipment.Weight),
                     Durability = (ushort)durability,
                     StackLimit = 1,
                     Grade = equipment.Grade,
@@ -249,6 +260,7 @@ namespace DfoServer.Game.Inventory
                     PvfFilePath = stackableEntry.FilePath,
                     BuyGold = buyGold,
                     SellGold = sellGold,
+                    Weight = Math.Max(0, stackable.Weight),
                     Durability = 0,
                     StackLimit = stackable.StackLimit,
                     NeedMaterialId = needMatId,
@@ -258,6 +270,7 @@ namespace DfoServer.Game.Inventory
                     Rarity = stackable.Rarity,
                     ItemCategory = stackable.ItemCategory,
                     AttachType = stackable.AttachType,
+                    TradeLimitMax = Math.Max(0, stackable.TradeLimit),
                     ImpossibleContents = stackable.ImpossibleContentItems,
                 };
             }
