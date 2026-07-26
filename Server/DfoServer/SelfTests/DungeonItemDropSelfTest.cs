@@ -1,11 +1,17 @@
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Quests;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
+using DfoServer.Network;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Handlers.Dungeon;
 using DfoServer.Network.Parsers.Dungeon;
 using Microsoft.Data.Sqlite;
+using PvfLib;
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace DfoServer.SelfTests
@@ -39,6 +45,7 @@ namespace DfoServer.SelfTests
             Console.WriteLine("=== DUNGEON_ITEM_DROP selftest ===");
 
             VerifyRequestParser();
+            VerifyNpcItemDropPvfData();
 
             var tempDb = Path.Combine(Path.GetTempPath(), "dungeon_item_drop_selftest.db");
             DeleteTempDatabase(tempDb);
@@ -165,10 +172,150 @@ namespace DfoServer.SelfTests
                     StringComparison.Ordinal));
 
             VerifyCurrentPvfRejections(drops, run);
+            VerifyTemplateSceneDrop(drops);
 
             DeleteTempDatabase(tempDb);
             Console.WriteLine(_failures == 0 ? "PASS" : $"FAIL: {_failures}");
             return _failures == 0 ? 0 : 1;
+        }
+
+        private static void VerifyNpcItemDropPvfData()
+        {
+            var action = ActFile.Parse(@"
+[BEHAVIOR]
+[NPC ITEM DROP]
+`particle.ptl`
+[/BEHAVIOR]");
+            Check("ACT parser detects nested NPC ITEM DROP behavior",
+                action.HasNpcItemDrop);
+
+            Check("non-item ACT does not report NPC ITEM DROP",
+                !ActFile.Parse("[BEHAVIOR]\n[DIALOG]\n`test`\n[/BEHAVIOR]")
+                    .HasNpcItemDrop);
+
+            var resolved = DungeonNpcItemDropData.TryResolve(
+                19006,
+                out var scene,
+                out var rejectReason);
+            Check("time illusion room resolves one PVF NPC item drop action",
+                resolved
+                && scene != null
+                && scene.MapId == 19006
+                && scene.ObjectCode == 48548
+                && scene.X == 448
+                && scene.Y == 248
+                && scene.ActionPath.EndsWith(
+                    "action/bossunique_siran.act",
+                    StringComparison.OrdinalIgnoreCase));
+            Check("resolved NPC item drop has no ambiguity diagnostic",
+                resolved && string.IsNullOrEmpty(rejectReason));
+
+            Check("get-item-check quest parses explicit dungeon scope and items",
+                QuestData.TryGetNpcItemDropQuestTarget(
+                    2358,
+                    3066,
+                    0,
+                    out var target)
+                && target.DungeonId == 3066
+                && target.Difficulty == -1
+                && target.ItemIds.Count == 30);
+            Check("get-item-check quest rejects an unrelated dungeon",
+                !QuestData.TryGetNpcItemDropQuestTarget(
+                    2358,
+                    3065,
+                    0,
+                    out _));
+
+            var active = new List<ActiveQuest>
+            {
+                new ActiveQuest
+                {
+                    QuestId = 2358,
+                    TriggerValue = 1,
+                },
+            };
+            VerifyNpcDropJobCandidates(active, 0, 5, "swordman");
+            VerifyNpcDropJobCandidates(active, 1, 6, "fighter");
+            VerifyNpcDropJobCandidates(active, 2, 5, "gunner");
+            VerifyNpcDropJobCandidates(active, 3, 5, "mage");
+            VerifyNpcDropJobCandidates(active, 4, 4, "priest");
+            VerifyNpcDropJobCandidates(active, 6, 5, "thief");
+
+            active[0].TriggerValue = 0;
+            Check("completed get-item-check quest no longer matches NPC drop",
+                DungeonNpcItemDropCoordinator.ResolveQuestMatches(
+                    active,
+                    3066,
+                    0,
+                    0).Count == 0);
+
+            var run = new DungeonRun();
+            Check("NPC item drop run marker accepts a quest once",
+                run.TryMarkNpcItemDropGenerated(2358));
+            Check("NPC item drop run marker rejects a duplicate command",
+                !run.TryMarkNpcItemDropGenerated(2358));
+            run.UnmarkNpcItemDropGenerated(2358);
+            Check("failed NPC item registration can release its run marker",
+                run.TryMarkNpcItemDropGenerated(2358));
+
+            Check("EVENT_NPC_DROP_ITEM command keeps extracted packet id",
+                (ushort)CmdPacketType.EVENT_NPC_DROP_ITEM_ == 0x0253);
+            var success = CommonPacketBodyBuilder.BuildSuccessAck();
+            Check("EVENT_NPC_DROP_ITEM success ACK is one byte 01",
+                success.Length == 1 && success[0] == 1);
+        }
+
+        private static void VerifyNpcDropJobCandidates(
+            IReadOnlyList<ActiveQuest> active,
+            byte job,
+            int expectedCount,
+            string label)
+        {
+            var matches = DungeonNpcItemDropCoordinator.ResolveQuestMatches(
+                active,
+                3066,
+                0,
+                job);
+            Check($"NPC item drop filters exact {label} usable-job candidates",
+                matches.Count == 1
+                && matches[0].QuestId == 2358
+                && matches[0].ItemIds.Count == expectedCount);
+        }
+
+        private static void VerifyTemplateSceneDrop(DropService drops)
+        {
+            var run = new DungeonRun();
+            var registered = drops.TryRegisterTemplateDrop(
+                run,
+                101030189,
+                1,
+                out var drop);
+            Check("fixed-template scene drop registers in the dungeon run",
+                registered
+                && drop.SceneSlot == 1
+                && drop.TemplateId == 101030189
+                && drop.StackCount == 1
+                && run.Drops.TryGetValue(drop.SceneSlot, out var registeredDrop)
+                && registeredDrop.TemplateId == drop.TemplateId);
+
+            var body = DropItemBuilder.BuildDrop(
+                0x03F1,
+                448,
+                248,
+                drop,
+                0x03F1);
+            Check("NPC scene drop notification writes actor, PVF position and item",
+                body.Length == 48
+                && BitConverter.ToUInt16(body, 0) == 0x03F1
+                && BitConverter.ToUInt16(body, 2) == 448
+                && BitConverter.ToUInt16(body, 4) == 248
+                && BitConverter.ToUInt32(body, 8) == 101030189
+                && BitConverter.ToUInt16(body, 46) == 0x03F1);
+
+            var beforeSlot = run.SceneSlotCounter;
+            Check("invalid fixed-template drop is rejected without consuming a slot",
+                !drops.TryRegisterTemplateDrop(run, int.MaxValue, 1, out _)
+                && run.SceneSlotCounter == beforeSlot);
         }
 
         private static void VerifyRequestParser()

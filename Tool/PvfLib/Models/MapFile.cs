@@ -23,6 +23,7 @@ namespace PvfLib
     public class MonsterInfo
     {
         public int? MonsterId { get; set; }
+        public int? NpcId { get; set; }
         public int? AutoLv { get; set; }
         public int? Lv { get; set; }
         public int? X { get; set; }
@@ -70,6 +71,13 @@ namespace PvfLib
         public int Param0 { get; set; }
         public int Param1 { get; set; }
         public int Param2 { get; set; }
+    }
+
+    public class EventMonsterPositionInfo
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int Z { get; set; }
     }
 
     public enum ApcFaction
@@ -123,6 +131,7 @@ namespace PvfLib
         public List<MonsterInfo> MonsterConditionMonsters { get; set; } = new List<MonsterInfo>();
         public List<MonsterInfo> ConditionalSummonMonsters { get; set; } = new List<MonsterInfo>();
         public int EventMonsterPositionCount { get; set; } = -1;
+        public List<EventMonsterPositionInfo> EventMonsterPositions { get; set; } = new List<EventMonsterPositionInfo>();
         public int NpcCount { get; set; } = -1;
         public string MonsterSpecificAI { get; set; }
         public string Buff { get; set; }
@@ -287,11 +296,12 @@ namespace PvfLib
                         map.SpecialPassiveObjects = ParseSpecialPassiveObjects(data);
                         break;
                     case "monster":
-                        map.MonsterCount = CountNumberGroups(data, 4);
                         map.Monsters = ParseMonsters(data);
+                        map.MonsterCount = map.Monsters.Count;
                         break;
                     case "event monster position":
                         map.EventMonsterPositionCount = CountNumberGroups(data, 3);
+                        map.EventMonsterPositions = ParseEventMonsterPositions(data);
                         break;
                     case "npc":
                         map.NpcCount = CountNumberGroups(data, 4);
@@ -648,11 +658,29 @@ namespace PvfLib
                 return result;
 
             var values = data.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            for (var index = 0; index + 9 < values.Length; index += 10)
+            for (var index = 0; index + 9 < values.Length;)
             {
+                var typeToken = StripBacktick(values[index + 9]);
+                int? npcId = null;
+                var recordLength = 10;
+
+                // Quest maps can bind a monster actor to the NPC it becomes after
+                // the encounter: ... [fixed] [NPC] npcId [boss].
+                if (string.Equals(typeToken, "[NPC]", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(typeToken, "NPC", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (index + 11 >= values.Length)
+                        break;
+
+                    npcId = ParseNullableInt(values[index + 10]);
+                    typeToken = StripBacktick(values[index + 11]);
+                    recordLength = 12;
+                }
+
                 result.Add(new MonsterInfo
                 {
                     MonsterId = ParseNullableInt(values[index]),
+                    NpcId = npcId,
                     Lv = ParseNullableInt(values[index + 1]),
                     AutoLv = ParseNullableInt(values[index + 2]),
                     X = ParseNullableInt(values[index + 3]),
@@ -661,8 +689,10 @@ namespace PvfLib
                     RandomDropCnt = ParseNullableInt(values[index + 6]),
                     SpecifyDropCnt = ParseNullableInt(values[index + 7]),
                     Fixed = StripBacktick(values[index + 8]),
-                    Type = ParseMonsterType(StripBacktick(values[index + 9])),
+                    Type = ParseMonsterType(typeToken),
                 });
+
+                index += recordLength;
             }
 
             return result;
@@ -720,6 +750,26 @@ namespace PvfLib
                     Flags = nums[i + 3],
                 });
             }
+            return result;
+        }
+
+        private static List<EventMonsterPositionInfo> ParseEventMonsterPositions(string data)
+        {
+            var result = new List<EventMonsterPositionInfo>();
+            if (string.IsNullOrWhiteSpace(data))
+                return result;
+
+            var values = ParseIntArray(data);
+            for (var index = 0; index + 2 < values.Length; index += 3)
+            {
+                result.Add(new EventMonsterPositionInfo
+                {
+                    X = values[index],
+                    Y = values[index + 1],
+                    Z = values[index + 2],
+                });
+            }
+
             return result;
         }
 

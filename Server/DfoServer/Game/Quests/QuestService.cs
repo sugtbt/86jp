@@ -323,6 +323,95 @@ namespace DfoServer.Game.Quests
             return changed > 0;
         }
 
+        internal IReadOnlyList<QuestSetTriggerResult>
+            SyncHuntMonsterQuestProgress(
+                int characterId,
+                int dungeonId,
+                int difficulty,
+                int monsterCode)
+        {
+            if (characterId <= 0
+                || dungeonId <= 0
+                || monsterCode <= 0)
+            {
+                return Array.Empty<QuestSetTriggerResult>();
+            }
+
+            var active = _repo.LoadActiveQuests(characterId);
+            if (active.Count == 0)
+                return Array.Empty<QuestSetTriggerResult>();
+
+            var changedQuests = new List<ActiveQuest>();
+            var results = new List<QuestSetTriggerResult>();
+            foreach (var quest in active)
+            {
+                if (quest.TriggerValue == 0)
+                    continue;
+
+                IReadOnlyList<GameWorld.HuntMonsterQuestTarget> targets;
+                try
+                {
+                    targets = GameWorld.QuestData.GetHuntMonsterTargets(
+                        quest.QuestId);
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        $"[QuestService] HUNT_MONSTER parse failed: " +
+                        $"quest={quest.QuestId} error={ex.Message}");
+                    continue;
+                }
+
+                var currentTrigger = quest.TriggerValue;
+                foreach (var target in targets)
+                {
+                    if (!GameWorld.QuestData.MatchesHuntMonsterTarget(
+                            target,
+                            dungeonId,
+                            difficulty,
+                            monsterCode))
+                    {
+                        continue;
+                    }
+
+                    var remaining = GameWorld.QuestData.GetTriggerChannel(
+                        currentTrigger,
+                        target.ChannelIndex);
+                    if (remaining <= 0)
+                        continue;
+
+                    var previousTrigger = currentTrigger;
+                    currentTrigger = GameWorld.QuestData.ReplaceTriggerChannel(
+                        currentTrigger,
+                        target.ChannelIndex,
+                        remaining - 1);
+                    results.Add(new QuestSetTriggerResult
+                    {
+                        QuestId = quest.QuestId,
+                        PreviousTriggerValue = previousTrigger,
+                        TriggerValue = currentTrigger,
+                    });
+                    FileLogger.Log(
+                        $"[QuestService] HUNT_MONSTER progress: " +
+                        $"cid={characterId} quest={quest.QuestId} " +
+                        $"dungeon={dungeonId} difficulty={difficulty} " +
+                        $"monster={monsterCode} channel={target.ChannelIndex} " +
+                        $"trigger={previousTrigger}->{currentTrigger}");
+                }
+
+                if (currentTrigger == quest.TriggerValue)
+                    continue;
+
+                quest.TriggerValue = currentTrigger;
+                changedQuests.Add(quest);
+            }
+
+            if (changedQuests.Count > 0)
+                _repo.UpdateTriggerValues(characterId, changedQuests);
+
+            return results;
+        }
+
         internal static int SyncClearMapQuestProgressCore(
             string connStr,
             int characterId,

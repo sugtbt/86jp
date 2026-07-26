@@ -311,6 +311,59 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
+        internal static bool IsEquipmentUsableByJob(int itemTemplateId, byte characterJob)
+        {
+            if (!TryLoadEquipmentFile(itemTemplateId, out var equipment)
+                || equipment?.Root == null)
+            {
+                return false;
+            }
+
+            var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var usableJob in equipment.Root.GetChildren("usable job"))
+            {
+                foreach (var dataItem in usableJob.DataItems)
+                {
+                    foreach (Match match in Regex.Matches(
+                        dataItem.GetContent(equipment.Content) ?? string.Empty,
+                        @"\[(?<job>[^\]]+)\]",
+                        RegexOptions.IgnoreCase))
+                    {
+                        var label = match.Groups["job"].Value.Trim();
+                        if (label.Length > 0)
+                            labels.Add(label);
+                    }
+                }
+            }
+
+            if (labels.Count == 0 || labels.Contains("all"))
+                return true;
+
+            var jobLabel = ResolveCharacterJobLabel(characterJob);
+            return jobLabel.Length > 0 && labels.Contains(jobLabel);
+        }
+
+        private static string ResolveCharacterJobLabel(byte characterJob)
+        {
+            switch (characterJob)
+            {
+                case 0: return "swordman";
+                case 1: return "fighter";
+                case 2: return "gunner";
+                case 3: return "mage";
+                case 4: return "priest";
+                case 5: return "at gunner";
+                case 6: return "thief";
+                case 7: return "at fighter";
+                case 8: return "at mage";
+                case 9: return "demonic swordman";
+                case 10: return "creator mage";
+                case 11: return "at swordman";
+                case 12: return "knight";
+                default: return string.Empty;
+            }
+        }
+
         public static bool TryLoadStackableFile(int itemTemplateId, out StackableItemFile stackable)
         {
             return TryLoadStackable(itemTemplateId, out stackable);

@@ -28,6 +28,7 @@ namespace DfoServer
             ("--selftest-tower-of-despair-progress", SelfTests.TowerOfDespairProgressSelfTest.Run),
             ("--selftest-dungeon-room-progress", SelfTests.DungeonRoomProgressSelfTest.Run),
             ("--selftest-dungeon-run", SelfTests.DungeonRunLifecycleSelfTest.Run),
+            ("--selftest-scripted-fatal-endpoint", SelfTests.ScriptedFatalEndpointSelfTest.Run),
             ("--selftest-special-dungeon", SelfTests.SpecialDungeonSelfTest.Run),
             ("--selftest-special-dungeon-part2", SelfTests.SpecialDungeonPart2SelfTest.Run),
             ("--selftest-special-dungeon-part3", SelfTests.SpecialDungeonPart3SelfTest.Run),

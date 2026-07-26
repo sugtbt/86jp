@@ -63,6 +63,7 @@ namespace DfoServer.Game.Dungeon
         public ushort TimeSpiralHiddenBossSeqId;
         public int TimeSpiralHiddenBossCode;
         public string TimeSpiralHiddenBossSource;
+        public bool EventMonsterConditionAdvanced;
 
         public bool IsCleared => KilledSeqIds.Count >= MonsterCount && MonsterCount > 0;
     }

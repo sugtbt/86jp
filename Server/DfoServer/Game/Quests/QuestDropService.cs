@@ -17,7 +17,7 @@ namespace DfoServer.Game.Quests
         private const string ProtocolLogName = "GameProtocol";
 
         private readonly IAssetService _assetService;
-        private readonly InventoryRefreshSender _inventoryRefresh;
+        private readonly QuestDropNotificationBatcher _notificationBatcher;
         private readonly string _connectionString;
         private readonly Func<QuestDropCandidate, int, int> _rollDrop;
 
@@ -28,7 +28,8 @@ namespace DfoServer.Game.Quests
             Func<QuestDropCandidate, int, int> rollDrop = null)
         {
             _assetService = assetService ?? throw new ArgumentNullException(nameof(assetService));
-            _inventoryRefresh = inventoryRefresh ?? throw new ArgumentNullException(nameof(inventoryRefresh));
+            if (inventoryRefresh == null) throw new ArgumentNullException(nameof(inventoryRefresh));
+            _notificationBatcher = new QuestDropNotificationBatcher(inventoryRefresh);
             _connectionString = connectionString;
             _rollDrop = rollDrop ?? QuestDropProvider.RollDrop;
         }
@@ -88,7 +89,7 @@ namespace DfoServer.Game.Quests
                     run.Difficulty));
         }
 
-        private async Task CheckDrop(
+        private Task CheckDrop(
             EnhancedClientSession session,
             int sourceCode,
             string sourceName,
@@ -96,10 +97,10 @@ namespace DfoServer.Game.Quests
         {
             var activeQuestIds = LoadActiveQuestIds(session, $"{sourceName}={sourceCode}");
             if (activeQuestIds == null || activeQuestIds.Count == 0)
-                return;
+                return Task.CompletedTask;
 
             var candidates = getCandidates(activeQuestIds);
-            if (candidates == null) return;
+            if (candidates == null) return Task.CompletedTask;
 
             var accountId = session.Account?.AccountId ?? 1;
             var grantedItemIds = new HashSet<int>();
@@ -155,20 +156,25 @@ namespace DfoServer.Game.Quests
             }
 
             if (grantedItemIds.Count <= 0)
-                return;
+                return Task.CompletedTask;
 
+            bool refreshQuests = false;
             if (session.GameSession?.QuestManager == null)
             {
                 FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: granted {grantedItemIds.Count} item kinds but quest progress sync skipped because QuestManager is missing");
             }
             else
             {
-                await session.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(grantedItemIds);
+                refreshQuests = session.GameSession.QuestManager
+                    .SyncItemSeekingQuestProgressWithoutNotification(grantedItemIds);
             }
 
-            // During a dungeon, refresh only the changed slots after quest progress has settled.
-            await _inventoryRefresh.SendUpdateItemList(session, InventoryListType.Main, grantedSlots);
-            FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: UPDATE_ITEM_LIST sent slots={string.Join(",", grantedSlots)}");
+            // Item and quest state are already persisted. Coalesce only their client refreshes.
+            _notificationBatcher.Queue(session, refreshQuests, grantedSlots);
+            FileLogger.Log(
+                $"[{ProtocolLogName}] QUEST_DROP: refresh queued " +
+                $"quests={refreshQuests} slots={string.Join(",", grantedSlots)}");
+            return Task.CompletedTask;
         }
 
         private HashSet<int> LoadActiveQuestIds(

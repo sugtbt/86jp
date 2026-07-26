@@ -8,6 +8,7 @@
 2. **确保编译通过**：`dotnet build Server/DfoServer/DfoServer.csproj -c Debug`
 3. **跑相关自测**：改动涉及背包/货币/任务时，跑对应的 `--selftest-*` 自测（列表见 Program.cs）
 4. **一个 PR 只做一件事**：不要在一个 PR 里混合多个不相关的功能或修复
+5. **副本机制改动**：先阅读 `Docs/DungeonMechanismIntegration.md`，按统一生命周期、PVF/ETC 配置识别和共享回归清单接入
 
 ## 工程红线
 

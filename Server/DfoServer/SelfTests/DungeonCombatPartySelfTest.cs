@@ -77,6 +77,17 @@ namespace DfoServer.SelfTests
                 Check("ordinary party kill still propagates the room kill sequence",
                     memberRun.RoomKilledSeqIds.SetEquals(new[] { MonsterSequence }),
                     ref failures);
+
+                fixture.PrepareTimeCrackPartyKill();
+                fixture.KillMonster();
+                var killerMechanismPackets = fixture.Killer.ReadAvailableTypes();
+                var memberMechanismPackets = fixture.Member.ReadAvailableTypes();
+                Check("party MonsterKilled enters the same special mechanism path",
+                    killerMechanismPackets.Contains(0x022D)
+                    && memberMechanismPackets.Contains(0x022D)
+                    && fixture.Killer.Session.Player.CurrentRun.SpecialDungeon.TimeCrackGauge == 30
+                    && fixture.Member.Session.Player.CurrentRun.SpecialDungeon.TimeCrackGauge == 30,
+                    ref failures);
             }
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
@@ -214,6 +225,25 @@ namespace DfoServer.SelfTests
                 _member.Session.Player.Exp = 0;
                 _killer.Session.Player.CurrentRun = CreateRun(null, monsterType: 0, monsterCode: 1001);
                 _member.Session.Player.CurrentRun = CreateRun(null, monsterType: 0, monsterCode: 1001);
+            }
+
+            public void PrepareTimeCrackPartyKill()
+            {
+                var config = new SpecialDungeonModuleConfig();
+                config.TimeCrack.SandGaugeMax = 100;
+                config.TimeCrack.SandGaugeGainOnKill = 10;
+                config.TimeCrack.SandGaugeGainOnChampion = 30;
+
+                _killer.Session.Player.CurrentRun = CreateRun(null, monsterType: 1, monsterCode: 1001);
+                _member.Session.Player.CurrentRun = CreateRun(null, monsterType: 1, monsterCode: 1001);
+                _killer.Session.Player.CurrentRun.SpecialDungeon = new SpecialDungeonRuntime(
+                    _killer.Session.Player.CurrentRun.DungeonId,
+                    SpecialDungeonKind.TimeCrack,
+                    config);
+                _member.Session.Player.CurrentRun.SpecialDungeon = new SpecialDungeonRuntime(
+                    _member.Session.Player.CurrentRun.DungeonId,
+                    SpecialDungeonKind.TimeCrack,
+                    config);
             }
 
             public void KillMonster()

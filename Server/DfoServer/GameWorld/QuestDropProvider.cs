@@ -15,6 +15,7 @@ namespace DfoServer.GameWorld
 
     public static class QuestDropProvider
     {
+        public const int EnemyTypeMonster = 1;
         public const int EnemyTypeAiCharacter = 2;
         public const int EnemyTypePassiveObject = 3;
 
@@ -47,6 +48,33 @@ namespace DfoServer.GameWorld
                             continue;
                         if (!MatchesScope(entry.DungeonId, entry.Difficulty, dungeonIndex, difficulty))
                             continue;
+
+                        results.Add(new QuestDropCandidate
+                        {
+                            QuestId = questId,
+                            ItemId = entry.ItemId,
+                            Count = entry.Count,
+                            DropRate = entry.DropRate,
+                            MaxStack = entry.MaxStack,
+                            PreferQuestInventory =
+                                IsSeekingTargetItem(
+                                    questId,
+                                    entry.ItemId),
+                        });
+                    }
+
+                    foreach (var entry in qst.EnemyRewardItems)
+                    {
+                        if (entry.EnemyType != EnemyTypeMonster
+                            || entry.EnemyCode != monsterCode
+                            || !MatchesScope(
+                                entry.DungeonId,
+                                entry.Difficulty,
+                                dungeonIndex,
+                                difficulty))
+                        {
+                            continue;
+                        }
 
                         results.Add(new QuestDropCandidate
                         {
