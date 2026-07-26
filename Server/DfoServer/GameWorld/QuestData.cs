@@ -26,10 +26,27 @@ namespace DfoServer.GameWorld
     {
         public int QuestId;
         public int DungeonId;
-        public int MapId;
+        public int MinimumDifficulty;
         public int MonsterCode;
         public int RequiredCount;
         public int ChannelIndex;
+    }
+
+    internal sealed class DungeonQuestActorTarget
+    {
+        public int QuestId;
+        public int DungeonId;
+        public int MapId;
+        public int ActorCode;
+        public string Source;
+    }
+
+    internal sealed class DungeonNpcItemDropQuestTarget
+    {
+        public int QuestId;
+        public int DungeonId;
+        public int Difficulty;
+        public List<int> ItemIds = new List<int>();
     }
 
     internal static class QuestData
@@ -518,10 +535,10 @@ namespace DfoServer.GameWorld
                 offset += stride)
             {
                 var dungeonId = values[offset];
-                var mapId = values[offset + 1];
+                var minimumDifficulty = values[offset + 1];
                 var monsterCode = values[offset + 2];
                 var requiredCount = values[offset + 3];
-                if (dungeonId <= 0
+                if ((dungeonId <= 0 && dungeonId != -1)
                     || monsterCode <= 0
                     || requiredCount <= 0)
                 {
@@ -532,7 +549,7 @@ namespace DfoServer.GameWorld
                 {
                     QuestId = questId,
                     DungeonId = dungeonId,
-                    MapId = mapId,
+                    MinimumDifficulty = minimumDifficulty,
                     MonsterCode = monsterCode,
                     RequiredCount = requiredCount,
                     ChannelIndex = offset / stride,
@@ -540,6 +557,193 @@ namespace DfoServer.GameWorld
             }
 
             return result;
+        }
+
+        internal static List<DungeonQuestActorTarget>
+            GetUnfinishedDungeonActorTargets(
+                int questId,
+                uint trigger,
+                int dungeonId,
+                int difficulty)
+        {
+            var result = new List<DungeonQuestActorTarget>();
+            if (questId <= 0 || trigger == 0 || dungeonId <= 0)
+                return result;
+
+            var seen = new HashSet<(int MapId, int ActorCode)>();
+            foreach (var target in GetHuntMonsterTargets(questId))
+            {
+                if (!MatchesHuntMonsterTarget(
+                        target,
+                        dungeonId,
+                        difficulty,
+                        target.MonsterCode)
+                    || GetTriggerChannel(trigger, target.ChannelIndex) <= 0
+                    || target.MonsterCode <= 0
+                    || !seen.Add((-1, target.MonsterCode)))
+                {
+                    continue;
+                }
+
+                result.Add(new DungeonQuestActorTarget
+                {
+                    QuestId = questId,
+                    DungeonId = dungeonId,
+                    MapId = -1,
+                    ActorCode = target.MonsterCode,
+                    Source = "hunt monster",
+                });
+            }
+
+            var quest = GetQuestFile(questId);
+            if (quest == null)
+                return result;
+
+            foreach (var entry in quest.MonsterRewardItems)
+            {
+                if (entry.MonsterCode <= 0
+                    || !MatchesDungeonScope(
+                        entry.DungeonId,
+                        entry.Difficulty,
+                        dungeonId,
+                        difficulty)
+                    || !seen.Add((-1, entry.MonsterCode)))
+                {
+                    continue;
+                }
+
+                result.Add(new DungeonQuestActorTarget
+                {
+                    QuestId = questId,
+                    DungeonId = dungeonId,
+                    MapId = -1,
+                    ActorCode = entry.MonsterCode,
+                    Source = "monster reward item",
+                });
+            }
+
+            foreach (var entry in quest.EnemyRewardItems)
+            {
+                if (entry.EnemyCode <= 0
+                    || !MatchesDungeonScope(
+                        entry.DungeonId,
+                        entry.Difficulty,
+                        dungeonId,
+                        difficulty)
+                    || !seen.Add((-1, entry.EnemyCode)))
+                {
+                    continue;
+                }
+
+                result.Add(new DungeonQuestActorTarget
+                {
+                    QuestId = questId,
+                    DungeonId = dungeonId,
+                    MapId = -1,
+                    ActorCode = entry.EnemyCode,
+                    Source = "enemy reward item",
+                });
+            }
+
+            return result;
+        }
+
+        internal static bool TryGetNpcItemDropQuestTarget(
+            int questId,
+            int dungeonId,
+            int difficulty,
+            out DungeonNpcItemDropQuestTarget target)
+        {
+            target = null;
+            if (questId <= 0 || dungeonId <= 0)
+                return false;
+
+            var quest = GetQuestFile(questId);
+            if (quest == null
+                || NormalizeQuestTag(quest.Type) != "get item check index")
+            {
+                return false;
+            }
+
+            var dungeonValues = ParseIntList(quest.DungeonInfo);
+            var matched = false;
+            var matchedDungeon = -1;
+            var matchedDifficulty = -1;
+            for (var offset = 0; offset + 1 < dungeonValues.Count; offset += 2)
+            {
+                var configuredDungeon = dungeonValues[offset];
+                var configuredDifficulty = dungeonValues[offset + 1];
+                if (configuredDungeon != -1 && configuredDungeon != dungeonId)
+                    continue;
+                if (configuredDifficulty != -1 && configuredDifficulty != difficulty)
+                    continue;
+
+                matched = true;
+                matchedDungeon = configuredDungeon;
+                matchedDifficulty = configuredDifficulty;
+                break;
+            }
+
+            if (!matched)
+                return false;
+
+            target = new DungeonNpcItemDropQuestTarget
+            {
+                QuestId = questId,
+                DungeonId = matchedDungeon,
+                Difficulty = matchedDifficulty,
+            };
+
+            var itemIds = ParseIntList(quest.IntData);
+            var uniqueItemIds = new HashSet<int>();
+            foreach (var itemId in itemIds)
+            {
+                if (itemId > 0 && uniqueItemIds.Add(itemId))
+                    target.ItemIds.Add(itemId);
+            }
+
+            return target.ItemIds.Count > 0;
+        }
+
+        internal static bool MatchesHuntMonsterTarget(
+            HuntMonsterQuestTarget target,
+            int dungeonId,
+            int difficulty,
+            int monsterCode)
+        {
+            if (target == null
+                || monsterCode <= 0
+                || target.MonsterCode != monsterCode)
+            {
+                return false;
+            }
+
+            if (target.DungeonId != -1
+                && target.DungeonId != dungeonId)
+            {
+                return false;
+            }
+
+            return target.MinimumDifficulty < 0
+                || difficulty < 0
+                || difficulty >= target.MinimumDifficulty;
+        }
+
+        private static bool MatchesDungeonScope(
+            int configuredDungeonId,
+            int configuredDifficulty,
+            int dungeonId,
+            int difficulty)
+        {
+            if (configuredDungeonId != -1
+                && configuredDungeonId != dungeonId)
+            {
+                return false;
+            }
+
+            return configuredDifficulty < 0
+                || difficulty < 0
+                || configuredDifficulty == difficulty;
         }
 
         public static uint GetInitTrigger(int questId)

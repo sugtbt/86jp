@@ -425,6 +425,7 @@ namespace DfoServer.Network
             d[0x013C] = _dungeonHandler.Handle_SPECIAL_SEA_CHASE_OBSERVE;
             d[0x01E4] = _dungeonHandler.Handle_ENUM_CMDPACKET_TUTORIAL_LEVEL_UP;   //484
             d[0x0211] = _dungeonHandler.Handle_SPECIAL_SUMMON_MONSTER;
+            d[0x0253] = _dungeonHandler.Handle_EVENT_NPC_DROP_ITEM;
             d[0x026B] = _dungeonHandler.Handle_SPECIAL_TIMER_MODIFY_INFO;
             d[0x026D] = _dungeonHandler.Handle_SPECIAL_SEA_CHASE_RESULT;
             d[0x0270] = _dungeonHandler.Handle_SPECIAL_SEA_CHASE_OBSERVE;

@@ -81,6 +81,14 @@ namespace DfoServer.Game.Quests
             if (cid <= 0) return null;
 
             QuestSetTriggerResult deferred;
+            if (TryBuildServerDrivenHuntMonsterEcho(cid, qBody, out deferred))
+            {
+                await _sender.SendCmdAckAsync(
+                    wireType,
+                    QuestAckBuilder.BuildSetTrigger(deferred));
+                return deferred;
+            }
+
             if (TryBuildDeferredClearMapSetTrigger(cid, qBody, out deferred))
             {
                 await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildSetTrigger(deferred));
@@ -246,9 +254,7 @@ namespace DfoServer.Game.Quests
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
 
-            bool matched = _service.SyncItemSeekingQuestProgress(
-                cid,
-                _sender.AccountId,
+            bool matched = SyncItemSeekingQuestProgressWithoutNotification(
                 itemFilter,
                 temporaryHeldCounts);
             if (!matched)
@@ -258,17 +264,25 @@ namespace DfoServer.Game.Quests
             await _sender.SendNotiAsync(0x023F, noti);
         }
 
+        public bool SyncItemSeekingQuestProgressWithoutNotification(
+            ICollection<int> itemFilter,
+            IReadOnlyDictionary<int, int> temporaryHeldCounts = null)
+        {
+            int cid = _sender.CharacterId;
+            if (cid <= 0)
+                return false;
+
+            return _service.SyncItemSeekingQuestProgress(
+                cid,
+                _sender.AccountId,
+                itemFilter,
+                temporaryHeldCounts);
+        }
+
         public void RecalibrateItemSeekingQuestProgressWithoutNotification(
             ICollection<int> itemFilter)
         {
-            var cid = _sender.CharacterId;
-            if (cid <= 0)
-                return;
-
-            _service.SyncItemSeekingQuestProgress(
-                cid,
-                _sender.AccountId,
-                itemFilter);
+            SyncItemSeekingQuestProgressWithoutNotification(itemFilter);
         }
 
         public async Task SyncClearMapQuestProgressAsync(int dungeonId, int mapId)
@@ -282,6 +296,72 @@ namespace DfoServer.Game.Quests
 
             var noti = BuildAcceptedQuestNoti(cid);
             await _sender.SendNotiAsync(0x023F, noti);
+        }
+
+        public async Task SyncHuntMonsterQuestProgressAsync(
+            int dungeonId,
+            int difficulty,
+            int monsterCode)
+        {
+            var cid = _sender.CharacterId;
+            if (cid <= 0 || dungeonId <= 0 || monsterCode <= 0)
+                return;
+
+            var changes = _service.SyncHuntMonsterQuestProgress(
+                cid,
+                dungeonId,
+                difficulty,
+                monsterCode);
+            if (changes.Count == 0)
+                return;
+
+            var run = _sender.Player?.CurrentRun;
+            if (run != null)
+            {
+                foreach (var change in changes)
+                    run.MarkServerDrivenHuntMonsterTrigger(change.QuestId);
+            }
+
+            var noti = BuildAcceptedQuestNoti(cid);
+            await _sender.SendNotiAsync(0x023F, noti);
+        }
+
+        private bool TryBuildServerDrivenHuntMonsterEcho(
+            int characterId,
+            byte[] qBody,
+            out QuestSetTriggerResult result)
+        {
+            result = null;
+            if (qBody == null || qBody.Length < 3)
+                return false;
+
+            var triggerType = qBody[2];
+            var isIncrement = qBody.Length >= 4 && qBody[3] != 0;
+            if (triggerType == 1 || isIncrement)
+                return false;
+
+            var questId = BitConverter.ToUInt16(qBody, 0);
+            var run = _sender.Player?.CurrentRun;
+            if (run == null
+                || !run.TryConsumeServerDrivenHuntMonsterTrigger(questId))
+            {
+                return false;
+            }
+
+            var active = QuestService.LoadActiveQuests(_connStr, characterId);
+            var quest = QuestService.FindByQuestId(active, questId);
+            var trigger = quest?.TriggerValue ?? 0;
+            result = new QuestSetTriggerResult
+            {
+                QuestId = questId,
+                PreviousTriggerValue = trigger,
+                TriggerValue = trigger,
+            };
+            FileLogger.Log(
+                $"[QuestManager] SET_TRIGGER echo suppressed after " +
+                $"server hunt progress: cid={characterId} quest={questId} " +
+                $"type=0x{triggerType:X2} trigger={trigger}");
+            return true;
         }
 
         private bool TryBuildDeferredClearMapSetTrigger(int characterId, byte[] qBody, out QuestSetTriggerResult result)

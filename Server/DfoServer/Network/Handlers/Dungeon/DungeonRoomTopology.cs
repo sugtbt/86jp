@@ -245,7 +245,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             return point.X >= 0 && point.Y >= 0 && point.X < maze.Width && point.Y < maze.Height;
         }
 
-        private static void AddGreedCells(MazeInfo maze, HashSet<DungeonRoomPoint> cells)
+        internal static void AddGreedCells(MazeInfo maze, HashSet<DungeonRoomPoint> cells)
         {
             if (maze.Width <= 0 || maze.Height <= 0 || string.IsNullOrWhiteSpace(maze.Greed))
                 return;
@@ -253,14 +253,16 @@ namespace DfoServer.Network.Handlers.Dungeon
             var values = maze.Greed
                 .Where(ch => !char.IsWhiteSpace(ch) && ch != '`' && ch != ',')
                 .ToArray();
-            if (values.Length < maze.Width * maze.Height)
+            var cellCount = maze.Width * maze.Height;
+            var charsPerCell = values.Length >= cellCount * 2 ? 2 : 1;
+            if (values.Length < cellCount * charsPerCell)
                 return;
 
             for (var y = 0; y < maze.Height; y++)
             {
                 for (var x = 0; x < maze.Width; x++)
                 {
-                    var ch = values[y * maze.Width + x];
+                    var ch = values[(y * maze.Width + x) * charsPerCell];
                     if (IsOpenGreedCell(ch))
                         cells.Add(new DungeonRoomPoint(x, y));
                 }

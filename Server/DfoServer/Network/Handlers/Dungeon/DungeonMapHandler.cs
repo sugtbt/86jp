@@ -60,8 +60,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (moveTarget.X != req.NextX || moveTarget.Y != req.NextY)
                 FileLogger.Log($"[DungeonHandler] MOVE_MAP normalized: current=({run.RoomKey.X},{run.RoomKey.Y}) requested=({req.NextX},{req.NextY}) target=({moveTarget.X},{moveTarget.Y}) reason={targetReason}");
 
-            var timeSpiralTeleport =
-                TimeSpiralDungeonCoordinator.ApplyTeleportOverride(
+            var mechanismMove =
+                DungeonMechanismCoordinator.ApplyMoveTargetOverride(
                     session,
                     req.NextX,
                     req.NextY,
@@ -87,14 +87,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                 run.LayeredMapIndex = -1;
             }
 
-            SpecialDungeonRunCoordinator.TryApplyGentWarpOverride(
+            DungeonMechanismCoordinator.ApplyMapOverride(
                 session,
                 moveTarget,
                 ref overrideMapId);
             await SendStartMapAsync(session, moveTarget.X, moveTarget.Y, overrideMapId);
-            TimeSpiralDungeonCoordinator.LogDeferredBuff(
+            DungeonMechanismCoordinator.OnMoveMapCompleted(
                 session,
-                timeSpiralTeleport,
+                mechanismMove,
                 "leader_START_MAP");
 
             // ★组队副本联机: 队长移动到下一房间时, 带同队队员一起换图(队员是follower、不自发MOVE_MAP)。
@@ -103,7 +103,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 moveTarget.X,
                 moveTarget.Y,
                 overrideMapId,
-                timeSpiralTeleport);
+                mechanismMove);
         }
 
         // 队长换图时把同队【在副本里】的成员也移到同一房间(服务端驱动, 队员副本=队长迷宫拷贝)。⚠️待真机验证。
@@ -112,7 +112,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             int nextX,
             int nextY,
             int overrideMapId,
-            TimeSpiralDungeonCoordinator.TeleportMoveContext timeSpiralTeleport)
+            DungeonMechanismCoordinator.MoveMapContext mechanismMove)
         {
             var pm = _svc.PartyManager;
             var sessions = _svc.Sessions;
@@ -129,13 +129,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 try
                 {
                     bs.Player.CurrentRun.LayeredMapIndex = leader.Player.CurrentRun.LayeredMapIndex;
-                    TimeSpiralDungeonCoordinator.CopyTeleportStateForPartyMove(
+                    DungeonMechanismCoordinator.CopyMoveStateForParty(
                         leader.Player.CurrentRun,
                         bs.Player.CurrentRun);
                     await SendStartMapAsync(bs, nextX, nextY, overrideMapId);
-                    TimeSpiralDungeonCoordinator.LogDeferredBuff(
+                    DungeonMechanismCoordinator.OnMoveMapCompleted(
                         bs,
-                        timeSpiralTeleport,
+                        mechanismMove,
                         $"party_START_MAP leader={leader.Player.CharacterId}");
                     FileLogger.Log($"[DungeonHandler] PARTY_MOVE_MAP: 带队员 cid={bs.Player.CharacterId} 到 ({nextX},{nextY})");
                 }
@@ -152,7 +152,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (run == null) return;
 
             var effectiveOverrideMapId =
-                SpecialDungeonRunCoordinator.ResolveStartMapOverride(
+                DungeonMechanismCoordinator.ResolveStartMapOverride(
                     run,
                     nextX,
                     nextY,
@@ -182,12 +182,19 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             byte[] startMapBody;
             List<KeyValuePair<int, int>> hellPartyMonsterInfoAfterStartMap = null;
+            var isFirstRunStartMap = false;
+            var sentMapId = maze.Index;
+            var sentMapX = maze.X;
+            var sentMapY = maze.Y;
+            var sentActorCount = 0;
+            var sentTrackedCount = 0;
 
             // 锁内绝不 await: 把 START_MAP 对 run 房间态(RoomKey/RoomStates/RoomKilledSeqIds/RoomMonsters/
             // MonsterCount)的整段读改写与队友击杀 relay(PropagateKillForClearAsync 在别的线程读这些结构)互斥,
             // 防 Dict/HashSet 跨线程并发改崩。此块 138-241 全为同步逻辑, 所有 await 发包都在 lock 之外。
             lock (run.SyncRoot)
             {
+            isFirstRunStartMap = run.RoomStates.Count == 0;
             run.RoomKey = roomKey;
             if (run.RoomStates.TryGetValue(roomKey, out var cached))
             {
@@ -197,9 +204,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                 run.RoomLcg = cached.Lcg;
                 run.Seed = cached.Seed;
                 run.RoomKey = roomKey;
-                TimeSpiralDungeonCoordinator.RestoreHiddenBoss(run, cached);
+                DungeonMechanismCoordinator.RestoreRoomState(run, cached);
 
                 startMapBody = DungeonNotificationBuilder.BuildStartMapRevisit(cached.Maze, cached.Seed);
+                sentMapId = cached.Maze.Index;
+                sentMapX = cached.Maze.X;
+                sentMapY = cached.Maze.Y;
+                sentActorCount = cached.Maze.Monsters?.Count ?? 0;
+                sentTrackedCount = cached.MonsterCount;
                 FileLogger.Log($"[DungeonHandler] START_MAP revisit: room=({maze.X},{maze.Y}) killed={cached.KilledSeqIds.Count}/{cached.MonsterCount} cleared={cached.IsCleared}");
             }
             else
@@ -228,7 +240,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 if (!isHellPartyRoom)
                 {
                     ApplyChampionPromotion(session, startMapMaze.Monsters);
-                    SpecialDungeonRunCoordinator.AppendStartMapActors(
+                    DungeonMechanismCoordinator.AppendStartMapActors(
                         session,
                         startMapMaze);
                 }
@@ -245,7 +257,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     Lcg = lcg,
                 };
                 run.RoomStates[roomKey] = roomState;
-                TimeSpiralDungeonCoordinator.RegisterHiddenBossAfterStartMap(
+                DungeonMechanismCoordinator.OnRoomStateCreated(
                     session,
                     roomState);
 
@@ -289,6 +301,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     hellPartyFogFlag: startMapFogFlag,
                     extraEntries: extraEntries,
                     ridableEntries: ridableForRoom);
+                sentMapId = startMapMaze.Index;
+                sentMapX = startMapMaze.X;
+                sentMapY = startMapMaze.Y;
+                sentActorCount = startMapMaze.Monsters?.Count ?? 0;
+                sentTrackedCount = roomState.MonsterCount;
                 run.MonsterCount += (ushort)startMapMaze.Monsters.Count;
             }
             } // end lock(run.SyncRoot)
@@ -313,7 +330,16 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"dungeon={run.DungeonId} layers=0,{towerCurrentApcInfoBody[0]} " +
                     $"job={session.Player.Job} grow={session.Player.GrowType}");
             }
-            await SpecialDungeonNotifier.SendStartMapStateAsync(session);
+            if (isFirstRunStartMap)
+            {
+                FileLogger.Log(
+                    $"[DungeonHandler] START_MAP first sent: " +
+                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} maze={run.MazeIndex} " +
+                    $"requested=({nextX},{nextY}) resolved=({sentMapX},{sentMapY}) map={sentMapId} " +
+                    $"override={effectiveOverrideMapId} selectedStart=({run.MazeStartX},{run.MazeStartY}) " +
+                        $"selectedStartMap={run.MazeStartMapId} actors={sentActorCount} tracked={sentTrackedCount}");
+            }
+            await DungeonMechanismCoordinator.OnStartMapSentAsync(session);
 
             if (hellPartyMonsterInfoAfterStartMap != null && hellPartyMonsterInfoAfterStartMap.Count > 0)
             {

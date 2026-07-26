@@ -13,19 +13,17 @@ namespace DfoServer.Network.Handlers.Dungeon
     // 单局字段随对象消失 -- 全仓不再有逐字段重置清单。
     internal static class DungeonRunLifecycle
     {
-        private const int GentInfiltrateClientTimerSyncGraceSeconds = 4;
-
         // 进本: 掐掉旧局残留定时器 -> 换新局。
         internal static void BeginRun(EnhancedClientSession session, int dungeonId, byte difficulty)
         {
             var towerItemIds = CaptureTowerItemIds(session);
             CancelAutoFlip(session);
             CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
+            DungeonMechanismCoordinator.CancelRunTimers(session);
             Game.DeathTower.DeathTowerHandler.ClearTowerState(session);
 
             session.Player.CurrentRun = new DungeonRun((short)dungeonId, difficulty);
-            SpecialDungeonRunCoordinator.InitializeRuntime(session, dungeonId, "begin_run");
+            DungeonMechanismCoordinator.OnRunCreated(session, dungeonId, "begin_run");
             RecalibrateTowerQuestOverlayWithoutNotification(session, towerItemIds);
             PetCreatureRuntimeService.BeginDungeon(session, dungeonId, "begin_run");
         }
@@ -40,7 +38,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var towerItemIds = CaptureTowerItemIds(session);
             CancelAutoFlip(session);
             CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
+            DungeonMechanismCoordinator.CancelRunTimers(session);
 
             session.Player.CurrentRun = new DungeonRun((short)dungeonId, difficulty);
             session.Player.CurrentRun.Tower = tower;
@@ -57,10 +55,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 : null;
             CancelAutoFlip(session);
             CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
+            DungeonMechanismCoordinator.CancelRunTimers(session);
             PersistSessionExp(session, "town");
             Game.DeathTower.DeathTowerHandler.ClearTowerState(session);
-            await SpecialDungeonNotifier.ClearRunBuffsAsync(session, "town");
+            await DungeonMechanismCoordinator.ClearRunEffectsAsync(session, "town");
             await PetCreatureRuntimeService.EndDungeonToTownAsync(session, "town");
 
             session.Player.DungeonSceneUniqueId = 0;
@@ -78,9 +76,10 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static void EndRunOnTeardown(EnhancedClientSession session, string source)
         {
             var towerItemIds = CaptureTowerItemIds(session);
+            LinkedDungeonEntryAuthorizationStore.Clear(session?.Player);
             CancelAutoFlip(session);
             CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
+            DungeonMechanismCoordinator.CancelRunTimers(session);
             PersistSessionExp(session, source);
             Game.DeathTower.DeathTowerHandler.ClearTowerState(session);
             PetCreatureRuntimeService.EndCharacterSession(session, source);
@@ -155,108 +154,5 @@ namespace DfoServer.Network.Handlers.Dungeon
             handle?.Cancel();
         }
 
-        internal static void StartSpecialDungeonTimer(
-            EnhancedClientSession session,
-            string source)
-        {
-            var run = session?.Player?.CurrentRun;
-            var special = run?.SpecialDungeon;
-            if (run == null
-                || special == null
-                || special.Kind != SpecialDungeonKind.GentInfiltrate)
-            {
-                return;
-            }
-
-            CancelSpecialDungeonTimer(session);
-            var seconds = special.GentInfiltrateTimerSeconds;
-            if (seconds <= 0)
-            {
-                FileLogger.Log(
-                    $"[SpecialDungeonModule] GENT_INFILTRATE timer skipped " +
-                    $"source={source} cid={session.Player.CharacterId} " +
-                    $"dungeon={special.DungeonId} reason=no_timer");
-                return;
-            }
-
-            var version = Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-            if (version == 0)
-                version = Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-
-            var scheduledSeconds =
-                seconds + GentInfiltrateClientTimerSyncGraceSeconds;
-            var timerName =
-                $"special-dungeon:gent-infiltrate:{session.Player.CharacterId}:{run.StartedUtc.Ticks}";
-            var handle = ClockService.Instance.ScheduleOneShotAfterAsync(
-                timerName,
-                TimeSpan.FromSeconds(scheduledSeconds),
-                async _ =>
-                {
-                    if (!IsSpecialDungeonTimerCurrent(session, run, version))
-                        return;
-
-                    await SpecialDungeonNotifier.MarkGentInfiltrateTimeoutAsync(
-                        session,
-                        "timer");
-                });
-
-            StoreSpecialDungeonTimerHandle(run, version, handle);
-            FileLogger.Log(
-                $"[SpecialDungeonModule] GENT_INFILTRATE timer scheduled " +
-                $"source={source} cid={session.Player.CharacterId} " +
-                $"dungeon={special.DungeonId} configSeconds={seconds} " +
-                $"scheduledSeconds={scheduledSeconds} " +
-                $"clientSyncGrace={GentInfiltrateClientTimerSyncGraceSeconds} " +
-                $"version={version}");
-        }
-
-        internal static void CancelSpecialDungeonTimer(
-            EnhancedClientSession session)
-        {
-            var run = session?.Player?.CurrentRun;
-            if (run == null)
-                return;
-
-            Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-            var handle = Interlocked.Exchange(
-                ref run.SpecialDungeonTimerHandle,
-                null);
-            handle?.Cancel();
-        }
-
-        private static bool IsSpecialDungeonTimerCurrent(
-            EnhancedClientSession session,
-            DungeonRun run,
-            int version)
-            => session?.Player != null
-                && ReferenceEquals(session.Player.CurrentRun, run)
-                && run.SpecialDungeonTimerVersion == version;
-
-        private static void StoreSpecialDungeonTimerHandle(
-            DungeonRun run,
-            int version,
-            ClockService.ClockTimerHandle handle)
-        {
-            if (run.SpecialDungeonTimerVersion != version)
-            {
-                handle.Cancel();
-                return;
-            }
-
-            var previous = Interlocked.Exchange(
-                ref run.SpecialDungeonTimerHandle,
-                handle);
-            if (previous != null && !ReferenceEquals(previous, handle))
-                previous.Cancel();
-
-            if (run.SpecialDungeonTimerVersion != version)
-            {
-                Interlocked.CompareExchange(
-                    ref run.SpecialDungeonTimerHandle,
-                    null,
-                    handle);
-                handle.Cancel();
-            }
-        }
     }
 }

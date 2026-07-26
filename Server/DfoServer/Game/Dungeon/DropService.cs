@@ -20,6 +20,51 @@ namespace DfoServer.Game.Dungeon
             HellMonsterDropConfig.WarmUp();
         }
 
+        internal bool TryRegisterTemplateDrop(
+            DungeonRun run,
+            int itemTemplateId,
+            int count,
+            out DropInfo drop)
+        {
+            drop = default;
+            if (run == null || itemTemplateId <= 0 || count <= 0)
+                return false;
+
+            ItemMetadata metadata;
+            try
+            {
+                metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            if (metadata == null
+                || (metadata.ItemKind != "equipment" && metadata.ItemKind != "stackable"))
+            {
+                return false;
+            }
+
+            lock (run.SyncRoot)
+            {
+                run.SceneSlotCounter++;
+                if (run.SceneSlotCounter == 0)
+                    run.SceneSlotCounter++;
+
+                drop = new DropInfo
+                {
+                    SceneSlot = run.SceneSlotCounter,
+                    TemplateId = (uint)itemTemplateId,
+                    StackCount = (uint)count,
+                    Endurance = metadata.Durability,
+                };
+                run.Drops[drop.SceneSlot] = drop;
+            }
+
+            return true;
+        }
+
         internal MonsterDropResult GenerateAndRegister(DungeonRun run, MonsterDropRequest request)
         {
             if (run == null) return default;

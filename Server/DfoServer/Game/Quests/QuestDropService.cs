@@ -10,13 +10,13 @@ using System.Threading.Tasks;
 namespace DfoServer.Game.Quests
 {
     // 击杀怪物/摧毁被动物体后的任务掉落判定与发放。
-    // 规则数据来自 QuestDropProvider(PVF), 发放走资产服务事务, 发放后同步寻物任务进度。
+    // 规则数据来自 QuestDropProvider(PVF)，发放走在线背包服务，发放后同步寻物任务进度。
     // 原先寄居在副本共享服务里, 拆出归任务域。
     public sealed class QuestDropService
     {
         private const string ProtocolLogName = "GameProtocol";
 
-        private readonly InventoryRefreshSender _inventoryRefresh;
+        private readonly QuestDropNotificationBatcher _notificationBatcher;
         private readonly string _connectionString;
         private readonly Func<QuestDropCandidate, int, int> _rollDrop;
 
@@ -25,7 +25,8 @@ namespace DfoServer.Game.Quests
             string connectionString = null,
             Func<QuestDropCandidate, int, int> rollDrop = null)
         {
-            _inventoryRefresh = inventoryRefresh ?? throw new ArgumentNullException(nameof(inventoryRefresh));
+            if (inventoryRefresh == null) throw new ArgumentNullException(nameof(inventoryRefresh));
+            _notificationBatcher = new QuestDropNotificationBatcher(inventoryRefresh);
             _connectionString = connectionString;
             _rollDrop = rollDrop ?? QuestDropProvider.RollDrop;
         }
@@ -85,7 +86,7 @@ namespace DfoServer.Game.Quests
                     run.Difficulty));
         }
 
-        private async Task CheckDrop(
+        private Task CheckDrop(
             EnhancedClientSession session,
             int sourceCode,
             string sourceName,
@@ -93,16 +94,16 @@ namespace DfoServer.Game.Quests
         {
             var activeQuestIds = LoadActiveQuestIds(session, $"{sourceName}={sourceCode}");
             if (activeQuestIds == null || activeQuestIds.Count == 0)
-                return;
+                return Task.CompletedTask;
 
             var candidates = getCandidates(activeQuestIds);
-            if (candidates == null) return;
+            if (candidates == null) return Task.CompletedTask;
 
             if (!InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
                 || !lease.IsOwnedBy(session.SessionId))
             {
                 FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped because online inventory is missing cid={session.Player.CharacterId}");
-                return;
+                return Task.CompletedTask;
             }
 
             var grantedItemIds = new HashSet<int>();
@@ -150,20 +151,25 @@ namespace DfoServer.Game.Quests
             }
 
             if (grantedItemIds.Count <= 0)
-                return;
+                return Task.CompletedTask;
 
+            bool refreshQuests = false;
             if (session.GameSession?.QuestManager == null)
             {
                 FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: granted {grantedItemIds.Count} item kinds but quest progress sync skipped because QuestManager is missing");
             }
             else
             {
-                await session.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(grantedItemIds);
+                refreshQuests = session.GameSession.QuestManager
+                    .SyncItemSeekingQuestProgressWithoutNotification(grantedItemIds);
             }
 
-            // During a dungeon, refresh only the changed slots after quest progress has settled.
-            await _inventoryRefresh.SendUpdateItemList(session, InventoryListType.Main, grantedSlots);
-            FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: UPDATE_ITEM_LIST sent slots={string.Join(",", grantedSlots)}");
+            // Coalesce only client projections after online inventory and quest state settle.
+            _notificationBatcher.Queue(session, refreshQuests, grantedSlots);
+            FileLogger.Log(
+                $"[{ProtocolLogName}] QUEST_DROP: refresh queued " +
+                $"quests={refreshQuests} slots={string.Join(",", grantedSlots)}");
+            return Task.CompletedTask;
         }
 
         private HashSet<int> LoadActiveQuestIds(

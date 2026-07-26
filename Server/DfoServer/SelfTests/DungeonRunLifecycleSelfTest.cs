@@ -99,6 +99,22 @@ namespace DfoServer.SelfTests
             catch { idempotentOk = false; }
             Check("End without run is idempotent", idempotentOk, ref failures);
 
+            player.CharacterId = 1001;
+            LinkedDungeonEntryAuthorizationStore.Grant(
+                player,
+                sourceDungeonId: 76,
+                targetDungeonId: 301,
+                difficulty: 2);
+            player.CharacterId = 0;
+            DungeonRunLifecycle.EndRunToTownAsync(session).GetAwaiter().GetResult();
+            Check("town transition preserves one-shot linked authorization",
+                LinkedDungeonEntryAuthorizationStore.HasPending(player),
+                ref failures);
+            DungeonRunLifecycle.EndRunOnTeardown(session, "linked-auth-selftest");
+            Check("disconnect or character teardown clears linked authorization",
+                !LinkedDungeonEntryAuthorizationStore.HasPending(player),
+                ref failures);
+
             // 6. 翻牌定时器句柄: 取消置空 + 换局时旧句柄必被取消
             DungeonRunLifecycle.BeginRun(session, 1002, 0);
             var firstRun = player.CurrentRun;

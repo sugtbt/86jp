@@ -40,15 +40,27 @@ namespace DfoServer.Game.Dungeon
         public DateTime StartedUtc;
         private readonly HashSet<(int DungeonId, int MapId)> _syncedClearMapQuestTargets =
             new HashSet<(int DungeonId, int MapId)>();
+        private readonly Dictionary<ushort, int> _pendingHuntMonsterTriggerEchoes =
+            new Dictionary<ushort, int>();
+        private readonly HashSet<int> _npcItemDropQuestIds = new HashSet<int>();
 
         // Per-run state for the ordinary special dungeons in PR part one.
         internal SpecialDungeonRuntime SpecialDungeon;
         public bool IgnoreDefaultDungeonClear;
         public IReadOnlyList<IReadOnlyList<(byte X, byte Y)>> SpecialMinimapIconGroups;
-        internal List<MeltdownHelpusHostageAssignment> MeltdownHelpusHostages =
-            new List<MeltdownHelpusHostageAssignment>();
-        internal bool MeltdownHelpusBossConditionComplete;
-        internal bool MeltdownHelpusBossSpawned;
+        internal List<BossEntranceConditionTargetState> BossEntranceConditionTargets =
+            new List<BossEntranceConditionTargetState>();
+        internal List<int> BossEntranceConditionalSummonCodes = new List<int>();
+        internal bool BossEntranceConditionComplete;
+        internal bool ConditionalBossSpawned;
+        internal int ConditionalBossCode;
+        internal ScriptedFatalEndpointRuntime ScriptedFatalEndpoint;
+
+        internal bool HasBossEntranceConditionalSummon
+            => BossEntranceConditionTargets != null
+                && BossEntranceConditionTargets.Count > 0
+                && BossEntranceConditionalSummonCodes != null
+                && BossEntranceConditionalSummonCodes.Count > 0;
 
         // 迷宫选择与任务连接
         public int MazeIndex = -1;
@@ -155,13 +167,68 @@ namespace DfoServer.Game.Dungeon
         {
             return _syncedClearMapQuestTargets.Add((dungeonId, mapId));
         }
+
+        internal void MarkServerDrivenHuntMonsterTrigger(ushort questId)
+        {
+            if (questId == 0)
+                return;
+
+            lock (SyncRoot)
+            {
+                _pendingHuntMonsterTriggerEchoes.TryGetValue(
+                    questId,
+                    out var pending);
+                _pendingHuntMonsterTriggerEchoes[questId] = pending + 1;
+            }
+        }
+
+        internal bool TryConsumeServerDrivenHuntMonsterTrigger(ushort questId)
+        {
+            if (questId == 0)
+                return false;
+
+            lock (SyncRoot)
+            {
+                if (!_pendingHuntMonsterTriggerEchoes.TryGetValue(
+                        questId,
+                        out var pending)
+                    || pending <= 0)
+                {
+                    return false;
+                }
+
+                if (pending == 1)
+                    _pendingHuntMonsterTriggerEchoes.Remove(questId);
+                else
+                    _pendingHuntMonsterTriggerEchoes[questId] = pending - 1;
+                return true;
+            }
+        }
+
+        internal bool TryMarkNpcItemDropGenerated(int questId)
+        {
+            if (questId <= 0)
+                return false;
+
+            lock (SyncRoot)
+                return _npcItemDropQuestIds.Add(questId);
+        }
+
+        internal void UnmarkNpcItemDropGenerated(int questId)
+        {
+            if (questId <= 0)
+                return;
+
+            lock (SyncRoot)
+                _npcItemDropQuestIds.Remove(questId);
+        }
     }
 
-    internal sealed class MeltdownHelpusHostageAssignment
+    internal sealed class BossEntranceConditionTargetState
     {
         internal int MonsterCode { get; set; }
         internal byte X { get; set; }
         internal byte Y { get; set; }
-        internal bool Rescued { get; set; }
+        internal bool Completed { get; set; }
     }
 }

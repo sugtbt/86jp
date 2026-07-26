@@ -24,8 +24,6 @@ namespace DfoServer.Network.Handlers.Dungeon
         private readonly DungeonEntryHandler _entry;
 
         private const int SetPlayResultRankPointOffset = 10;
-        private const int SetPlayResultSeizeMoneyHitCountOffset = 6;
-        private const int SeizeMoneyGoldIngotItemId = 10089565;
         // 成长之契约经验加成从 PVF premiumlist_new.etc 读取(PremiumEffectProvider)。
         private const float BlackDiamondBonusRate = 0.10f;
         private static readonly int[] BlackDiamondPremiumTypes = { 1, 17 };
@@ -52,7 +50,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var run = session.Player.CurrentRun;
             if (run == null) return;
             if (run.Phase != DungeonRunPhase.Cleared) return;
-            await TrySendSeizeMoneyGoldIngotDropsAsync(session, body);
+            await DungeonMechanismCoordinator.OnResultPreparingAsync(session, body);
             run.Phase = DungeonRunPhase.ResultShown;
 
             var isTowerOfDespair = DungeonData.TryGetTowerOfDespairFloor(
@@ -190,7 +188,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             // 符合判断使用结算前等级，奖励通知放在结算三包之后。
             await GrantSuitableDungeonLuckyStar(session, prevLevel);
-            _svc.AntonNormal.ConfigureLinkedChallenge(run);
+            _svc.PersistentMechanisms.ConfigureLinkedChallenge(run);
             await SendLinkedDungeonInfoAsync(session, run);
 
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CLEAR_EXP: dungeon={run.DungeonId} diff={run.Difficulty} clientRank={clearRank.ClientRankPoint} rankPoint={clearRank.RankPoint} rankGrade={clearRank.RankGrade} rankBonusIndex={clearRank.RankBonusIndex} base={clearExp.Base} scoreBonus={clearExp.ScoreBonus} growthContract={clearExp.GrowthContractBonus} blackDiamond={clearExp.BlackDiamondBonus} adventureGroup={clearExp.AdventureGroupBonus} bonus={clearExp.Bonus} total={clearExp.Total} monsterTotalExp={monsterTotalExp} monsterGrowthContract={monsterGrowthContractBonus} bossTotalExp={bossTotalExp} championTotalExp={championTotalExp} superChampionTotalExp={superChampionTotalExp} namedMonsterTotalExp={namedMonsterTotalExp} charExp={session.Player.Exp}");
@@ -218,75 +216,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             await UpdateDungeonPermission(session, run.DungeonId, run.Difficulty);
-            await _svc.AntonNormal.ApplyClearAsync(session, run);
-        }
-
-        private static async Task TrySendSeizeMoneyGoldIngotDropsAsync(
-            EnhancedClientSession session,
-            byte[] body)
-        {
-            var run = session?.Player?.CurrentRun;
-            var special = run?.SpecialDungeon;
-            if (run == null
-                || special == null
-                || special.Kind != SpecialDungeonKind.SeizeMoney)
-            {
-                return;
-            }
-
-            var config = special.Config.SeizeMoney;
-            var unitValue = Math.Max(1, config.GaugeSubOnDamage);
-            var maxUnits = Math.Max(1, config.GaugeMax / unitValue);
-            var hitCount = Math.Max(
-                0,
-                ReadInt32(body, SetPlayResultSeizeMoneyHitCountOffset));
-            var remainingUnits =
-                Math.Max(0, maxUnits - Math.Min(maxUnits, hitCount));
-            var bossSeq = special.SeizeMoneyBossSeq;
-            if (bossSeq == 0
-                || !special.TryReserveSeizeMoneyClearReward(
-                    remainingUnits,
-                    out var count,
-                    out var gauge))
-            {
-                FileLogger.Log(
-                    $"[SpecialDungeonModule] SEIZE_MONEY drops skipped: " +
-                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                    $"bossSeq={bossSeq} hitCount={hitCount} " +
-                    $"remainingUnits={remainingUnits} gauge={special.SeizeMoneyGauge}");
-                return;
-            }
-
-            var drops = new List<DropInfo>();
-            lock (run.SyncRoot)
-            {
-                for (var i = 0; i < count; i++)
-                {
-                    run.SceneSlotCounter++;
-                    var drop = new DropInfo
-                    {
-                        SceneSlot = run.SceneSlotCounter,
-                        TemplateId = SeizeMoneyGoldIngotItemId,
-                        StackCount = 1,
-                    };
-                    drops.Add(drop);
-                    run.Drops[drop.SceneSlot] = drop;
-                }
-            }
-
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                0x0026,
-                DungeonNotificationBuilder.BuildMonsterDie(
-                    bossSeq,
-                    drops,
-                    session.Player.UserId)));
-            FileLogger.Log(
-                $"[SpecialDungeonModule] SEIZE_MONEY drops sent: " +
-                $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                $"bossSeq={bossSeq} item={SeizeMoneyGoldIngotItemId} " +
-                $"count={count} hitCount={hitCount} " +
-                $"remainingUnits={remainingUnits} gauge={gauge}/{config.GaugeMax}");
+            await _svc.PersistentMechanisms.ApplyDungeonClearAsync(session, run);
         }
 
         private static bool TryBuildTowerOfDespairClearRewardWithTime(
@@ -696,23 +626,37 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            if (!ShouldClearQuestNpcDungeon(
+            var questNpcMatched = ShouldClearQuestNpcDungeon(
+                run,
+                dungeonFile.QuestNpcDungeon,
+                GameWorld.QuestData.IsMeetNpcQuest(result.QuestId),
+                result);
+            var currentMapId = ResolveCurrentMapId(session);
+            var connectedQuestId = ResolveSelectedMazeQuestConnection(
+                dungeonFile,
+                run.MazeIndex);
+            var questConnectedClearMapMatched =
+                ShouldClearQuestConnectedClearMapDungeon(
                     run,
-                    dungeonFile.QuestNpcDungeon,
-                    GameWorld.QuestData.IsMeetNpcQuest(result.QuestId),
-                    result))
+                    connectedQuestId,
+                    currentMapId,
+                    GameWorld.QuestData.IsClearMapQuest(result.QuestId),
+                    result);
+            if (!questNpcMatched && !questConnectedClearMapMatched)
             {
                 return;
             }
 
             FileLogger.Log(
-                $"[DungeonHandler] quest NPC clear matched: " +
+                $"[DungeonHandler] quest completion clear matched: " +
                 $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                $"quest={result.QuestId} " +
+                $"maze={run.MazeIndex} map={currentMapId} " +
+                $"quest={result.QuestId} source=" +
+                $"{(questNpcMatched ? "quest-npc" : "quest-connected-clear-map")} " +
                 $"trigger={result.PreviousTriggerValue}->{result.TriggerValue}");
             await TryClearDungeon(
                 session,
-                $"quest NPC completed quest={result.QuestId}");
+                $"quest completion quest={result.QuestId}");
         }
 
         internal static bool ShouldClearQuestNpcDungeon(
@@ -737,6 +681,62 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             return run.RoomKey.X == run.BossMapPos[0]
                 && run.RoomKey.Y == run.BossMapPos[1];
+        }
+
+        internal static bool ShouldClearQuestConnectedClearMapDungeon(
+            DungeonRun run,
+            int connectedQuestId,
+            int currentMapId,
+            bool isClearMapQuest,
+            Game.Quests.QuestSetTriggerResult result)
+        {
+            if (run == null
+                || run.Phase != DungeonRunPhase.InProgress
+                || !run.MazeQuestConnected
+                || connectedQuestId <= 0
+                || currentMapId <= 0
+                || !isClearMapQuest
+                || result == null
+                || !result.Success
+                || result.QuestId != connectedQuestId
+                || result.PreviousTriggerValue == 0
+                || result.TriggerValue != 0
+                || run.BossMapPos == null
+                || run.BossMapPos.Length < 2
+                || run.RoomKey.X != run.BossMapPos[0]
+                || run.RoomKey.Y != run.BossMapPos[1])
+            {
+                return false;
+            }
+
+            return GameWorld.QuestData.MatchesClearMapTarget(
+                result.QuestId,
+                run.DungeonId,
+                currentMapId);
+        }
+
+        private static int ResolveSelectedMazeQuestConnection(
+            PvfLib.DungeonFile dungeonFile,
+            int mazeIndex)
+        {
+            if (dungeonFile?.Mazes == null
+                || mazeIndex < 0
+                || mazeIndex >= dungeonFile.Mazes.Count)
+            {
+                return -1;
+            }
+
+            var connection = dungeonFile.Mazes[mazeIndex].QuestConnection;
+            if (connection == null || connection.Length < 2)
+                connection = dungeonFile.QuestConnection;
+            if (connection == null
+                || connection.Length < 2
+                || connection[0] != 0)
+            {
+                return -1;
+            }
+
+            return connection[1];
         }
 
         private static SecretShopOffer CreateSecretShopOffer(DungeonRun run)
@@ -810,6 +810,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     0x00,
                     (ushort)NotiPacketType.LINKED_DUNGEON_INFO,
                     body));
+            LinkedDungeonEntryAuthorizationStore.Grant(
+                session.Player,
+                run.DungeonId,
+                run.LinkedDungeonNextId,
+                (byte)difficulty);
             FileLogger.Log(
                 $"[DungeonHandler] LINKED_DUNGEON_INFO sent: " +
                 $"current={run.DungeonId} " +

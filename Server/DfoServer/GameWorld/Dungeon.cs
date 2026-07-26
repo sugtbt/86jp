@@ -109,6 +109,10 @@ namespace DfoServer.GameWorld
             public int Y { get; set; }
 
             public List<MonsterSumInfo> Monsters { get; set; }
+
+            public IReadOnlyList<EventMonsterPositionInfo> EventMonsterPositions { get; set; }
+
+            public IReadOnlyList<SpecialPassiveObjectInfo> SpecialPassiveObjects { get; set; }
         }
 
         public struct DungeonRoomCoordinate
@@ -127,6 +131,13 @@ namespace DfoServer.GameWorld
             public int DungeonId { get; set; }
             public int Rate { get; set; }
             public int Condition { get; set; }
+        }
+
+        public sealed class LinkedDungeonClearPassiveObject
+        {
+            public int ObjectCode { get; set; }
+            public int X { get; set; }
+            public int Y { get; set; }
         }
 
         public sealed class HellPartyWaveInfo
@@ -367,14 +378,66 @@ namespace DfoServer.GameWorld
             }
         }
 
-        public static bool IsSpecialLinkedDungeon(int dungeonId)
+        public static List<int> GetLinkedDungeonPreviousIds(int dungeonId)
+        {
+            try
+            {
+                return ParseLinkedDungeonPreviousIds(
+                    GetDungeonFile(dungeonId)?.LinkedDungeon);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[Dungeon] linked dungeon prev parse failed: " +
+                    $"dungeon={dungeonId} error={ex.Message}");
+                return new List<int>();
+            }
+        }
+
+        public static bool CanEnterLinkedDungeonFrom(
+            int dungeonId,
+            int previousDungeonId)
+        {
+            if (previousDungeonId <= 0)
+                return false;
+
+            return GetLinkedDungeonPreviousIds(dungeonId)
+                .Contains(previousDungeonId);
+        }
+
+        public static bool SupportsLinkedDungeonContinue(int dungeonId)
         {
             try
             {
                 var dungeonFile = GetDungeonFile(dungeonId);
-                return dungeonFile?.SpecialDungeon == true
-                    && ParseLinkedDungeonNextEntries(
-                        dungeonFile.LinkedDungeon).Count > 0;
+                if (dungeonFile == null
+                    || ParseLinkedDungeonNextEntries(
+                        dungeonFile.LinkedDungeon).Count == 0)
+                {
+                    return false;
+                }
+
+                return dungeonFile.SpecialDungeon
+                    || TryParseLinkedDungeonClearPassiveObject(
+                        dungeonFile.LinkedDungeon,
+                        out _);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool TryGetLinkedDungeonClearPassiveObject(
+            int dungeonId,
+            out LinkedDungeonClearPassiveObject passiveObject)
+        {
+            passiveObject = null;
+            try
+            {
+                return TryParseLinkedDungeonClearPassiveObject(
+                    GetDungeonFile(dungeonId)?.LinkedDungeon,
+                    out passiveObject);
             }
             catch
             {
@@ -388,7 +451,18 @@ namespace DfoServer.GameWorld
             if (entries.Count == 0)
                 return null;
 
-            var totalRate = 0;
+            var noSelectionRate = 0;
+            try
+            {
+                noSelectionRate = ParseLinkedDungeonNoSelectionRate(
+                    GetDungeonFile(dungeonId)?.LinkedDungeon);
+            }
+            catch
+            {
+                noSelectionRate = 0;
+            }
+
+            var totalRate = noSelectionRate > 0 ? noSelectionRate : 0;
             foreach (var entry in entries)
             {
                 if (entry.Rate > 0
@@ -402,6 +476,17 @@ namespace DfoServer.GameWorld
                 return entries[0];
 
             var roll = Infrastructure.ServerRandom.Next(totalRate);
+            return SelectLinkedDungeonByRoll(entries, noSelectionRate, roll);
+        }
+
+        internal static LinkedDungeonEntry SelectLinkedDungeonByRoll(
+            IReadOnlyList<LinkedDungeonEntry> entries,
+            int noSelectionRate,
+            int roll)
+        {
+            if (entries == null || entries.Count == 0 || roll < 0)
+                return null;
+
             foreach (var entry in entries)
             {
                 if (entry.Rate <= 0)
@@ -411,7 +496,9 @@ namespace DfoServer.GameWorld
                 roll -= entry.Rate;
             }
 
-            return entries[0];
+            return noSelectionRate > 0 && roll < noSelectionRate
+                ? null
+                : entries[0];
         }
 
         internal static List<LinkedDungeonEntry> ParseLinkedDungeonNextEntries(
@@ -464,6 +551,104 @@ namespace DfoServer.GameWorld
             return result;
         }
 
+        internal static List<int> ParseLinkedDungeonPreviousIds(
+            string linkedDungeon)
+        {
+            var result = new List<int>();
+            if (string.IsNullOrWhiteSpace(linkedDungeon))
+                return result;
+
+            var seen = new HashSet<int>();
+            var matches = Regex.Matches(
+                linkedDungeon,
+                @"\[prev\](?<body>.*?)(?=\[/prev\]|\[[^\]\r\n]+\]|$)",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            foreach (Match match in matches)
+            {
+                var numbers = Regex.Matches(
+                    match.Groups["body"].Value,
+                    @"[+-]?\d+");
+                foreach (Match number in numbers)
+                {
+                    if (!int.TryParse(number.Value, out var previousDungeonId)
+                        || previousDungeonId <= 0
+                        || !seen.Add(previousDungeonId))
+                    {
+                        continue;
+                    }
+
+                    result.Add(previousDungeonId);
+                }
+            }
+
+            return result;
+        }
+
+        internal static int ParseLinkedDungeonNoSelectionRate(
+            string linkedDungeon)
+        {
+            if (string.IsNullOrWhiteSpace(linkedDungeon))
+                return 0;
+
+            var total = 0;
+            var matches = Regex.Matches(
+                linkedDungeon,
+                @"\[next\](?<body>.*?)(?:\[/next\]|$)",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            foreach (Match match in matches)
+            {
+                var numbers = Regex.Matches(
+                    match.Groups["body"].Value,
+                    @"[+-]?\d+");
+                for (var i = 0; i + 2 < numbers.Count; i += 3)
+                {
+                    if (!int.TryParse(numbers[i].Value, out var dungeonId)
+                        || !int.TryParse(numbers[i + 1].Value, out var rate)
+                        || dungeonId >= 0
+                        || rate <= 0)
+                    {
+                        continue;
+                    }
+
+                    if (total <= int.MaxValue - rate)
+                        total += rate;
+                }
+            }
+
+            return total;
+        }
+
+        internal static bool TryParseLinkedDungeonClearPassiveObject(
+            string linkedDungeon,
+            out LinkedDungeonClearPassiveObject passiveObject)
+        {
+            passiveObject = null;
+            if (string.IsNullOrWhiteSpace(linkedDungeon))
+                return false;
+
+            var match = Regex.Match(
+                linkedDungeon,
+                @"\[on\s+clear\s+add\s+passive\s+object\]\s*" +
+                @"(?<code>[+-]?\d+)\s+(?<x>[+-]?\d+)\s+(?<y>[+-]?\d+)",
+                RegexOptions.IgnoreCase);
+            if (!match.Success
+                || !int.TryParse(match.Groups["code"].Value, out var objectCode)
+                || !int.TryParse(match.Groups["x"].Value, out var x)
+                || !int.TryParse(match.Groups["y"].Value, out var y)
+                || objectCode <= 0)
+            {
+                return false;
+            }
+
+            passiveObject = new LinkedDungeonClearPassiveObject
+            {
+                ObjectCode = objectCode,
+                X = x,
+                Y = y,
+            };
+            return true;
+        }
+
         private static readonly Lazy<Dictionary<int, bool>> _monsterHellFlags =
             new Lazy<Dictionary<int, bool>>(() => LoadHellMonsterFlags("monster/monster.lst", "monster"));
         private static readonly Lazy<Dictionary<int, bool>> _aiCharacterHellFlags =
@@ -500,13 +685,23 @@ namespace DfoServer.GameWorld
             return namedSet.Contains(monsterCode);
         }
 
+        public static int[] RandomizeStartPosition(int[] startMap)
+        {
+            return RandomizeMapPosition(startMap);
+        }
+
         public static int[] RandomizeBossPosition(int[] bossMap)
         {
-            if (bossMap == null || bossMap.Length < 2) return null;
-            int pairCount = bossMap.Length / 2;
-            if (pairCount <= 1) return new[] { bossMap[0], bossMap[1] };
+            return RandomizeMapPosition(bossMap);
+        }
+
+        private static int[] RandomizeMapPosition(int[] positions)
+        {
+            if (positions == null || positions.Length < 2) return null;
+            int pairCount = positions.Length / 2;
+            if (pairCount <= 1) return new[] { positions[0], positions[1] };
             int pick = Infrastructure.ServerRandom.Next(pairCount);
-            return new[] { bossMap[pick * 2], bossMap[pick * 2 + 1] };
+            return new[] { positions[pick * 2], positions[pick * 2 + 1] };
         }
 
         // df_game_r CBattle_Field::GetAppropriateMaze — two-pass quest connection matching.
@@ -517,7 +712,8 @@ namespace DfoServer.GameWorld
             int dungeonId,
             int difficulty = 0,
             ICollection<int> activeQuestIds = null,
-            ICollection<int> clearedQuestIds = null)
+            ICollection<int> clearedQuestIds = null,
+            Action<string> diagnosticSink = null)
         {
             var dgnlst = LoadLstFile(Path.Combine("dungeon", "dungeon.lst"));
             if (dgnlst == null)
@@ -531,16 +727,26 @@ namespace DfoServer.GameWorld
             var doingMatch = FindQuestConnectedMazeIndex(dngFile.Mazes, activeQuestIds, 0, difficulty);
             if (doingMatch >= 0)
             {
-                var qc = dngFile.Mazes[doingMatch].QuestConnection;
-                FileLogger.Log($"[Dungeon] SelectMaze: dungeon={dungeonId} matched quest maze #{doingMatch} (questId={qc[1]} type=doing)");
+                diagnosticSink?.Invoke(BuildMazeSelectionDiagnostic(
+                    dngFile.Mazes,
+                    activeQuestIds,
+                    clearedQuestIds,
+                    difficulty,
+                    doingMatch,
+                    "active_quest"));
                 return (dngFile.Mazes[doingMatch], doingMatch);
             }
 
             var clearedMatch = FindQuestConnectedMazeIndex(dngFile.Mazes, clearedQuestIds, 1, difficulty);
             if (clearedMatch >= 0)
             {
-                var qc = dngFile.Mazes[clearedMatch].QuestConnection;
-                FileLogger.Log($"[Dungeon] SelectMaze: dungeon={dungeonId} matched quest maze #{clearedMatch} (questId={qc[1]} type=cleared)");
+                diagnosticSink?.Invoke(BuildMazeSelectionDiagnostic(
+                    dngFile.Mazes,
+                    activeQuestIds,
+                    clearedQuestIds,
+                    difficulty,
+                    clearedMatch,
+                    "cleared_quest"));
                 return (dngFile.Mazes[clearedMatch], clearedMatch);
             }
 
@@ -552,10 +758,57 @@ namespace DfoServer.GameWorld
             }
 
             if (candidates.Count == 0)
+            {
+                diagnosticSink?.Invoke(BuildMazeSelectionDiagnostic(
+                    dngFile.Mazes,
+                    activeQuestIds,
+                    clearedQuestIds,
+                    difficulty,
+                    0,
+                    "no_ordinary_maze_fallback"));
                 return (dngFile.Mazes[0], 0);
+            }
 
             var pick = candidates[Infrastructure.ServerRandom.Next(candidates.Count)];
+            diagnosticSink?.Invoke(BuildMazeSelectionDiagnostic(
+                dngFile.Mazes,
+                activeQuestIds,
+                clearedQuestIds,
+                difficulty,
+                pick.index,
+                "ordinary_maze"));
             return (pick.maze, pick.index);
+        }
+
+        public static bool IsQuestConnectedSelection(
+            int dungeonId,
+            MazeInfo maze,
+            ICollection<int> activeQuestIds,
+            int difficulty)
+        {
+            if (maze?.QuestConnection != null
+                && maze.QuestConnection.Length >= 2)
+            {
+                return true;
+            }
+
+            try
+            {
+                var connection = GetDungeonFile(dungeonId)?.QuestConnection;
+                return connection != null
+                    && connection.Length >= 2
+                    && connection[0] == 0
+                    && connection[1] > 0
+                    && activeQuestIds != null
+                    && activeQuestIds.Contains(connection[1])
+                    && (connection.Length < 3
+                        || connection[2] < 0
+                        || difficulty >= connection[2]);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public static MazeInfo GetDungeonMaze(int dungeonId, int mazeIndex)
@@ -610,6 +863,74 @@ namespace DfoServer.GameWorld
             return candidates[Infrastructure.ServerRandom.Next(candidates.Count)];
         }
 
+        private static string BuildMazeSelectionDiagnostic(
+            IReadOnlyList<MazeInfo> mazes,
+            ICollection<int> activeQuestIds,
+            ICollection<int> clearedQuestIds,
+            int difficulty,
+            int selectedMazeIndex,
+            string reason)
+        {
+            var connections = new List<string>();
+            for (var i = 0; i < mazes.Count; i++)
+            {
+                var qc = mazes[i].QuestConnection;
+                if (qc == null)
+                    continue;
+                if (qc.Length < 2)
+                {
+                    connections.Add($"m{i}:invalid");
+                    continue;
+                }
+
+                var questType = qc[0];
+                var questId = qc[1];
+                var minimumDifficulty = qc.Length >= 3 ? qc[2] : -1;
+                var isActive = activeQuestIds != null && activeQuestIds.Contains(questId);
+                var isCleared = clearedQuestIds != null && clearedQuestIds.Contains(questId);
+                var stateMatches = questType == 0
+                    ? isActive
+                    : questType == 1 && isCleared;
+                var difficultyMatches = questType != 0
+                    || minimumDifficulty < 0
+                    || difficulty >= minimumDifficulty;
+                var result = questType != 0 && questType != 1
+                    ? "unsupported_type"
+                    : !stateMatches
+                        ? "quest_state_miss"
+                        : !difficultyMatches
+                            ? "difficulty_miss"
+                            : "eligible";
+
+                connections.Add(
+                    $"m{i}:type={questType},quest={questId},min={minimumDifficulty}," +
+                    $"active={(isActive ? 1 : 0)},cleared={(isCleared ? 1 : 0)},result={result}");
+            }
+
+            return
+                $"difficulty={difficulty} active={FormatQuestIds(activeQuestIds)} " +
+                $"clearedCount={clearedQuestIds?.Count ?? 0} " +
+                $"connections=[{string.Join(";", connections)}] " +
+                $"selectedMaze={selectedMazeIndex} reason={reason}";
+        }
+
+        private static string FormatQuestIds(ICollection<int> questIds)
+        {
+            if (questIds == null || questIds.Count == 0)
+                return "[]";
+
+            const int maxLoggedQuestIds = 64;
+            var sorted = new List<int>(questIds);
+            sorted.Sort();
+            var values = new List<string>();
+            var count = Math.Min(sorted.Count, maxLoggedQuestIds);
+            for (var i = 0; i < count; i++)
+                values.Add(sorted[i].ToString());
+            if (sorted.Count > count)
+                values.Add($"...(+{sorted.Count - count})");
+            return $"[{string.Join(",", values)}]";
+        }
+
         public static int[] GetLayeredMapIds(int dungeonId, int x, int y, int mazeIndex)
         {
             var dngFile = GetDungeonFile(dungeonId);
@@ -641,25 +962,39 @@ namespace DfoServer.GameWorld
             try
             {
                 var dngFile = GetDungeonFile(dungeonId);
-                if (dngFile.Mazes == null || dngFile.Mazes.Count == 0
-                    || string.IsNullOrWhiteSpace(dngFile.WarpMapCondition))
+                if (dngFile.Mazes == null || dngFile.Mazes.Count == 0)
                     return false;
 
                 var maze = mazeIndex >= 0 && mazeIndex < dngFile.Mazes.Count
                     ? dngFile.Mazes[mazeIndex]
                     : dngFile.Mazes[0];
-                if (!TryParseWarpMapCondition(
-                    dngFile.WarpMapCondition,
-                    out sourceX,
-                    out sourceY,
-                    out destX,
-                    out destY))
+                if (!TryGetWarpMapConditionRules(
+                    dungeonId,
+                    mazeIndex,
+                    out var rules))
                 {
                     return false;
                 }
 
-                if (sourceX != targetX || sourceY != targetY)
+                var matchingRules = rules.FindAll(rule =>
+                    rule.SourceX == targetX && rule.SourceY == targetY);
+                if (matchingRules.Count != 1)
+                {
+                    if (matchingRules.Count > 1)
+                    {
+                        FileLogger.Log(
+                            $"[Dungeon] warp map condition has ambiguous source: " +
+                            $"dungeon={dungeonId} maze={mazeIndex} target=({targetX},{targetY}) " +
+                            $"destinations={matchingRules.Count}");
+                    }
                     return false;
+                }
+
+                var rule = matchingRules[0];
+                sourceX = rule.SourceX;
+                sourceY = rule.SourceY;
+                destX = rule.DestinationX;
+                destY = rule.DestinationY;
 
                 if (maze?.MapSpecifications == null)
                     return false;
@@ -681,41 +1016,34 @@ namespace DfoServer.GameWorld
             return false;
         }
 
-        private static bool TryParseWarpMapCondition(
-            string raw,
-            out int sourceX,
-            out int sourceY,
-            out int destX,
-            out int destY)
+        internal static bool TryGetWarpMapConditionRules(
+            int dungeonId,
+            int mazeIndex,
+            out List<WarpMapConditionEntry> rules)
         {
-            sourceX = sourceY = destX = destY = -1;
-            if (string.IsNullOrWhiteSpace(raw))
-                return false;
+            rules = new List<WarpMapConditionEntry>();
 
-            if (TryReadTaggedPoint(raw, "source grid pos", out sourceX, out sourceY)
-                && TryReadTaggedPoint(raw, "dest grid pos", out destX, out destY))
+            try
             {
+                var dngFile = GetDungeonFile(dungeonId);
+                if (dngFile.Mazes == null || dngFile.Mazes.Count == 0
+                    || dngFile.WarpMapConditions == null
+                    || dngFile.WarpMapConditions.Count == 0)
+                {
+                    return false;
+                }
+
+                rules.AddRange(dngFile.WarpMapConditions);
                 return true;
             }
-
-            var matches = Regex.Matches(raw, @"-?\d+");
-            if (matches.Count < 4)
+            catch (Exception ex)
+            {
+                rules.Clear();
+                FileLogger.Log(
+                    $"[Dungeon] warp map condition load failed: " +
+                    $"dungeon={dungeonId} maze={mazeIndex} error={ex.Message}");
                 return false;
-
-            return int.TryParse(matches[0].Value, out sourceX)
-                && int.TryParse(matches[1].Value, out sourceY)
-                && int.TryParse(matches[2].Value, out destX)
-                && int.TryParse(matches[3].Value, out destY);
-        }
-
-        private static bool TryReadTaggedPoint(string raw, string tag, out int x, out int y)
-        {
-            x = y = -1;
-            var pattern = @"\[" + Regex.Escape(tag) + @"\]\s*(?<x>-?\d+)\s+(?<y>-?\d+)";
-            var match = Regex.Match(raw, pattern, RegexOptions.IgnoreCase);
-            return match.Success
-                && int.TryParse(match.Groups["x"].Value, out x)
-                && int.TryParse(match.Groups["y"].Value, out y);
+            }
         }
 
         public static List<MonsterSumInfo> GetMapMonsterConditionSummaryInformation(
@@ -1369,6 +1697,8 @@ namespace DfoServer.GameWorld
                 return new MazeSumInfo
                 {
                     Monsters = ParseMapActors(mapFile, dungeonBasicLv, overrideMapId, dungeonId, x, y),
+                    EventMonsterPositions = mapFile.EventMonsterPositions,
+                    SpecialPassiveObjects = mapFile.SpecialPassiveObjects,
                     X = x,
                     Y = y,
                     Index = overrideMapId,
@@ -1390,6 +1720,8 @@ namespace DfoServer.GameWorld
             return new MazeSumInfo
             {
                 Monsters = ParseMapActors(resolvedMapFile, dungeonBasicLv, mapId, dungeonId, x, y),
+                EventMonsterPositions = resolvedMapFile.EventMonsterPositions,
+                SpecialPassiveObjects = resolvedMapFile.SpecialPassiveObjects,
                 X = x,
                 Y = y,
                 Index = mapId,
@@ -1422,10 +1754,15 @@ namespace DfoServer.GameWorld
                     Type = monsterType,
                     Level = monsterLevel,
                     IsBlocking = true,
+                    X = item.X.GetValueOrDefault(),
+                    Y = item.Y.GetValueOrDefault(),
+                    Z = item.Z.GetValueOrDefault(),
                 });
             }
 
             AppendSpecialPassiveObjects(list, mapFile, dungeonBasicLv, mapId, dungeonId, x, y);
+
+            var hasScriptedBossWaves = HasScriptedBossWaveTemplates(mapFile);
 
             foreach (var apc in mapFile.AICharacters)
             {
@@ -1446,17 +1783,52 @@ namespace DfoServer.GameWorld
                     Type = apcType,
                     Level = apcLevel,
                     Faction = apc.Faction,
-                    IsBlocking = IsBlockingAICharacter(apc),
+                    IsBlocking = IsBlockingAICharacter(apc, hasScriptedBossWaves),
                 });
             }
 
             return list;
         }
 
-        // IDA check_grid_clear (0x830A0E8): spawnType==100 && spawnFlag==0 blocks passage.
-        // APC 的 spawnType 不是 100, 不参与房间通关判定 — 无论敌我阵营。
-        private static bool IsBlockingAICharacter(AICharacterInfo apc)
+        // 普通 APC 沿用旧服 check_grid_clear 语义，不阻塞房间。脚本 Boss 房是例外：
+        // hidden 模板只负责客户端分波生成，最后的敌对 Boss APC 才是终局目标。
+        private static bool IsBlockingAICharacter(
+            AICharacterInfo apc,
+            bool hasScriptedBossWaves)
         {
+            return hasScriptedBossWaves
+                && apc != null
+                && apc.Faction == ApcFaction.Monster
+                && apc.AIType == ApcAIType.Boss;
+        }
+
+        private static bool HasScriptedBossWaveTemplates(MapFile mapFile)
+        {
+            if (mapFile == null
+                || !string.Equals(mapFile.Type, "[boss]", StringComparison.OrdinalIgnoreCase)
+                || mapFile.SpecialPassiveObjects == null)
+            {
+                return false;
+            }
+
+            foreach (var obj in mapFile.SpecialPassiveObjects)
+            {
+                if (obj?.Spawns == null)
+                    continue;
+
+                foreach (var spawn in obj.Spawns)
+                {
+                    if (spawn.Code > 0
+                        && string.Equals(
+                            spawn.Kind,
+                            "[monster]",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+
             return false;
         }
 

@@ -28,7 +28,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal Game.ReviveCoin.ReviveCoinService ReviveCoin { get; }
         internal Game.DeathTower.DeathTowerHandler DeathTower { get; }
         internal Game.Quests.QuestDropService QuestDrops { get; }
-        internal AntonNormalConquestNotifier AntonNormal { get; }
+        internal DungeonPersistentMechanismCoordinator PersistentMechanisms { get; }
 
         // 副本域用到的仓储集中在这里构造一次, 各方法不再就地 new。
         internal SqliteCharacterRepository CharacterRepository { get; }
@@ -74,7 +74,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 ConnectionString);
             Subtype1Repository = new SqliteSubtype1Repository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             CharacterStateRepository = new SqliteCharacterStateRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
-            AntonNormal = new AntonNormalConquestNotifier(
+            PersistentMechanisms = new DungeonPersistentMechanismCoordinator(
                 CharacterStateRepository);
             ProgressRepository = new SqliteCharacterProgressRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             Subtype0FieldsRepository = new SqliteSubtype0FieldsRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);

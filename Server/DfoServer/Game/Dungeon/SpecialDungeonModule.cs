@@ -12,8 +12,6 @@ namespace DfoServer.Game.Dungeon
         None,
         SeaChase,
         TimeCrack,
-        StationEscape,
-        MeltdownHelpus,
         SeizeMoney,
         SealForest,
         GentInfiltrate,
@@ -179,7 +177,11 @@ namespace DfoServer.Game.Dungeon
             return true;
         }
 
-        internal bool TryReserveSeizeMoneyClearReward(int remainingGoldUnits, out int count, out int gauge)
+        internal bool TryReserveSeizeMoneyClearReward(
+            int remainingGoldUnits,
+            int maxDropCount,
+            out int count,
+            out int gauge)
         {
             count = 0;
             gauge = SeizeMoneyGauge;
@@ -198,7 +200,7 @@ namespace DfoServer.Game.Dungeon
             gauge = Math.Min(cfg.GaugeMax, remainingGoldUnits * unitValue);
             SeizeMoneyGauge = gauge;
 
-            var maxDropCount = Math.Max(0, cfg.ClearGoldIngotMaxCount);
+            maxDropCount = Math.Max(0, maxDropCount);
             count = (int)Math.Floor((remainingGoldUnits * maxDropCount / (double)maxUnits) + 0.5d);
             if (count > maxDropCount)
                 count = maxDropCount;
@@ -490,7 +492,6 @@ namespace DfoServer.Game.Dungeon
             config.NoticeTextOnHit = ReadBacktickText(node, text, "notice text on hit");
             config.NoticeTextOnHitTermMs = ReadInt(node, text, "notice text on hit time term", 10000);
             config.CreateGoldBallNumOnHitStatue = ReadInt(node, text, "create gold ball num on hit statue", 3);
-            config.ClearGoldIngotMaxCount = ReadInt(node, text, "clear gold ingot max count", 4);
         }
 
         private static void ParseSealForest(ScriptNode node, string text, SealForestConfig config)
@@ -598,10 +599,6 @@ namespace DfoServer.Game.Dungeon
                 return SpecialDungeonKind.SeaChase;
             if (path.IndexOf("TimeBreak", StringComparison.OrdinalIgnoreCase) >= 0)
                 return SpecialDungeonKind.TimeCrack;
-            if (path.IndexOf("StationEscape", StringComparison.OrdinalIgnoreCase) >= 0)
-                return SpecialDungeonKind.StationEscape;
-            if (path.IndexOf("MeltdownHelpus", StringComparison.OrdinalIgnoreCase) >= 0)
-                return SpecialDungeonKind.MeltdownHelpus;
             if (path.IndexOf("Seizemoney", StringComparison.OrdinalIgnoreCase) >= 0)
                 return SpecialDungeonKind.SeizeMoney;
             if (path.IndexOf("SealForest", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -666,7 +663,6 @@ namespace DfoServer.Game.Dungeon
         internal string NoticeTextOnHit { get; set; }
         internal int NoticeTextOnHitTermMs { get; set; }
         internal int CreateGoldBallNumOnHitStatue { get; set; }
-        internal int ClearGoldIngotMaxCount { get; set; } = 4;
     }
 
     internal sealed class SeaChaseConfig

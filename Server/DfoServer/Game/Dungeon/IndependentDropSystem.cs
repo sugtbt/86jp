@@ -106,6 +106,60 @@ namespace DfoServer.Game.Dungeon
             return result;
         }
 
+        // Some dungeon mechanisms scale a PVF fixed drop instead of rolling it at
+        // monster-death time. Resolve only an unambiguous, guaranteed fixed entry;
+        // list pools or multiple different candidates fail closed.
+        internal static bool TryResolveSingleGuaranteedFixedDrop(
+            int monsterCode,
+            int difficulty,
+            int dungeonLevel,
+            out int itemId,
+            out int count)
+        {
+            itemId = 0;
+            count = 0;
+            EnsureLoaded();
+            if (_monsterDrops == null
+                || !_monsterDrops.TryGetValue(monsterCode, out var entries))
+            {
+                return false;
+            }
+
+            var difficultyIndex = Math.Max(0, Math.Min(difficulty, 4));
+            foreach (var entry in entries)
+            {
+                if (entry.ItemId <= 0
+                    || entry.TotalWeight > 0
+                    || entry.List != null
+                    || entry.Probs[difficultyIndex] < 1000000
+                    || entry.Counts[difficultyIndex] <= 0
+                    || (entry.LevelMin > 0
+                        && entry.LevelMax > 0
+                        && (dungeonLevel < entry.LevelMin
+                            || dungeonLevel > entry.LevelMax))
+                    || (entry.Difficulty >= 0
+                        && entry.Difficulty != difficulty))
+                {
+                    continue;
+                }
+
+                var candidateItemId = entry.ItemId;
+                var candidateCount = entry.Counts[difficultyIndex];
+                if (itemId != 0
+                    && (itemId != candidateItemId || count != candidateCount))
+                {
+                    itemId = 0;
+                    count = 0;
+                    return false;
+                }
+
+                itemId = candidateItemId;
+                count = candidateCount;
+            }
+
+            return itemId > 0 && count > 0;
+        }
+
         private static void AddDrop(List<DropInfo> drops, int itemId, ref ushort slotCounter)
         {
             slotCounter++;

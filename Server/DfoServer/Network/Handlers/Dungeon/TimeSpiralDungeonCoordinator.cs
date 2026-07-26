@@ -10,8 +10,6 @@ namespace DfoServer.Network.Handlers.Dungeon
 {
     internal static class TimeSpiralDungeonCoordinator
     {
-        private const ushort CompleteConditionPassGateNoti = 0x0138;
-
         internal sealed class TeleportMoveContext
         {
             internal int TrapMapId;
@@ -350,19 +348,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             string source,
             string objectPath)
         {
-            var body =
-                SpecialDungeonNotificationBuilder
-                    .BuildCompleteConditionPassGateTrigger();
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CompleteConditionPassGateNoti,
-                body));
+            await DungeonMechanismNotificationSender
+                .SendCompleteConditionPassGateAsync(
+                    session,
+                    "time-spiral-trap",
+                    source);
             FileLogger.Log(
-                $"[TimeSpiral] 0x0138 sent: " +
+                $"[TimeSpiral] trap condition advanced: " +
                 $"cid={session.Player.CharacterId} " +
                 $"dungeon={session.Player.CurrentRun?.DungeonId ?? 0} " +
                 $"map={mapId} object={objectCode} source={source} " +
-                $"path={objectPath} body={BitConverter.ToString(body)}");
+                $"path={objectPath}");
         }
 
         private static int ResolveCurrentMapId(DungeonRun run)

@@ -122,22 +122,32 @@ namespace DfoServer.Network.Handlers
             => _services.DeathTower.TryHandleMoveItem(session, header, body);
 
         public Task Handle_SPECIAL_SUMMON_MONSTER(EnhancedClientSession session, GamePacketHeader header, byte[] body)
-            => Dungeon.SpecialDungeonNotifier.HandleBossSummonRequestAsync(session, header, body);
+            => Dungeon.DungeonMechanismCoordinator.HandleSummonMonsterCommandAsync(session, header, body);
 
         public Task Handle_SPECIAL_TIMER_MODIFY_INFO(EnhancedClientSession session, GamePacketHeader header, byte[] body)
-            => Dungeon.SpecialDungeonNotifier.HandleGentInfiltrateTimerModifyInfoAsync(session, header, body);
+            => Dungeon.DungeonMechanismCoordinator.HandleTimerModifyInfoCommandAsync(session, header, body);
 
         public Task Handle_SPECIAL_SEA_CHASE_RESULT(EnhancedClientSession session, GamePacketHeader header, byte[] body)
-            => Dungeon.SpecialDungeonNotifier.HandleSeaChaseMiniGameResultAsync(session, header, body);
+            => Dungeon.DungeonMechanismCoordinator.HandleSeaChaseResultCommandAsync(session, header, body);
 
         public Task Handle_SPECIAL_SEA_CHASE_OBSERVE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
-            => Dungeon.SpecialDungeonNotifier.ObserveSeaChasePacketAsync(session, header, body);
+            => Dungeon.DungeonMechanismCoordinator.ObserveSeaChaseCommandAsync(session, header, body);
+
+        public Task Handle_EVENT_NPC_DROP_ITEM(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+            => Dungeon.DungeonMechanismCoordinator.HandleNpcItemDropCommandAsync(
+                session,
+                header,
+                body,
+                _services.Drops);
 
         public Task Handle_BREAK_TRAP_RESULT(
             EnhancedClientSession session,
             GamePacketHeader header,
             byte[] body)
-            => Dungeon.TimeSpiralDungeonCoordinator.HandleBreakTrapResultAsync(
+            => Dungeon.DungeonMechanismCoordinator.HandleBreakTrapResultCommandAsync(
                 session,
                 header,
                 body);

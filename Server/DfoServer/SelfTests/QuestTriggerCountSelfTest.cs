@@ -2,6 +2,7 @@
 using System.IO;
 using System.Text;
 using DfoServer.Game.Characters;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Quests;
 using DfoServer.Infrastructure;
@@ -19,6 +20,7 @@ namespace DfoServer.SelfTests
         private const ushort SurvivorQuestId = 1836;
         private const ushort HelpVoiceQuestId = 2021;
         private const ushort SeekAndMeetQuestId = 2043;
+        private const ushort DragonObstacleQuestId = 20722;
 
         public static int Run()
         {
@@ -60,6 +62,17 @@ namespace DfoServer.SelfTests
                 GameWorld.QuestData.GetInitTrigger(AnnoyingAntQuestId) == 517,
                 ref failures);
 
+            var dragonTargets =
+                GameWorld.QuestData.GetHuntMonsterTargets(
+                    DragonObstacleQuestId);
+            Check("20722 parses dungeon, minimum difficulty and monster",
+                dragonTargets.Count == 1
+                    && dragonTargets[0].DungeonId == 3536
+                    && dragonTargets[0].MinimumDifficulty == 2
+                    && dragonTargets[0].MonsterCode == 100003
+                    && dragonTargets[0].RequiredCount == 3,
+                ref failures);
+
             Check("hunt-enemy is not treated as a seeking item quest",
                 GameWorld.QuestData.GetSeekingConsumeItems(SurvivorQuestId).Count == 0,
                 ref failures);
@@ -79,6 +92,76 @@ namespace DfoServer.SelfTests
             Check("accepting 1836 succeeds", IsSuccessAck(acceptSurvivor), ref failures);
             Check("accepting 1836 stores packed hunt-enemy counts",
                 TryReadAcceptTrigger(acceptSurvivor, out var acceptTrigger) && acceptTrigger == 513,
+                ref failures);
+
+            QuestService.SaveActiveQuests(
+                connStr,
+                CharacterId,
+                new System.Collections.Generic.List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = DragonObstacleQuestId,
+                        TriggerValue = 3,
+                    },
+                });
+            var belowDifficulty = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 3536,
+                difficulty: 1,
+                monsterCode: 100003);
+            Check("20722 ignores kills below required difficulty",
+                belowDifficulty.Count == 0
+                    && LoadTrigger(connStr, DragonObstacleQuestId) == 3,
+                ref failures);
+
+            var firstKill = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 3536,
+                difficulty: 2,
+                monsterCode: 100003);
+            Check("20722 matching kill decrements one trigger",
+                firstKill.Count == 1
+                    && firstKill[0].PreviousTriggerValue == 3
+                    && firstKill[0].TriggerValue == 2
+                    && LoadTrigger(connStr, DragonObstacleQuestId) == 2,
+                ref failures);
+
+            var wrongMonster = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 3536,
+                difficulty: 4,
+                monsterCode: 100004);
+            Check("20722 ignores another monster",
+                wrongMonster.Count == 0
+                    && LoadTrigger(connStr, DragonObstacleQuestId) == 2,
+                ref failures);
+
+            questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 3536,
+                difficulty: 4,
+                monsterCode: 100003);
+            var finalKill = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 3536,
+                difficulty: 4,
+                monsterCode: 100003);
+            Check("20722 completes after three qualified kills",
+                finalKill.Count == 1
+                    && finalKill[0].PreviousTriggerValue == 1
+                    && finalKill[0].TriggerValue == 0
+                    && LoadTrigger(connStr, DragonObstacleQuestId) == 0,
+                ref failures);
+
+            var run = new DungeonRun(3536, 2);
+            run.MarkServerDrivenHuntMonsterTrigger(DragonObstacleQuestId);
+            Check("server-driven hunt trigger consumes one client echo",
+                run.TryConsumeServerDrivenHuntMonsterTrigger(
+                    DragonObstacleQuestId)
+                    && !run.TryConsumeServerDrivenHuntMonsterTrigger(
+                        DragonObstacleQuestId),
                 ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
@@ -135,6 +218,13 @@ VALUES (@cid, @qid, 1);";
                     cmd.ExecuteNonQuery();
                 }
             }
+        }
+
+        private static uint LoadTrigger(string connStr, ushort questId)
+        {
+            var active = QuestService.LoadActiveQuests(connStr, CharacterId);
+            var quest = QuestService.FindByQuestId(active, questId);
+            return quest?.TriggerValue ?? uint.MaxValue;
         }
 
         private static void Check(string name, bool ok, ref int failures)

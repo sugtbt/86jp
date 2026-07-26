@@ -88,7 +88,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                         $"cid={session.Player.CharacterId} " +
                         $"error={towerProgressError?.Message}");
                 }
-                await _svc.AntonNormal.RestoreBeforeSelectAsync(session);
+                await _svc.PersistentMechanisms.RestoreBeforeSelectionAsync(session);
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x00,
                     0x001B,
@@ -105,7 +105,21 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
         }
 
-        internal async Task HandleSelectDungeon(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        internal Task HandleSelectDungeon(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+            => HandleSelectDungeonCore(
+                session,
+                header,
+                body,
+                linkedSourceDungeonId: 0);
+
+        private async Task HandleSelectDungeonCore(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body,
+            int linkedSourceDungeonId)
         {
             var req = Network.Parsers.Dungeon.SelectDungeonRequest.Parse(body);
             try
@@ -128,10 +142,22 @@ namespace DfoServer.Network.Handlers.Dungeon
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] TOWER_OF_DESPAIR_ENTRY ERROR: cid={session.Player.CharacterId} requested={req.DungeonId}: {ex.Message}");
             }
 
+            linkedSourceDungeonId =
+                await ResolveLinkedDungeonSelectionSourceAsync(
+                    session,
+                    header,
+                    req.DungeonId,
+                    req.Difficulty,
+                    linkedSourceDungeonId);
+            if (linkedSourceDungeonId < 0)
+            {
+                return;
+            }
+
             // 塔类副本分流: dungeonKind==1 走专属流程(NOTI 142+143, 非普通副本的 START_MAP)
             if (_svc.DeathTower.TryCreateSession(req.DungeonId, out var tower))
             {
-                await SpecialDungeonNotifier.ClearRunBuffsAsync(
+                await DungeonMechanismCoordinator.ClearRunEffectsAsync(
                     session,
                     "select_tower_replace_run");
                 DungeonRunLifecycle.BeginTowerRun(session, req.DungeonId, tower, req.Difficulty);
@@ -139,7 +165,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            await SpecialDungeonNotifier.ClearRunBuffsAsync(
+            await DungeonMechanismCoordinator.ClearRunEffectsAsync(
                 session,
                 "select_dungeon_replace_run");
             DungeonRunLifecycle.BeginRun(session, req.DungeonId, req.Difficulty);
@@ -169,30 +195,48 @@ namespace DfoServer.Network.Handlers.Dungeon
                     clearedQuestIds = new HashSet<int>(clearedFlags.Keys);
             }
             catch (Exception ex) { FileLogger.Log($"[DungeonHandler] SELECT_DUNGEON ERROR: quest load failed: {ex.Message}"); }
-            var selection = DungeonData.SelectDungeonMaze(req.DungeonId, req.Difficulty, activeQuestIds, clearedQuestIds);
+            string mazeSelectionDiagnostic = null;
+            var selection = DungeonData.SelectDungeonMaze(
+                req.DungeonId,
+                req.Difficulty,
+                activeQuestIds,
+                clearedQuestIds,
+                diagnostic => mazeSelectionDiagnostic = diagnostic);
             run.MazeIndex = selection.Index;
-            run.MazeQuestConnected = selection.Maze.QuestConnection != null
-                && selection.Maze.QuestConnection.Length >= 2;
-            run.MazeStartX = selection.Maze.StartMap != null && selection.Maze.StartMap.Length >= 2
-                ? selection.Maze.StartMap[0]
-                : -1;
-            run.MazeStartY = selection.Maze.StartMap != null && selection.Maze.StartMap.Length >= 2
-                ? selection.Maze.StartMap[1]
-                : -1;
-            run.MazeStartMapId = ResolveMazeStartMapId(selection.Maze);
+            run.MazeQuestConnected = DungeonData.IsQuestConnectedSelection(
+                req.DungeonId,
+                selection.Maze,
+                activeQuestIds,
+                req.Difficulty);
+            var startPos = DungeonData.RandomizeStartPosition(selection.Maze.StartMap);
+            run.MazeStartX = startPos != null ? startPos[0] : -1;
+            run.MazeStartY = startPos != null ? startPos[1] : -1;
+            run.MazeStartMapId = ResolveMazeStartMapId(
+                selection.Maze,
+                run.MazeStartX,
+                run.MazeStartY);
             var bossPos = DungeonData.RandomizeBossPosition(selection.Maze.BossMap);
             run.BossMapPos = bossPos;
+            var bossMapId = bossPos != null && bossPos.Length >= 2
+                ? ResolveMazeStartMapId(selection.Maze, bossPos[0], bossPos[1])
+                : 0;
+            FileLogger.Log(
+                $"[DungeonHandler] SELECT_DUNGEON route: " +
+                $"cid={session.Player.CharacterId} dungeon={req.DungeonId} " +
+                $"{mazeSelectionDiagnostic ?? $"difficulty={req.Difficulty} selectedMaze={selection.Index}"} " +
+                $"questConnected={run.MazeQuestConnected} " +
+                $"start=({run.MazeStartX},{run.MazeStartY}) startMap={run.MazeStartMapId} " +
+                $"boss=({(bossPos != null && bossPos.Length >= 2 ? bossPos[0] : -1)}," +
+                $"{(bossPos != null && bossPos.Length >= 2 ? bossPos[1] : -1)}) bossMap={bossMapId}");
             run.RidableObjects = DungeonMapHandler.InitRidableObjects(selection.Maze);
             run.ClearCondition = new ClearConditionState(selection.Maze.ClearConditions);
-            SpecialDungeonRunCoordinator.ConfigureSelection(
-                run,
+            DungeonMechanismCoordinator.ConfigureSelection(
+                session,
                 selection.Maze,
                 bossPos,
-                activeQuests);
-            ConfigureLinkedDungeonRunState(req.DungeonId, run);
-            DungeonRunLifecycle.StartSpecialDungeonTimer(
-                session,
+                activeQuests,
                 "select_dungeon");
+            ConfigureLinkedDungeonRunState(req.DungeonId, run);
             if (run.HellMode)
                 await PrepareManualHellPartyAsync(session, req, selection.Maze, selection.Index);
 
@@ -219,15 +263,30 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
+            var sourceDungeonId = session.Player.CurrentRun?.DungeonId ?? 0;
+            if (!DungeonData.CanEnterLinkedDungeonFrom(
+                    dungeonId,
+                    sourceDungeonId))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"LINKED_DUNGEON enter rejected: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"source={sourceDungeonId} target={dungeonId}");
+                return;
+            }
+
             FileLogger.Log(
                 $"[{DungeonSharedServices.ProtocolLogName}] " +
                 $"LINKED_DUNGEON enter next: " +
                 $"cid={session.Player.CharacterId} " +
-                $"dungeon={dungeonId} diff={difficulty}");
-            await HandleSelectDungeon(
+                $"source={sourceDungeonId} dungeon={dungeonId} " +
+                $"diff={difficulty}");
+            await HandleSelectDungeonCore(
                 session,
                 header,
-                BuildLinkedDungeonSelectBody(dungeonId, difficulty));
+                BuildLinkedDungeonSelectBody(dungeonId, difficulty),
+                sourceDungeonId);
         }
 
         internal static byte[] BuildLinkedDungeonSelectBody(
@@ -247,6 +306,154 @@ namespace DfoServer.Network.Handlers.Dungeon
             };
         }
 
+        internal static bool IsLinkedDungeonSelectionAllowed(
+            IReadOnlyCollection<int> previousDungeonIds,
+            int linkedSourceDungeonId)
+        {
+            if (previousDungeonIds == null || previousDungeonIds.Count == 0)
+                return linkedSourceDungeonId <= 0;
+            if (linkedSourceDungeonId <= 0)
+                return false;
+
+            foreach (var previousDungeonId in previousDungeonIds)
+            {
+                if (previousDungeonId == linkedSourceDungeonId)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static async Task<int> ResolveLinkedDungeonSelectionSourceAsync(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            int dungeonId,
+            byte difficulty,
+            int linkedSourceDungeonId)
+        {
+            var previousDungeonIds =
+                DungeonData.GetLinkedDungeonPreviousIds(dungeonId);
+
+            // A server-internal transition already carries its predecessor. Any
+            // notification authorization for the same transition is now stale.
+            if (linkedSourceDungeonId > 0)
+            {
+                LinkedDungeonEntryAuthorizationStore.Clear(session?.Player);
+                if (IsLinkedDungeonSelectionAllowed(
+                        previousDungeonIds,
+                        linkedSourceDungeonId))
+                {
+                    return linkedSourceDungeonId;
+                }
+
+                LogLinkedDungeonSelectionRejected(
+                    session,
+                    dungeonId,
+                    linkedSourceDungeonId,
+                    previousDungeonIds,
+                    "internal predecessor mismatch");
+                return -1;
+            }
+
+            if (previousDungeonIds.Count == 0)
+            {
+                // Choosing an ordinary dungeon abandons any pending linked offer.
+                // The ordinary selection itself remains valid.
+                LinkedDungeonEntryAuthorizationStore.TryConsume(
+                    session?.Player,
+                    dungeonId,
+                    difficulty,
+                    out _,
+                    out var discardReason);
+                if (!string.Equals(
+                        discardReason,
+                        "no authorization",
+                        StringComparison.Ordinal))
+                {
+                    FileLogger.Log(
+                        $"[{DungeonSharedServices.ProtocolLogName}] " +
+                        $"SELECT_DUNGEON discarded linked authorization: " +
+                        $"cid={session?.Player?.CharacterId ?? 0} " +
+                        $"target={dungeonId} diff={difficulty} " +
+                        $"reason={discardReason}");
+                }
+                return 0;
+            }
+
+            if (!LinkedDungeonEntryAuthorizationStore.TryConsume(
+                    session?.Player,
+                    dungeonId,
+                    difficulty,
+                    out linkedSourceDungeonId,
+                    out var authorizationReason))
+            {
+                LogLinkedDungeonSelectionRejected(
+                    session,
+                    dungeonId,
+                    linkedSourceDungeonId,
+                    previousDungeonIds,
+                    authorizationReason);
+                await SendLinkedDungeonSelectionErrorAsync(
+                    session,
+                    header);
+                return -1;
+            }
+
+            if (IsLinkedDungeonSelectionAllowed(
+                    previousDungeonIds,
+                    linkedSourceDungeonId))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON linked authorization consumed: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"source={linkedSourceDungeonId} target={dungeonId} " +
+                    $"diff={difficulty}");
+                return linkedSourceDungeonId;
+            }
+
+            LogLinkedDungeonSelectionRejected(
+                session,
+                dungeonId,
+                linkedSourceDungeonId,
+                previousDungeonIds,
+                "PVF predecessor mismatch");
+            await SendLinkedDungeonSelectionErrorAsync(
+                session,
+                header);
+            return -1;
+        }
+
+        private static void LogLinkedDungeonSelectionRejected(
+            EnhancedClientSession session,
+            int dungeonId,
+            int linkedSourceDungeonId,
+            IReadOnlyCollection<int> previousDungeonIds,
+            string reason)
+        {
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] " +
+                $"SELECT_DUNGEON linked destination rejected: " +
+                $"cid={session?.Player?.CharacterId ?? 0} " +
+                $"source={linkedSourceDungeonId} target={dungeonId} " +
+                $"prev={string.Join(",", previousDungeonIds)} " +
+                $"reason={reason}");
+        }
+
+        private static Task SendLinkedDungeonSelectionErrorAsync(
+            EnhancedClientSession session,
+            GamePacketHeader header)
+        {
+            if (session == null)
+                return Task.CompletedTask;
+
+            return session.SendPacketAsync(
+                GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    header.type,
+                    CommonPacketBodyBuilder.BuildCmdError(0x11)));
+        }
+
         // 给指定会话发送 SELECT_DUNGEON 出站序列；秘密商店 NPC 上下文只在通关后发送。
         // Hell 等参数从该会话自己的 CurrentRun 读(队员的 run 已拷贝队长 selection)。
         private async Task SendDungeonSelectPacketsTo(
@@ -257,7 +464,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             var run = s.Player.CurrentRun;
             var extraPairGroups =
-                SpecialDungeonRunCoordinator.ResolveMinimapIconGroups(
+                DungeonMechanismCoordinator.ResolveSelectionMinimapIconGroups(
                     run,
                     req.DungeonId,
                     mazeModeFlag);
@@ -275,10 +482,15 @@ namespace DfoServer.Network.Handlers.Dungeon
                 value2: run.HellMode ? (byte)0x0B : (byte)0,
                 flagA: extraPairGroups != null ? (byte)1 : (byte)0)));
 
-            await SpecialDungeonNotifier.SendBossEntranceMinimapIconInfoAsync(
+            await DungeonMechanismCoordinator.SendSelectionStateAsync(
                 s,
                 "after_dungeon_info");
-            await _mapHandler.SendStartMapAsync(s, 0xFF, 0xFF, overrideMapId: -1);
+            var hasSelectedStart = run.MazeStartX >= 0 && run.MazeStartY >= 0;
+            await _mapHandler.SendStartMapAsync(
+                s,
+                hasSelectedStart ? run.MazeStartX : 0xFF,
+                hasSelectedStart ? run.MazeStartY : 0xFF,
+                overrideMapId: -1);
 
             if (StrikerSupportTagCharacterPacketBuilder.TryBuildOwnerSupportBody(s.Player.CharacterId, out var strikerBody))
                 await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x019F, strikerBody));
@@ -327,7 +539,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     //   让其客户端进入"进副本"状态, 再重放 SELECT 才能真换图。
                     await HandleEnterSelectDungeon(bs, header, System.Array.Empty<byte>());
 
-                    await SpecialDungeonNotifier.ClearRunBuffsAsync(
+                    await DungeonMechanismCoordinator.ClearRunEffectsAsync(
                         bs,
                         "party_select_dungeon_replace_run");
                     DungeonRunLifecycle.BeginRun(bs, req.DungeonId, req.Difficulty);
@@ -353,11 +565,12 @@ namespace DfoServer.Network.Handlers.Dungeon
                     br.LinkedDungeonNextRate = lr.LinkedDungeonNextRate;
                     br.LinkedDungeonNextCondition =
                         lr.LinkedDungeonNextCondition;
-                    SpecialDungeonRunCoordinator.CloneSelectionState(lr, br);
-                    bs.Player.UserState = 0x01;
-                    DungeonRunLifecycle.StartSpecialDungeonTimer(
+                    DungeonMechanismCoordinator.CloneSelection(
                         bs,
+                        lr,
+                        br,
                         "party_select_dungeon");
+                    bs.Player.UserState = 0x01;
                     await SendDungeonSelectPacketsTo(bs, req, bossPos, mazeModeFlag);
                     FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] PARTY_DUNGEON_COOP: member cid={bs.Player.CharacterId} 驱动进副本 maze={br.MazeIndex}");
                 }
@@ -398,7 +611,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             run.LinkedDungeonNextRate = 0;
             run.LinkedDungeonNextCondition = 0;
 
-            if (!DungeonData.IsSpecialLinkedDungeon(dungeonId))
+            if (!DungeonData.SupportsLinkedDungeonContinue(dungeonId))
                 return;
 
             var next = DungeonData.PickLinkedDungeonNext(dungeonId);
@@ -424,16 +637,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             return body[13] == 0;
         }
 
-        private static int ResolveMazeStartMapId(PvfLib.MazeInfo maze)
+        private static int ResolveMazeStartMapId(
+            PvfLib.MazeInfo maze,
+            int startX,
+            int startY)
         {
             if (maze == null
-                || maze.StartMap == null
-                || maze.StartMap.Length < 2
+                || startX < 0
+                || startY < 0
                 || maze.MapSpecifications == null)
                 return 0;
 
-            var startX = maze.StartMap[0];
-            var startY = maze.StartMap[1];
             foreach (var spec in maze.MapSpecifications)
             {
                 if (spec.X != startX || spec.Y != startY || spec.Index <= 0)

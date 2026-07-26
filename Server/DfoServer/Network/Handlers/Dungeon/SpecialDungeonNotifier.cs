@@ -9,15 +9,6 @@ namespace DfoServer.Network.Handlers.Dungeon
 {
     internal static class SpecialDungeonNotifier
     {
-        private const ushort GaugeObjectBarDataNoti = 0x022D;
-        private const ushort CharacterAddBuffNoti = 0x01E8;
-        private const ushort CharacterRemoveBuffNoti = 0x01E9;
-        private const ushort CharacterBuffDungeonNoti = 0x01EA;
-        private const ushort MinimapIconInfoNoti = 0x022F;
-        private const ushort CompleteConditionPassGateNoti = 0x0138;
-        private const ushort SummonMonsterCommand = 0x0211;
-        private const ushort TimerModifyInfoCommand = 0x026B;
-
         private const byte SummonMonsterResult = 0x01;
         private const byte SummonMonsterMode = 0x03;
         private const byte StrongWarlordResult = 0x01;
@@ -103,20 +94,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     return;
             }
 
-            var removeBody =
-                SpecialDungeonNotificationBuilder.BuildCharacterRemoveBuff(buffIds);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CharacterRemoveBuffNoti,
-                removeBody));
-
-            var clearBody =
-                SpecialDungeonNotificationBuilder.BuildCharacterBuffDungeon(
-                    Array.Empty<int>());
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CharacterBuffDungeonNoti,
-                clearBody));
+            await DungeonBuffNotificationSender.ClearAsync(session, buffIds);
 
             FileLogger.Log(
                 $"[SpecialDungeonModule] buffs cleared reason={reason} " +
@@ -142,26 +120,21 @@ namespace DfoServer.Network.Handlers.Dungeon
             string reason)
         {
             var run = session?.Player?.CurrentRun;
-            var special = run?.SpecialDungeon;
             if (run == null
-                || special == null
-                || !SpecialDungeonRunCoordinator.IsBossEntranceSummonKind(
-                    special.Kind)
-                || run.MeltdownHelpusHostages == null
-                || run.MeltdownHelpusHostages.Count == 0)
+                || !run.HasBossEntranceConditionalSummon)
             {
                 return;
             }
 
             var entries = new List<(byte X, byte Y, int MonsterCode)>();
-            foreach (var assignment in run.MeltdownHelpusHostages)
+            foreach (var target in run.BossEntranceConditionTargets)
             {
-                if (assignment != null && assignment.MonsterCode > 0)
+                if (target != null && target.MonsterCode > 0)
                 {
                     entries.Add((
-                        assignment.X,
-                        assignment.Y,
-                        assignment.MonsterCode));
+                        target.X,
+                        target.Y,
+                        target.MonsterCode));
                 }
             }
 
@@ -172,12 +145,12 @@ namespace DfoServer.Network.Handlers.Dungeon
                 SpecialDungeonNotificationBuilder.BuildMinimapIconInfo(entries);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x00,
-                MinimapIconInfoNoti,
+                (ushort)NotiPacketType.MINIMAP_ICON_INFO,
                 body));
             FileLogger.Log(
                 $"[SpecialDungeonModule] condition minimap sent reason={reason} " +
                 $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                $"kind={special.Kind} entries={entries.Count}");
+                $"mechanism=boss-entrance-condition entries={entries.Count}");
         }
 
         internal static async Task ObserveMonsterKilledAsync(
@@ -185,14 +158,19 @@ namespace DfoServer.Network.Handlers.Dungeon
             int monsterCode,
             byte monsterType)
         {
-            var special = session?.Player?.CurrentRun?.SpecialDungeon;
-            if (special == null || monsterCode <= 0)
+            var run = session?.Player?.CurrentRun;
+            if (run == null || monsterCode <= 0)
                 return;
 
-            await TryApplySealForestBuffAsync(session, monsterCode);
-            await TryAdvanceTimeCrackAsync(session, monsterCode, monsterType);
+            if (run.SpecialDungeon != null)
+            {
+                await TryApplySealForestBuffAsync(session, monsterCode);
+                await TryAdvanceTimeCrackAsync(session, monsterCode, monsterType);
+            }
+
             await TryAdvanceBossEntranceConditionAsync(session, monsterCode);
-            await TryAdvanceGentInfiltrateAsync(session, monsterCode);
+            if (run.SpecialDungeon != null)
+                await TryAdvanceGentInfiltrateAsync(session, monsterCode);
         }
 
         internal static async Task HandleBossSummonRequestAsync(
@@ -201,12 +179,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             byte[] body)
         {
             var run = session?.Player?.CurrentRun;
-            var special = run?.SpecialDungeon;
             if (run == null
-                || special == null
-                || !SpecialDungeonRunCoordinator.IsBossEntranceSummonKind(
-                    special.Kind)
-                || !run.MeltdownHelpusBossConditionComplete)
+                || !run.HasBossEntranceConditionalSummon
+                || !run.BossEntranceConditionComplete)
             {
                 return;
             }
@@ -225,9 +200,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             lock (run.SyncRoot)
             {
-                if (run.MeltdownHelpusBossSpawned)
+                if (run.ConditionalBossSpawned)
                     return;
-                run.MeltdownHelpusBossSpawned = true;
+                run.ConditionalBossSpawned = true;
+                run.ConditionalBossCode = template.MonsterCode;
             }
 
             var level = template.Level > 0
@@ -245,13 +221,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                         level);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x01,
-                SummonMonsterCommand,
+                (ushort)CmdPacketType.SUMMON_MONSTER,
                 response));
 
             FileLogger.Log(
                 $"[SpecialDungeonModule] boss summon response sent: " +
                 $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                $"kind={special.Kind} map={template.MapId} " +
+                $"mechanism=boss-entrance-condition map={template.MapId} " +
                 $"monster={template.MonsterCode} local={template.LocalIndex} " +
                 $"level={level} state={request.StateId} " +
                 $"key={BossSummonRuntimeKey}");
@@ -341,13 +317,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             return Task.CompletedTask;
         }
 
-        internal static int ResolveBossSummonCode(int dungeonId)
-        {
-            var codes =
-                SpecialDungeonRunCoordinator.GetBossEntranceSummonCodes(dungeonId);
-            return codes.Count > 0 ? codes[0] : 0;
-        }
-
         internal static bool TryPickTimeCrackBuff(
             SpecialDungeonRuntime special,
             DnfLcg lcg,
@@ -421,7 +390,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (!special.TryMarkSealForestBuffMonster(monsterCode, out var entry))
                 return;
 
-            await SendBuffStateAsync(
+            await DungeonBuffNotificationSender.SendAddedAndActivateAsync(
                 session,
                 entry.BuffId,
                 special.SealForestBuffIds);
@@ -470,7 +439,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             special.NoteTimeCrackBuffApplied(buffId);
-            await SendBuffStateAsync(
+            await DungeonBuffNotificationSender.SendAddedAndActivateAsync(
                 session,
                 buffId,
                 special.TimeCrackBuffIds);
@@ -489,42 +458,38 @@ namespace DfoServer.Network.Handlers.Dungeon
             int monsterCode)
         {
             var run = session.Player.CurrentRun;
-            var special = run.SpecialDungeon;
-            if (!SpecialDungeonRunCoordinator.IsBossEntranceSummonKind(
-                    special.Kind)
-                || run.MeltdownHelpusHostages == null
-                || run.MeltdownHelpusHostages.Count == 0)
+            if (!run.HasBossEntranceConditionalSummon)
             {
                 return;
             }
 
             var matched = false;
-            var rescued = 0;
+            var completed = 0;
             var total = 0;
             lock (run.SyncRoot)
             {
-                foreach (var assignment in run.MeltdownHelpusHostages)
+                foreach (var target in run.BossEntranceConditionTargets)
                 {
-                    if (assignment == null)
+                    if (target == null)
                         continue;
 
                     total++;
                     if (!matched
-                        && !assignment.Rescued
-                        && assignment.MonsterCode == monsterCode
-                        && assignment.X == run.RoomKey.X
-                        && assignment.Y == run.RoomKey.Y)
+                        && !target.Completed
+                        && target.MonsterCode == monsterCode
+                        && target.X == run.RoomKey.X
+                        && target.Y == run.RoomKey.Y)
                     {
-                        assignment.Rescued = true;
+                        target.Completed = true;
                         matched = true;
                     }
 
-                    if (assignment.Rescued)
-                        rescued++;
+                    if (target.Completed)
+                        completed++;
                 }
 
-                if (matched && total > 0 && rescued >= total)
-                    run.MeltdownHelpusBossConditionComplete = true;
+                if (matched && total > 0 && completed >= total)
+                    run.BossEntranceConditionComplete = true;
             }
 
             if (!matched)
@@ -533,10 +498,10 @@ namespace DfoServer.Network.Handlers.Dungeon
             FileLogger.Log(
                 $"[SpecialDungeonModule] condition target killed: " +
                 $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                $"kind={special.Kind} monster={monsterCode} " +
-                $"progress={rescued}/{total}");
+                $"mechanism=boss-entrance-condition monster={monsterCode} " +
+                $"progress={completed}/{total}");
 
-            if (total > 0 && rescued >= total)
+            if (total > 0 && completed >= total)
                 await SendPassGateAsync(session, "boss_entrance_complete");
         }
 
@@ -566,19 +531,19 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (!completed)
                 return;
 
-            DungeonRunLifecycle.CancelSpecialDungeonTimer(session);
+            DungeonMechanismTimerCoordinator.Cancel(session);
             await SendPassGateAsync(session, "gent_four_towers");
             if (!special.GentInfiltrateStrongWarlord)
                 return;
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x01,
-                TimerModifyInfoCommand,
+                (ushort)CmdPacketType.TIMER_MODIFY_INFO,
                 new[] { StrongWarlordResult }));
             FileLogger.Log(
                 $"[SpecialDungeonModule] GENT_INFILTRATE strong warlord: " +
                 $"cid={session.Player.CharacterId} dungeon={special.DungeonId} " +
-                $"cmd=1 type=0x026B body=01");
+                $"cmd=1 type=0x{(ushort)CmdPacketType.TIMER_MODIFY_INFO:X4} body=01");
         }
 
         private static async Task SendSeaChaseBuffsAsync(
@@ -590,53 +555,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                 ? special.Config.SeaChase.SuccessBuffIds
                 : special.Config.SeaChase.FailBuffIds;
 
-            foreach (var buffId in buffIds)
-            {
-                var addBody =
-                    SpecialDungeonNotificationBuilder.BuildCharacterAddBuff(
-                        buffId,
-                        0,
-                        0,
-                        0);
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                    0x00,
-                    CharacterAddBuffNoti,
-                    addBody));
-            }
-
-            var activeBody =
-                SpecialDungeonNotificationBuilder.BuildCharacterBuffDungeon(
-                    buffIds);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CharacterBuffDungeonNoti,
-                activeBody));
+            await DungeonBuffNotificationSender.SendAddedAndActivateAsync(
+                session,
+                buffIds,
+                buffIds);
             special.NoteSeaChaseBuffsApplied(buffIds);
-        }
-
-        private static async Task SendBuffStateAsync(
-            EnhancedClientSession session,
-            int addedBuffId,
-            IReadOnlyList<int> activeBuffIds)
-        {
-            var addBody =
-                SpecialDungeonNotificationBuilder.BuildCharacterAddBuff(
-                    addedBuffId,
-                    0,
-                    0,
-                    0);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CharacterAddBuffNoti,
-                addBody));
-
-            var activeBody =
-                SpecialDungeonNotificationBuilder.BuildCharacterBuffDungeon(
-                    activeBuffIds);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CharacterBuffDungeonNoti,
-                activeBody));
         }
 
         private static async Task SendGaugeAsync(
@@ -648,7 +571,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 SpecialDungeonNotificationBuilder.BuildGaugeObjectBarData(value);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x00,
-                GaugeObjectBarDataNoti,
+                (ushort)NotiPacketType.GAUGE_OBJECT_BAR_DATA,
                 body));
             FileLogger.Log(
                 $"[SpecialDungeonModule] gauge sent reason={reason} " +
@@ -659,18 +582,11 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             string reason)
         {
-            var body =
-                SpecialDungeonNotificationBuilder
-                    .BuildCompleteConditionPassGateTrigger();
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CompleteConditionPassGateNoti,
-                body));
-            FileLogger.Log(
-                $"[SpecialDungeonModule] pass gate sent reason={reason} " +
-                $"cid={session.Player.CharacterId} " +
-                $"dungeon={session.Player.CurrentRun?.DungeonId ?? 0} " +
-                $"body={BitConverter.ToString(body)}");
+            await DungeonMechanismNotificationSender
+                .SendCompleteConditionPassGateAsync(
+                    session,
+                    "ordinary-special-dungeon",
+                    reason);
         }
 
         private static bool TryFindBossTemplate(
@@ -678,9 +594,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             out BossTemplate template)
         {
             template = default;
-            var codes =
-                SpecialDungeonRunCoordinator.GetBossEntranceSummonCodes(
-                    run.DungeonId);
+            var codes = run.BossEntranceConditionalSummonCodes;
             if (codes.Count == 0)
                 return false;
 

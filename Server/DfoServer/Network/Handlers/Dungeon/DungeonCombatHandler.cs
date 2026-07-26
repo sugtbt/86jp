@@ -52,6 +52,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (req.IsPassiveObject)
             {
                 FileLogger.Log($"[DungeonHandler] DIE_MONSTER: passive object code={req.LocalIndex}");
+                DungeonMechanismCoordinator.OnPassiveObjectDestroyed(
+                    session,
+                    req.LocalIndex);
                 if (run.ClearCondition != null && run.ClearCondition.Check(0, req.LocalIndex))
                     await _settlement.TryClearDungeon(session, $"destroy object {req.LocalIndex}");
                 if (!isDeathTowerRun)
@@ -206,13 +209,18 @@ namespace DfoServer.Network.Handlers.Dungeon
                 await BroadcastMonsterDieToPartyAsync(session, req.LocalIndex);
 
             // Quest item drop (IDA: CUser::CheckQuestMonster, after DIE_MONSTER NOTI)
-            if (isDeathTowerRun && killedMonsterType >= 5 && killedMonsterType <= 8)
+            if (IsAiCharacterActorType(killedMonsterType))
                 await _svc.QuestDrops.CheckAiCharacterDrop(session, killedMonsterCode);
             else if (!isDeathTowerRun)
                 await _svc.QuestDrops.CheckMonsterDrop(session, killedMonsterCode);
 
-            await SpecialDungeonNotifier.ObserveMonsterKilledAsync(
+            await DungeonHuntMonsterQuestSync.SyncAsync(
                 session,
+                killedMonsterCode);
+
+            var mechanismKill = await DungeonMechanismCoordinator.OnMonsterKilledAsync(
+                session,
+                req.LocalIndex,
                 killedMonsterCode,
                 killedMonsterType);
 
@@ -295,24 +303,12 @@ namespace DfoServer.Network.Handlers.Dungeon
                     await _settlement.TryClearDungeon(session, $"ClearCondition type={ccType} target={killedMonsterCode}", killedMonsterCode);
             }
 
-            if (TryGetCurrentRoomState(session, out var timeSpiralRoomState)
-                && TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
-                    run,
-                    timeSpiralRoomState,
-                    req.LocalIndex,
-                    killedMonsterCode))
+            if (mechanismKill.ShouldClearDungeon)
             {
-                FileLogger.Log(
-                    $"[TimeSpiral] hidden boss killed: " +
-                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                    $"room=({timeSpiralRoomState.Maze.X},{timeSpiralRoomState.Maze.Y}) " +
-                    $"map={timeSpiralRoomState.Maze.Index} seq={req.LocalIndex} " +
-                    $"code={killedMonsterCode} path={run.TimeSpiralHiddenBossSource}");
                 await _settlement.TryClearDungeon(
                     session,
-                    $"TimeSpiral hidden boss seq={run.TimeSpiralHiddenBossSeqId} " +
-                    $"code={run.TimeSpiralHiddenBossCode}",
-                    killedMonsterCode);
+                    mechanismKill.ClearReason,
+                    mechanismKill.BossCode);
             }
 
             // 诊断(组队通关排查): boss 类怪被杀却仍未 Cleared 时, 打印全量决策输入。
@@ -340,35 +336,16 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            run.SpecialDungeon?.NoteSeizeMoneyBossSeq(request.BossSequence);
-            FileLogger.Log(
-                $"[SpecialDungeonModule] BOSS_DIE_CHECK: " +
-                $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                $"kind={run.SpecialDungeon?.Kind.ToString() ?? "none"} " +
-                $"uid={request.UserId} bossSeq={request.BossSequence}");
-
-            var special = run.SpecialDungeon;
-            if (special == null
-                || !SpecialDungeonRunCoordinator.IsBossEntranceSummonKind(
-                    special.Kind)
-                || run.Phase != DungeonRunPhase.InProgress
-                || !run.MeltdownHelpusBossSpawned
-                || request.BossSequence !=
-                    SpecialDungeonNotifier.BossSummonRuntimeKey)
-            {
-                return;
-            }
-
-            var bossCode =
-                SpecialDungeonNotifier.ResolveBossSummonCode(run.DungeonId);
-            if (bossCode <= 0)
+            var mechanismClear = DungeonMechanismCoordinator.OnBossDieCheck(
+                session,
+                request);
+            if (!mechanismClear.ShouldClearDungeon)
                 return;
 
             await _settlement.TryClearDungeon(
                 session,
-                $"special boss die check kind={special.Kind} " +
-                $"uid={request.UserId} bossSeq={request.BossSequence}",
-                bossCode);
+                mechanismClear.ClearReason,
+                mechanismClear.BossCode);
         }
 
         // 组队副本联机: 把 MonsterDie(SC 0x0026, 只发视觉死亡, 不带drops)广播给同队【在副本里】的其他成员,
@@ -410,8 +387,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             bool doPrepareClear = false;
             bool doCondClear = false;
-            bool doTimeSpiralClear = false;
-            bool endPoint = false; bool ccType1 = false; int ccType = 0; int kCode = 0;
+            bool endPoint = false; bool ccType1 = false; int ccType = 0; int kCode = 0; byte kType = 0;
             lock (run.SyncRoot)
             {
                 // 同房判据: 本成员当前房与杀怪者当前房一致(此时 run.RoomKilledSeqIds 正指向该房集合)
@@ -424,7 +400,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 bool roomCleared = DungeonRoomTopology.ComputeRoomClearedLocked(run, out var blockingCount, out var killedBlockingCount);
 
                 var roomLocalIndex = seqId - run.RoomStartSequence;
-                byte kType = 0;
                 if (roomLocalIndex >= 0 && roomLocalIndex < monsters.Count)
                 {
                     kType = monsters[roomLocalIndex].Type;
@@ -432,13 +407,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
 
                 TryGetCurrentRoomState(bs, out var currentRoomState);
-                doTimeSpiralClear =
-                    TimeSpiralDungeonCoordinator.IsTrackedHiddenBossKill(
-                        run,
-                        currentRoomState,
-                        seqId,
-                        kCode);
-
                 if (roomCleared)
                 {
                     var roomState = currentRoomState;
@@ -464,17 +432,27 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             // ---- await 均在锁外 ----
+            await DungeonHuntMonsterQuestSync.SyncAsync(bs, kCode);
+
+            var mechanismKill = await DungeonMechanismCoordinator.OnMonsterKilledAsync(
+                bs,
+                seqId,
+                kCode,
+                kType);
             if (doPrepareClear)
                 await _settlement.TryClearDungeon(bs, $"party-relayed roomCleared endPoint={endPoint} ccType1={ccType1}", kCode);
             if (doCondClear)
                 await _settlement.TryClearDungeon(bs, $"party-relayed ClearCondition type={ccType} target={kCode}", kCode);
-            if (doTimeSpiralClear)
+            if (mechanismKill.ShouldClearDungeon)
                 await _settlement.TryClearDungeon(
                     bs,
-                    $"party-relayed TimeSpiral hidden boss " +
-                    $"seq={run.TimeSpiralHiddenBossSeqId} " +
-                    $"code={run.TimeSpiralHiddenBossCode}",
-                    kCode);
+                    $"party-relayed {mechanismKill.ClearReason}",
+                    mechanismKill.BossCode);
+        }
+
+        internal static bool IsAiCharacterActorType(byte actorType)
+        {
+            return actorType >= 5 && actorType <= 8;
         }
 
         // 组队击杀经验: exp=raw gainedExp(纯怪物量), 每个队友用【自己等级 vs monsterLevel】各自缩放
@@ -600,7 +578,12 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             var bodyHex = body != null ? BitConverter.ToString(body) : "null";
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DIE_CHARACTER: uid={session.Player.UserId} body={bodyHex}");
-            ScheduleDeathRespawn(session);
+            var scriptedDeath =
+                DungeonMechanismCoordinator.OnCharacterDied(session);
+            if (scriptedDeath.SuppressRespawn)
+                DungeonRunLifecycle.CancelDeathRespawn(session);
+            else
+                ScheduleDeathRespawn(session);
 
             // NOTI 32 (wire 0x0020) DIE_STATE: u16 actorId + u8 dieType(0=death) + u8 flag
             var w = new GamePacketWriter();
@@ -608,6 +591,14 @@ namespace DfoServer.Network.Handlers.Dungeon
             w.WriteByte(0x00);  // dieType=0 death confirmed
             w.WriteByte(0x00);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0020, w.ToArray()));
+
+            if (scriptedDeath.ClearRequest.ShouldClearDungeon)
+            {
+                await _settlement.TryClearDungeon(
+                    session,
+                    scriptedDeath.ClearRequest.ClearReason,
+                    scriptedDeath.ClearRequest.BossCode);
+            }
         }
 
         internal async Task HandleDeathRespawn(EnhancedClientSession session, GamePacketHeader header, byte[] body)
