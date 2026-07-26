@@ -50,6 +50,8 @@ namespace DfoServer.Game.Inventory
             int buyCount,
             int paymentMode,
             byte attributeValue,
+            int purchaseCouponId,
+            short purchaseCouponSlot,
             out InventoryMutationResult result,
             out bool handled)
         {
@@ -121,6 +123,19 @@ namespace DfoServer.Game.Inventory
             else if (paymentMode != 0)
             {
                 return false;
+            }
+
+            if (purchaseCouponId > 0)
+            {
+                if (paymentMode != 0
+                    || purchaseCouponSlot < 0
+                    || !inventory.TryGetItem(InventoryListType.Main, purchaseCouponSlot, out var couponItem)
+                    || couponItem == null
+                    || couponItem.ItemId != purchaseCouponId
+                    || couponItem.Count <= 0)
+                    return false;
+
+                couponId = purchaseCouponId;
             }
 
             if (!CanSpendInventoryCosts(inventory, totalGoldCost, couponId))
