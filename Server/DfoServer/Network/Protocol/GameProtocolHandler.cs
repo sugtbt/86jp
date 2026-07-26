@@ -1,9 +1,11 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Appearance;
+using DfoServer.Game.Auction;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Lottery;
+using DfoServer.Game.Mail;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -34,6 +36,8 @@ namespace DfoServer.Network
         private readonly LuckyStarHandler _luckyStarHandler;
         private readonly RentalHandler _rentalHandler;
         private readonly MailboxHandler _mailboxHandler;
+        private readonly AuctionModule _auctionModule;
+        private readonly AuctionHandler _auctionHandler;
         private readonly CollectionBoxHandler _collectionBoxHandler;
         private readonly ShopCoinEventHandler _shopCoinEventHandler;
         private readonly InventoryRefreshSender _inventoryRefreshSender;
@@ -145,6 +149,16 @@ namespace DfoServer.Network
             _luckyStarHandler = new LuckyStarHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             _rentalHandler = new RentalHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             _mailboxHandler = new MailboxHandler();
+            _auctionModule = AuctionModule.Create(
+                databasePath,
+                schemaFilePath,
+                new AssumedSystemMailService(),
+                ClockService.Instance);
+            _auctionHandler = new AuctionHandler(
+                _auctionModule.ListingService,
+                _auctionModule.QueryService,
+                _auctionModule.ReturnService,
+                _inventoryRefreshSender);
             _collectionBoxHandler = new CollectionBoxHandler(_inventoryRefreshSender);
             _shopCoinEventHandler = new ShopCoinEventHandler(reviveCoinService, _inventoryRefreshSender);
             _mercenaryHandler = new MercenaryHandler(characterRepository);
@@ -173,6 +187,7 @@ namespace DfoServer.Network
             RegisterSettingsHandlers(_cmdDispatch);
             RegisterQuestHandlers(_cmdDispatch);
             RegisterMailboxHandlers(_cmdDispatch);
+            RegisterAuctionHandlers(_cmdDispatch);
             RegisterCollectionBoxHandlers(_cmdDispatch);
             RegisterMercenaryHandlers(_cmdDispatch);
             RegisterPartyHandlers(_cmdDispatch);
@@ -495,6 +510,18 @@ namespace DfoServer.Network
         private void RegisterMailboxHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
             d[0x0060] = _mailboxHandler.HandleOpenMailbox;
+        }
+
+        private void RegisterAuctionHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
+        {
+            d[(ushort)CmdPacketType.AUCTION_ASK_AVERAGE_PRICE] =
+                _auctionHandler.HandleAskAveragePriceAsync;
+            d[(ushort)CmdPacketType.AUCTION_REGIST_ITEM] =
+                _auctionHandler.HandleRegisterItemAsync;
+            d[(ushort)CmdPacketType.AUCTION_REGIST_CANCEL] =
+                _auctionHandler.HandleCancelListingAsync;
+            d[(ushort)CmdPacketType.AUCTION_MY_REGISTED_ITEM_INFO] =
+                _auctionHandler.HandleMyRegisteredItemsAsync;
         }
 
         private void RegisterCollectionBoxHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
