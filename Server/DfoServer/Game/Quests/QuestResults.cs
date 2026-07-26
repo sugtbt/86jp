@@ -52,8 +52,10 @@ namespace DfoServer.Game.Quests
     {
         public byte ErrorCode;
         public ushort QuestId;
-        // Exp 为任务面板/ACK 的原始奖励，HonorExp 为其中转入账号荣誉的部分。
+        // Exp 为任务实际发放的总经验(包含成长之契约加成)，HonorExp 为其中转入账号荣誉的部分。
         public uint Exp;
+        // 任务总经验中来自成长之契约的部分，用于 0x0025 客户端分项文案。
+        public uint GrowthContractExp;
         public uint HonorExp;
         public ulong TotalHonorExp;
         public uint GrowthCapsuleExp;

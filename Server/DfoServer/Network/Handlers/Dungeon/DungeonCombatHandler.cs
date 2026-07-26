@@ -128,6 +128,15 @@ namespace DfoServer.Network.Handlers.Dungeon
                 try { dungeonMinimumLevel = DungeonData.GetDungeonMinimumRequiredLevel(run.DungeonId); } catch (Exception ex) { FileLogger.Log($"[DungeonHandler] DIE_MONSTER ERROR: minimum level fallback dungeon={run.DungeonId} default={dungeonMinimumLevel}: {ex.Message}"); }
                 int goldGained;
                 IReadOnlyList<DropInfo> generatedDrops;
+                var independentDropBonusPercent = 0;
+                var growthContractMemberCount = 0;
+                if (!isDeathTowerRun)
+                {
+                    independentDropBonusPercent =
+                        CalculateGrowthContractIndependentDropBonus(
+                            session,
+                            out growthContractMemberCount);
+                }
                 if (isDeathTowerRun)
                 {
                     generatedDrops = towerDrops ?? Array.Empty<DropInfo>();
@@ -137,6 +146,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 {
                     var abyssRequest = BuildAbyssPartyDropRequest(
                         dieRoomState, monster, dungeonMinimumLevel, dungeonBasisLevel);
+                    abyssRequest.IndependentDropBonusPercent =
+                        independentDropBonusPercent;
                     generatedDrops = _svc.Drops.GenerateAbyssPartyAndRegister(run, abyssRequest);
                     goldGained = 0;
                     FileLogger.Log($"[DungeonHandler] ABYSS_PARTY_DROP: code={monster.Code} type={monster.Type} group={monster.HellPartyGroupId} abyssDifficulty={monster.HellPartyDifficulty} isLastGroup={abyssRequest.IsLastGroupMonster} abyssMonster={monster.IsHellMonsterScript} rewardRolls={monster.HellRewardRollCount} drops={generatedDrops.Count}");
@@ -149,10 +160,20 @@ namespace DfoServer.Network.Handlers.Dungeon
                         DropRateLevel = dropRateLevel,
                         MonsterType = rewardMonsterType,
                         MonsterCode = monster.Code,
-                        DungeonBasisLevel = dungeonBasisLevel
+                        DungeonBasisLevel = dungeonBasisLevel,
+                        IndependentDropBonusPercent =
+                            independentDropBonusPercent
                     });
                     goldGained = dropResult.GoldAmount;
                     generatedDrops = dropResult.Drops;
+                }
+                if (independentDropBonusPercent > 0)
+                {
+                    FileLogger.Log(
+                        $"[DungeonHandler] GROWTH_CONTRACT_INDEPENDENT_DROP: " +
+                        $"holders={growthContractMemberCount} " +
+                        $"bonus={independentDropBonusPercent}% " +
+                        $"monster={monster.Code}");
                 }
 
                 var grant = _svc.CharacterExperience.Grant(
@@ -493,13 +514,23 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 if (m.UserId == killerUid) continue;
                 sessions.TryGet(m.CharacterId, out var bs);
-                if (bs?.Player?.CurrentRun == null || bs.TcpClient == null || !bs.TcpClient.Connected) continue;
+                var memberRun = bs?.Player?.CurrentRun;
+                if (memberRun == null || bs.TcpClient == null || !bs.TcpClient.Connected) continue;
                 try
                 {
                     // 队友按【自己等级】缩放同一份怪物经验(不是照搬击杀者的量)。
                     float memberRate = MonsterRewardTable.BaseExpPenalty(bs.Player.Level, monsterLevel);
-                    uint memberExp = (uint)(exp * memberRate);
-                    if (memberExp == 0) continue;
+                    uint memberBaseExp = (uint)(exp * memberRate);
+                    if (memberBaseExp == 0) continue;
+                    var memberPremiumEffects = Game.Premium.PremiumEffectProvider
+                        .GetCombinedEffects(
+                            _svc.ConnectionString,
+                            bs.Account?.AccountId ?? 0);
+                    var memberGrowthContractBonusExp =
+                        memberPremiumEffects.ComputeBonusExp(memberBaseExp);
+                    var memberExp = CharacterExperienceService.AddSaturating(
+                        memberBaseExp,
+                        memberGrowthContractBonusExp);
 
                     // 与击杀者本人同一条统一入口: 荣誉拆分/满级纠偏/成长胶囊联动全部一致。
                     var grant = _svc.CharacterExperience.Grant(
@@ -508,7 +539,25 @@ namespace DfoServer.Network.Handlers.Dungeon
                         memberExp,
                         ExperiencePersistMode.OnLevelUpOnly,
                         "party-kill");
-                    await _svc.SendExpGrantNotificationAsync(bs, grant, "PARTY_KILL_EXP");
+                    lock (memberRun.SyncRoot)
+                    {
+                        if (ReferenceEquals(bs.Player.CurrentRun, memberRun))
+                        {
+                            memberRun.MonsterGrowthContractBonusExp =
+                                CharacterExperienceService.AddSaturating(
+                                    memberRun.MonsterGrowthContractBonusExp,
+                                    memberGrowthContractBonusExp);
+                        }
+                    }
+                    await _svc.SendExpGrantNotificationAsync(
+                        bs,
+                        grant,
+                        "PARTY_KILL_EXP",
+                        memberGrowthContractBonusExp);
+                    FileLogger.Log(
+                        $"[DungeonHandler] PARTY_KILL_EXP: member={m.CharacterId} " +
+                        $"base={memberBaseExp} growthContract={memberGrowthContractBonusExp} " +
+                        $"awarded={memberExp}");
                     if (grant.LeveledUp)
                         await _svc.SendInDungeonLevelUpFollowups(bs);
                 }
@@ -758,14 +807,67 @@ namespace DfoServer.Network.Handlers.Dungeon
         private static string BuildDeathRespawnTimerName(EnhancedClientSession session)
             => "dungeon-death:" + session.SessionId.ToString("N") + ":respawn";
 
-        private static uint CalculateGrowthContractMonsterBonus(EnhancedClientSession session, uint baseMonsterExp)
+        private uint CalculateGrowthContractMonsterBonus(EnhancedClientSession session, uint baseMonsterExp)
         {
             if (baseMonsterExp == 0)
                 return 0;
 
             var accountId = session.Account?.AccountId ?? 0;
-            var connStr = SqliteDatabaseBootstrap.Initialize(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
-            return Game.Premium.PremiumEffectProvider.GetCombinedEffects(connStr, accountId).ComputeBonusExp(baseMonsterExp);
+            return Game.Premium.PremiumEffectProvider
+                .GetCombinedEffects(_svc.ConnectionString, accountId)
+                .ComputeBonusExp(baseMonsterExp);
+        }
+
+        private int CalculateGrowthContractIndependentDropBonus(
+            EnhancedClientSession owner,
+            out int contractMemberCount)
+        {
+            var holderCount = 0;
+            Game.Premium.PremiumEffects growthEffects = null;
+
+            void CountSession(EnhancedClientSession candidate)
+            {
+                if (candidate?.Player?.CurrentRun == null
+                    || candidate.Account == null
+                    || candidate.TcpClient == null
+                    || !candidate.TcpClient.Connected
+                    || candidate.Player.CurrentRun.DungeonId != owner.Player.CurrentRun.DungeonId)
+                    return;
+
+                var effects = Game.Premium.PremiumEffectProvider.GetCombinedEffects(
+                    _svc.ConnectionString,
+                    candidate.Account.AccountId);
+                if (effects.IndependentDropRatePercentByContractMemberCount == null
+                    || effects.IndependentDropRatePercentByContractMemberCount.Length == 0)
+                    return;
+
+                holderCount++;
+                growthEffects = effects;
+            }
+
+            var party = _svc.PartyManager?.GetPartyByUser(
+                (ushort)(owner?.Player?.CharacterId ?? 0));
+            if (party == null || _svc.Sessions == null)
+            {
+                CountSession(owner);
+            }
+            else
+            {
+                foreach (var member in party.MembersBySlot())
+                {
+                    if (member.CharacterId == owner.Player.CharacterId)
+                    {
+                        CountSession(owner);
+                        continue;
+                    }
+
+                    if (_svc.Sessions.TryGet(member.CharacterId, out var memberSession))
+                        CountSession(memberSession);
+                }
+            }
+
+            contractMemberCount = holderCount;
+            return growthEffects?.GetIndependentDropRatePercent(holderCount) ?? 0;
         }
 
         internal async Task HandleUseCoin(EnhancedClientSession session, GamePacketHeader header, byte[] body)

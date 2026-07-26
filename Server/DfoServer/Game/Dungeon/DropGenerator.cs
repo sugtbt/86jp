@@ -22,7 +22,8 @@ namespace DfoServer.Game.Dungeon
             int monsterLevel, int monsterType, int monsterCode,
             int difficulty, int dungeonLevel,
             ref ushort slotCounter,
-            IReadOnlyList<MonsterDropTable.DropPoolEntry> dropPool = null)
+            IReadOnlyList<MonsterDropTable.DropPoolEntry> dropPool = null,
+            int independentDropBonusPercent = 0)
         {
             var drops = new List<DropInfo>();
 
@@ -117,7 +118,8 @@ namespace DfoServer.Game.Dungeon
 
             
             var independentDrops = IndependentDropSystem.GenerateDrops(
-                monsterCode, difficulty, dungeonLevel, _lcg, ref slotCounter);
+                monsterCode, difficulty, dungeonLevel, _lcg, ref slotCounter,
+                independentDropBonusPercent);
             drops.AddRange(independentDrops);
 
             var worldDrops = WorldDropSystem.GenerateDrops(monsterLevel, _lcg, ref slotCounter);

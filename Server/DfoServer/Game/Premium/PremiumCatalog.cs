@@ -70,6 +70,24 @@ namespace DfoServer.Game.Premium
                     continue;
                 }
 
+                if (tokens[i] == "[quest item drop rate]" && int.TryParse(tokens[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var questItemDropRate))
+                {
+                    GetOrAddEffects(effectsByType, premiumType).QuestItemDropRatePercent = questItemDropRate;
+                    continue;
+                }
+
+                if (tokens[i] == "[independent drop rate]")
+                {
+                    var rates = new List<int>();
+                    for (var j = i + 1; j < tokens.Count && !tokens[j].StartsWith("[", StringComparison.Ordinal); j++)
+                    {
+                        if (int.TryParse(tokens[j], NumberStyles.Integer, CultureInfo.InvariantCulture, out var rate))
+                            rates.Add(rate);
+                    }
+                    GetOrAddEffects(effectsByType, premiumType).IndependentDropRatePercentByContractMemberCount = rates.ToArray();
+                    continue;
+                }
+
                 if (tokens[i] != "[item]" || i + 4 >= tokens.Count)
                     continue;
 
