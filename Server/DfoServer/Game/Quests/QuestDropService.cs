@@ -158,10 +158,7 @@ namespace DfoServer.Game.Quests
             }
             else
             {
-                // ACCEPTED_QUEST (0x023F) makes this client rebuild quest state and
-                // causes a visible hitch for every material drop. Persist progress
-                // here without that full-list notification; the slot refresh below
-                // still makes the granted material visible immediately.
+                // Avoid per-drop ACCEPTED_QUEST (0x023F); it causes a visible client hitch.
                 session.GameSession.QuestManager
                     .RecalibrateItemSeekingQuestProgressWithoutNotification(grantedItemIds);
             }

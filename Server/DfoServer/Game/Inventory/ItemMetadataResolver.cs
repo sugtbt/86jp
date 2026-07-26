@@ -147,8 +147,6 @@ namespace DfoServer.Game.Inventory
         internal static readonly Lazy<LstFile> EquipmentList = new Lazy<LstFile>(() => LstFile.Parse(PvfArchiveAccessor.ReadText("equipment/equipment.lst")));
         private static readonly Lazy<LstFile> StackableList = new Lazy<LstFile>(() => LstFile.Parse(PvfArchiveAccessor.ReadText("stackable/stackable.lst")));
         private static readonly Lazy<ItemSellRates> SellRates = new Lazy<ItemSellRates>(() => ItemSellRates.Parse(PvfArchiveAccessor.ReadText("equipment/pricetable.tbl")));
-        // Script.pvf is immutable for the process lifetime. Lazy prevents duplicate
-        // parsing when concurrent reward flows resolve the same template for the first time.
         private static readonly ConcurrentDictionary<int, Lazy<ItemMetadata>> MetadataCache
             = new ConcurrentDictionary<int, Lazy<ItemMetadata>>();
         // PvfArchiveAccessor与equipment.lst都是进程级不可变Lazy，装备类型也按进程缓存。
