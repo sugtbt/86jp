@@ -158,7 +158,12 @@ namespace DfoServer.Game.Quests
             }
             else
             {
-                await session.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(grantedItemIds);
+                // ACCEPTED_QUEST (0x023F) makes this client rebuild quest state and
+                // causes a visible hitch for every material drop. Persist progress
+                // here without that full-list notification; the slot refresh below
+                // still makes the granted material visible immediately.
+                session.GameSession.QuestManager
+                    .RecalibrateItemSeekingQuestProgressWithoutNotification(grantedItemIds);
             }
 
             // During a dungeon, refresh only the changed slots after quest progress has settled.
