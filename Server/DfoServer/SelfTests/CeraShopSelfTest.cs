@@ -60,6 +60,8 @@ namespace DfoServer.SelfTests
             Check("name tag state overwrites same character and keeps absolute expire time", CheckNameTagState());
             Check("coupon purchase packet parses coupon item and slot", CheckCouponPurchasePacket());
             Check("package purchase parses trailing coupon after component list", CheckPackageCouponPurchasePacket());
+            Check("PVF coupon type is accepted", InventoryCeraShopRuntimeService.IsPurchaseCoupon(10007350));
+            Check("ordinary item is rejected as coupon", !InventoryCeraShopRuntimeService.IsPurchaseCoupon(10000006));
 
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;

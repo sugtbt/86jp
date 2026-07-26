@@ -129,6 +129,7 @@ namespace DfoServer.Game.Inventory
             {
                 if (paymentMode != 0
                     || purchaseCouponSlot < 0
+                    || !IsPurchaseCoupon(purchaseCouponId)
                     || !inventory.TryGetItem(InventoryListType.Main, purchaseCouponSlot, out var couponItem)
                     || couponItem == null
                     || couponItem.ItemId != purchaseCouponId
@@ -210,6 +211,24 @@ namespace DfoServer.Game.Inventory
                 attributeValue,
                 avatarDurationDays,
                 out result);
+        }
+
+        internal static bool IsPurchaseCoupon(int itemTemplateId)
+        {
+            if (itemTemplateId <= 0)
+                return false;
+
+            try
+            {
+                var metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+                return metadata != null
+                    && metadata.IsStackable
+                    && metadata.IsPrimaryStackableFamily("coupon");
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static bool TryBuySkillTreeExpansion(
