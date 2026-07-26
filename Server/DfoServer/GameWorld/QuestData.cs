@@ -212,6 +212,40 @@ namespace DfoServer.GameWorld
             return NormalizeQuestTag(qst.RewardType) == "title";
         }
 
+        internal static List<ushort> GetFirstAwakeningQuestIds(
+            int characterJob,
+            int firstGrowType)
+        {
+            var result = new List<ushort>();
+            if (characterJob < 0 || firstGrowType <= 0)
+                return result;
+
+            foreach (var questId in Index.Value.OrderedIds)
+            {
+                if (questId <= 0 || questId > ushort.MaxValue)
+                    continue;
+
+                var qst = GetQuestFile(questId);
+                if (qst == null || qst.IsEvent || qst.JobChangeQuestValue != 2)
+                    continue;
+
+                var job = (qst.Job ?? string.Empty).Trim().ToLowerInvariant();
+                if (job.Length > 0 && job != "[all]" && !MatchesJob(job, characterJob))
+                    continue;
+
+                var target = (qst.TargetCharacter ?? string.Empty).Trim().ToLowerInvariant();
+                if (target.Length > 0 && !MatchesTargetCharacter(target, characterJob))
+                    continue;
+
+                if (qst.GrowType >= 0 && qst.GrowType != firstGrowType)
+                    continue;
+
+                result.Add((ushort)questId);
+            }
+
+            return result;
+        }
+
         // The client rebuilds these native character effects from the completed
         // quest id and the QST's [special reward status] block.
         internal static bool HasSpecialRewardStatus(int questId)

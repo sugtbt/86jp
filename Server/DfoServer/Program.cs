@@ -41,6 +41,7 @@ namespace DfoServer
             ("--selftest-death-tower-protocol", SelfTests.DeathTowerProtocolSelfTest.Run),
             ("--selftest-death-tower-quest-routing", SelfTests.DeathTowerQuestRoutingSelfTest.Run),
             ("--selftest-quest-clear", SelfTests.QuestClearSelfTest.Run),
+            ("--selftest-first-awakening-clear", SelfTests.FirstAwakeningClearSelfTest.Run),
             ("--selftest-quest-trigger-counts", SelfTests.QuestTriggerCountSelfTest.Run),
             ("--selftest-quest-ack-format", SelfTests.QuestAckFormatSelfTest.Run),
             ("--selftest-clear-quest-list-packet", SelfTests.ClearQuestListPacketSelfTest.Run),

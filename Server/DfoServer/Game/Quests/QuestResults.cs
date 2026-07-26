@@ -1,8 +1,30 @@
+using System;
 using System.Collections.Generic;
 using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.Quests
 {
+    internal sealed class FirstAwakeningClearResult
+    {
+        public bool Success { get; private set; }
+        public string Error { get; private set; }
+        public IReadOnlyList<ushort> ClearedQuestIds { get; private set; } = Array.Empty<ushort>();
+        public int AwakeningGrowNumber { get; private set; }
+
+        public static FirstAwakeningClearResult Fail(string error)
+            => new FirstAwakeningClearResult { Error = error ?? "failed" };
+
+        public static FirstAwakeningClearResult Ok(
+            IReadOnlyList<ushort> questIds,
+            int awakeningGrowNumber)
+            => new FirstAwakeningClearResult
+            {
+                Success = true,
+                ClearedQuestIds = questIds ?? Array.Empty<ushort>(),
+                AwakeningGrowNumber = awakeningGrowNumber,
+            };
+    }
+
     // 任务四个命令(接取/放弃/触发器/完成)的结构化处理结果。
     // QuestService 只产出这些对象; 序列化成应答包字节的工作全部在
     // QuestAckBuilder。ErrorCode==0 表示成功, 非零值直接进失败应答包。

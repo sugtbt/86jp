@@ -110,6 +110,98 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log($"[{ProtocolName}] USE_STACKABLE: consumed 1x item 0x{itemCode:X8} from slot {slotIndex}, remaining={result.RemainingStackCount}{petSatietyLog}");
         }
 
+        public async Task Handle_USE_STACKABLE_ACTION(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            const string FirstAwakenClearAction = "[first awaken clear]";
+
+            if (body == null || body.Length < 3 || session?.GameSession?.QuestManager == null)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01, header.type, new byte[] { 0x00, 0x16 }));
+                return;
+            }
+
+            var slotIndex = BitConverter.ToInt16(body, 0);
+            var listType = (InventoryListType)body[2];
+            var (characterId, _) = ResolveOwner(session);
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01, header.type, new byte[] { 0x00, 0x16 }));
+                return;
+            }
+
+            int itemTemplateId;
+            lock (lease.SyncRoot)
+            {
+                var source = lease.Inventory.GetItem(listType, slotIndex);
+                itemTemplateId = source?.ItemId ?? 0;
+                var stackable = source != null ? StackableItemProvider.Load(source.ItemId) : null;
+                var action = InventoryPackageRewardResolver.NormalizeStackableType(
+                    stackable?.ActionTypeName);
+                if (!action.Equals(FirstAwakenClearAction, StringComparison.OrdinalIgnoreCase))
+                    itemTemplateId = 0;
+            }
+
+            if (itemTemplateId == 0)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] USE_STACKABLE_ACTION rejected: unsupported item " +
+                    $"listType={listType} slot={slotIndex}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01, header.type, new byte[] { 0x00, 0x16 }));
+                return;
+            }
+
+            var awakeningResult = session.GameSession.QuestManager.TryClearFirstAwakeningQuests();
+            if (!awakeningResult.Success)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken rejected: " +
+                    $"cid={characterId} item={itemTemplateId} reason={awakeningResult.Error}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01, header.type, new byte[] { 0x00, 0x16 }));
+                return;
+            }
+
+            InventoryMutationResult consumeResult;
+            bool consumed;
+            lock (lease.SyncRoot)
+            {
+                consumed = InventoryDeleteService.TryUseStackableForClient(
+                    lease.Inventory,
+                    listType,
+                    slotIndex,
+                    itemTemplateId,
+                    out consumeResult);
+                if (consumed)
+                    InventoryPersistenceService.SaveDirty(lease);
+            }
+
+            if (!consumed)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken item consume failed after quest update: " +
+                    $"cid={characterId} item={itemTemplateId} slot={slotIndex}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01, header.type, new byte[] { 0x00, 0x16 }));
+                return;
+            }
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01, header.type, CommonPacketBodyBuilder.BuildSuccessAck()));
+            await _refresh.SendUpdateItemList(session, listType, slotIndex);
+            await session.GameSession.QuestManager.NotifyFirstAwakeningClearAsync();
+
+            FileLogger.Log(
+                $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken OK: cid={characterId} " +
+                $"item={itemTemplateId} slot={slotIndex} quests={awakeningResult.ClearedQuestIds.Count} " +
+                $"awakening={awakeningResult.AwakeningGrowNumber}");
+        }
+
         public async Task Handle_ADD_EQUIPMENT_EFFECT(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             FileLogger.Log($"[{ProtocolName}] ADD_EQUIPMENT_EFFECT 0x0342 raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")}");

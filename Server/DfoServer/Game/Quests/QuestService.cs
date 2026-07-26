@@ -966,6 +966,89 @@ namespace DfoServer.Game.Quests
             };
         }
 
+        internal FirstAwakeningClearResult TryClearFirstAwakeningQuests(int characterId)
+        {
+            if (characterId <= 0)
+                return FirstAwakeningClearResult.Fail("invalid character");
+
+            using (var conn = new SqliteConnection(_connStr))
+            {
+                conn.Open();
+                using (var tx = conn.BeginTransaction())
+                {
+                    int job;
+                    int level;
+                    byte growType;
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.Transaction = tx;
+                        cmd.CommandText = "SELECT job, level, grow_type FROM characters WHERE character_id=@cid";
+                        cmd.Parameters.AddWithValue("@cid", characterId);
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (!reader.Read())
+                                return FirstAwakeningClearResult.Fail("character not found");
+
+                            job = reader.GetInt32(0);
+                            level = reader.GetInt32(1);
+                            growType = (byte)reader.GetInt32(2);
+                        }
+                    }
+
+                    int firstGrow = growType & 0x0F;
+                    int awakening = (growType >> 4) & 0x0F;
+                    if (level < 50)
+                        return FirstAwakeningClearResult.Fail("level below 50");
+                    if (firstGrow <= 0)
+                        return FirstAwakeningClearResult.Fail("job advancement missing");
+                    if (awakening > 0)
+                        return FirstAwakeningClearResult.Fail("already awakened");
+
+                    var questIds = GameWorld.QuestData.GetFirstAwakeningQuestIds(job, firstGrow);
+                    if (questIds.Count == 0)
+                        return FirstAwakeningClearResult.Fail("no matching awakening quests");
+
+                    int awakeningGrowNumber = 0;
+                    foreach (var questId in questIds)
+                    {
+                        var reward = GameWorld.QuestData.GetRewardExp(
+                            questId,
+                            playerLevel: level,
+                            playerJob: job,
+                            playerGrowType: growType);
+                        if (reward.ChainType == 2 && reward.GrowNumber > 0)
+                            awakeningGrowNumber = reward.GrowNumber;
+                    }
+
+                    if (awakeningGrowNumber <= 0)
+                        return FirstAwakeningClearResult.Fail("awakening reward quest missing");
+
+                    var awakeningQuestSet = new HashSet<ushort>(questIds);
+                    foreach (var active in QuestRepository.LoadActiveQuests(conn, tx, characterId))
+                    {
+                        if (awakeningQuestSet.Contains(active.QuestId))
+                            QuestRepository.DeleteActiveQuest(conn, tx, characterId, active.Slot);
+                    }
+
+                    foreach (var questId in questIds)
+                    {
+                        if (!GameWorld.QuestData.IsRepeatableQuest(questId))
+                            QuestRepository.MarkQuestCleared(conn, tx, characterId, questId);
+                    }
+
+                    SyncQuestClearParentProgress(conn, tx, characterId);
+                    UpdateGrowType(conn, tx, characterId, 2, awakeningGrowNumber);
+                    tx.Commit();
+
+                    FileLogger.Log(
+                        $"[QuestService] FIRST_AWAKEN_CLEAR: cid={characterId} job={job} " +
+                        $"grow=0x{growType:X2}->0x{((awakeningGrowNumber << 4) | firstGrow):X2} " +
+                        $"quests={questIds.Count}");
+                    return FirstAwakeningClearResult.Ok(questIds, awakeningGrowNumber);
+                }
+            }
+        }
+
         private static bool TryResolveQuestionQuestClearFlagValue(
             ushort questId,
             ActiveQuest activeQuest,
