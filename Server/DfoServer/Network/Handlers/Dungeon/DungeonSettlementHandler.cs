@@ -149,7 +149,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     rankIndex: (byte)clearRank.RankBonusIndex,
                     timeBonusPoint: (byte)Math.Max(0, Math.Min(255, clearRank.TimeBonusPoint)),
                     clientRankPoint: clearRank.ClientRankPoint)));
-            await _svc.SendExpGrantNotificationAsync(session, grant, "SET_PLAY_RESULT");
+            await _svc.SendExpGrantNotificationAsync(
+                session,
+                grant,
+                "SET_PLAY_RESULT",
+                clearExp.GrowthContractBonus);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0023,
                 DungeonNotificationBuilder.BuildClearDungeonReward(
                     clearExp.Base, scoreBonusExp: ToInt32Saturated(clearExp.ScoreBonus), clearBonusExp: 0,
