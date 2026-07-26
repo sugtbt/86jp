@@ -88,7 +88,7 @@ namespace DfoServer.Game.SelectCharacter
 
 
         public byte CubeType { get; set; }
-        public byte CubeGrade { get; set; }
+        public byte CubeGrade { get; set; } = 0xff;
 
         
         public ushort LuckyStar { get; set; }
