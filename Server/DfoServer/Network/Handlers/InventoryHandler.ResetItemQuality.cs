@@ -119,8 +119,10 @@ namespace DfoServer.Network.Handlers
             {
                 FileLogger.Log(
                     $"[{ProtocolName}] RESET_ITEM_ATTR(Wax): failed cid={cid} targetSlot={targetSlot} targetItem=0x{targetItemId:X8} waxSlot={waxSlot}");
-                await session.SendPacketAsync(
-                    GamePacketEnvelopeBuilder.Build(0x01, header.type, BuildResetItemAttrAck(0, targetItemId, targetSlot)));
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    (ushort)CmdPacketType.RESET_ITEM_ATTR,
+                    BuildResetItemAttrAck(0, targetItemId, targetSlot)));
                 return;
             }
 
@@ -129,8 +131,10 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log(
                 $"[{ProtocolName}] RESET_ITEM_ATTR(Wax): ok cid={cid} targetSlot={targetSlot} targetItem=0x{targetItemId:X8} waxSlot={waxSlot} waxCost={resealResult.WaxCost} newSealFlag={resealResult.NewSealFlag} newReSealCount={resealResult.NewReSealCount}");
 
-            await session.SendPacketAsync(
-                GamePacketEnvelopeBuilder.Build(0x01, header.type, BuildResetItemAttrAck(1, targetItemId, targetSlot)));
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                (ushort)CmdPacketType.RESET_ITEM_ATTR,
+                BuildResetItemAttrAck(1, targetItemId, targetSlot)));
 
             await _refresh.SendUpdateItemList(session, InventoryListType.Main, targetSlot);
             await _refresh.SendUpdateItemList(session, InventoryListType.Main, waxSlot);
