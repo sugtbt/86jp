@@ -180,6 +180,7 @@ namespace DfoServer.Game.Quests
                 await _sender.SendNotiAsync(0x0025,
                     ExpNotificationBuilder.Build(
                         player.Level, player.Exp, skillPoints.Value, honorLevel,
+                        growthContractBonusExp: result.GrowthContractExp,
                         growthCapsuleExp: GrowthCapsuleDataProvider.GetDisplayProgress(
                             player.Level, growthCapsule)));
             }

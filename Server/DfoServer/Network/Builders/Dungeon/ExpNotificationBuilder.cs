@@ -6,6 +6,7 @@ namespace DfoServer.Network.Builders
     public static class ExpNotificationBuilder
     {
         public const int PvpVictoryPointOffset = 0x15;
+        public const int GrowthContractExpOffset = 0x22;
         public const int VariableEntryCountOffset = 0x32;
         public const int GrowthCapsuleExpOffset = 0x3B;
         public const int HonorLevelOffset = 0x3F;

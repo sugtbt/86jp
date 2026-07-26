@@ -804,7 +804,16 @@ namespace DfoServer.Game.Quests
             var insertedEntries = new List<InsertedItemEntry>();
 
             uint goldReward = 0;
-            uint expReward = reward.Exp * multiplier;
+            int accountId = GetAccountIdByConnStr(characterId);
+            var premiumEffects = Game.Premium.PremiumEffectProvider.GetCombinedEffects(_connStr, accountId);
+            uint baseExpReward;
+            uint growthContractExpReward;
+            uint expReward = CalculateQuestExpReward(
+                reward.Exp,
+                multiplier,
+                premiumEffects,
+                out baseExpReward,
+                out growthContractExpReward);
             uint normalExpReward = expReward;
             uint honorExpReward = 0;
             ulong totalHonorExp = 0;
@@ -813,8 +822,6 @@ namespace DfoServer.Game.Quests
             byte newLevel;
             uint newExp;
             var petEvolution = PetCreatureEvolutionResult.Noop;
-            int accountId = GetAccountIdByConnStr(characterId);
-
             var seekItems = GameWorld.QuestData.GetSeekingConsumeItems(questId);
             var eventItems = GameWorld.QuestData.GetEventItems(questId);
             var carryForwardEventItems = GameWorld.QuestData.GetCarryForwardEventItems(questId);
@@ -946,11 +953,12 @@ namespace DfoServer.Game.Quests
                 }
             }
 
-            FileLogger.Log($"[QuestService] FINISH quest={questId} rewardIdx={rewardSelectIdx} mult={multiplier} flag={clearedFlagValue} gold={goldReward} consumed={consumedEntries.Count} rewarded={insertedEntries.Count}");
+            FileLogger.Log($"[QuestService] FINISH quest={questId} rewardIdx={rewardSelectIdx} mult={multiplier} flag={clearedFlagValue} baseExp={baseExpReward} growthContractExp={growthContractExpReward} exp={expReward} gold={goldReward} consumed={consumedEntries.Count} rewarded={insertedEntries.Count}");
             return new QuestFinishResult
             {
                 QuestId = questId,
                 Exp = expReward,
+                GrowthContractExp = growthContractExpReward,
                 HonorExp = honorExpReward,
                 TotalHonorExp = totalHonorExp,
                 GrowthCapsuleExp = growthCapsuleExpReward,
@@ -964,6 +972,21 @@ namespace DfoServer.Game.Quests
                 ConsumedEntries = consumedEntries,
                 InsertedEntries = insertedEntries,
             };
+        }
+
+        internal static uint CalculateQuestExpReward(
+            uint rewardExp,
+            ushort multiplier,
+            Game.Premium.PremiumEffects premiumEffects,
+            out uint baseExpReward,
+            out uint growthContractExpReward)
+        {
+            var scaled = (ulong)rewardExp * multiplier;
+            baseExpReward = scaled > uint.MaxValue ? uint.MaxValue : (uint)scaled;
+            growthContractExpReward = premiumEffects?.ComputeBonusExp(baseExpReward) ?? 0;
+            return Progression.CharacterExperienceService.AddSaturating(
+                baseExpReward,
+                growthContractExpReward);
         }
 
         private static bool TryResolveQuestionQuestClearFlagValue(
