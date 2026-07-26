@@ -150,6 +150,8 @@ namespace PvfLib
         public int Value { get; set; } = -1;
         public int Weight { get; set; } = -1;
         public int LotteryUseCost { get; set; }
+        public int LotteryUseNeedItemId { get; set; }
+        public int LotteryUseNeedItemCount { get; set; }
         public int CoolTime { get; set; } = -1;
         public string CooltimeGroup { get; set; }
 
@@ -285,6 +287,16 @@ namespace PvfLib
                     case "value": stk.Value = ParseInt(data); break;
                     case "weight": stk.Weight = ParseInt(data); break;
                     case "lottery use cost": stk.LotteryUseCost = Math.Max(0, ParseInt(data)); break;
+                    case "lottery use need item":
+                    {
+                        var values = ParseInts(data);
+                        if (values.Count >= 2)
+                        {
+                            stk.LotteryUseNeedItemId = Math.Max(0, values[0]);
+                            stk.LotteryUseNeedItemCount = Math.Max(0, values[1]);
+                        }
+                        break;
+                    }
                     case "cool time": stk.CoolTime = ParseInt(data); break;
                     case "cooltime group": stk.CooltimeGroup = data; break;
 

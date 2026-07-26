@@ -44,6 +44,9 @@ namespace DfoServer.Game.Lottery
 
             if (inventory.CountMainItem(0) < definition.GoldCost)
                 return false;
+            if (HasRequiredItemCost(definition)
+                && inventory.CountMainItem(definition.RequiredItemTemplateId) < definition.RequiredItemCount)
+                return false;
 
             sourceContext = new LotterySourceContext
             {
@@ -88,6 +91,8 @@ namespace DfoServer.Game.Lottery
                     inventory,
                     source,
                     definition.GoldCost,
+                    definition.RequiredItemTemplateId,
+                    definition.RequiredItemCount,
                     regularRequests,
                     overflowSink,
                     out var regularPlan))
@@ -103,6 +108,8 @@ namespace DfoServer.Game.Lottery
                         inventory,
                         source,
                         definition.GoldCost,
+                        definition.RequiredItemTemplateId,
+                        definition.RequiredItemCount,
                         doubleRequests,
                         overflowSink,
                         out var doublePlan))
@@ -135,6 +142,17 @@ namespace DfoServer.Game.Lottery
                 updatedGold = goldConsume.RemainingCount;
             }
 
+            InventoryMainItemConsumeResult requiredItemConsume = null;
+            if (HasRequiredItemCost(definition))
+            {
+                if (!inventory.TryConsumeMainItem(
+                        definition.RequiredItemTemplateId,
+                        definition.RequiredItemCount,
+                        out requiredItemConsume)
+                    || !requiredItemConsume.Success)
+                    return false;
+            }
+
             if (!InventoryRewardGrantService.TryApplyPreparedBatch(inventory, appliedPlan, out var grantBatch)
                 || !grantBatch.Success)
                 return false;
@@ -146,8 +164,21 @@ namespace DfoServer.Game.Lottery
                 SourceRemainingStackCount = sourceDelete.RemainingCount,
                 ConsumedGold = definition.GoldCost,
                 UpdatedGold = updatedGold,
+                ConsumedRequiredItemTemplateId = definition.RequiredItemTemplateId,
+                ConsumedRequiredItemCount = HasRequiredItemCost(definition)
+                    ? definition.RequiredItemCount
+                    : 0,
                 UsedDoubleReward = appliedDoubleReward,
             };
+            if (requiredItemConsume != null)
+            {
+                foreach (var change in requiredItemConsume.Changes.Slots)
+                {
+                    if (change.ListType == InventoryListType.Main
+                        && !openResult.RequiredItemChangedSlots.Contains(change.SlotIndex))
+                        openResult.RequiredItemChangedSlots.Add(change.SlotIndex);
+                }
+            }
             AddOnlineGrantResults(inventory, grantBatch, openResult.Rewards);
             result = openResult;
             return true;
@@ -214,6 +245,8 @@ namespace DfoServer.Game.Lottery
             InventoryService inventory,
             OnlineLotterySource source,
             int goldCost,
+            int requiredItemTemplateId,
+            int requiredItemCount,
             IReadOnlyList<InventoryRewardGrantRequest> requests,
             IInventoryOverflowRewardSink overflowSink,
             out InventoryRewardGrantBatchPlan plan)
@@ -237,12 +270,28 @@ namespace DfoServer.Game.Lottery
                     || !goldConsume.Success))
                 return false;
 
+            if (requiredItemTemplateId > 0
+                && requiredItemCount > 0
+                && (!planningInventory.TryConsumeMainItem(
+                        requiredItemTemplateId,
+                        requiredItemCount,
+                        out var requiredItemConsume)
+                    || !requiredItemConsume.Success))
+                return false;
+
             if (InventoryRewardGrantService.TryPlanBatch(planningInventory, requests, out plan))
                 return true;
 
             overflowSink = overflowSink ?? RejectingInventoryOverflowRewardSink.Instance;
             overflowSink.TryDeliver(inventory, requests ?? Array.Empty<InventoryRewardGrantRequest>(), out _);
             return false;
+        }
+
+        private static bool HasRequiredItemCost(LotteryItemDefinition definition)
+        {
+            return definition != null
+                && definition.RequiredItemTemplateId > 0
+                && definition.RequiredItemCount > 0;
         }
 
         internal static List<PvfLib.BoosterRewardEntry> RollRewards(
