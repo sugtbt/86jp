@@ -1,6 +1,7 @@
 using DfoServer.Network;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 
 namespace DfoServer
@@ -228,6 +229,11 @@ namespace DfoServer
             try
             {
                 GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
+                var itemMetadataWarmupTimer = Stopwatch.StartNew();
+                Game.Inventory.ItemMetadataResolver.Warmup();
+                itemMetadataWarmupTimer.Stop();
+                FileLogger.Log(
+                    $"[Startup] ITEM_METADATA_WARMUP totalMs={itemMetadataWarmupTimer.Elapsed.TotalMilliseconds:F3}");
                 Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();
                 Game.Mercenary.StrikerDefaultAvatarDataProvider.Warmup();
