@@ -18,12 +18,12 @@ namespace DfoServer.Game.Quests
 
         private readonly InventoryRefreshSender _inventoryRefresh;
         private readonly string _connectionString;
-        private readonly Func<QuestDropCandidate, int, int> _rollDrop;
+        private readonly Func<QuestDropCandidate, int, int, int> _rollDrop;
 
         public QuestDropService(
             InventoryRefreshSender inventoryRefresh,
             string connectionString = null,
-            Func<QuestDropCandidate, int, int> rollDrop = null)
+            Func<QuestDropCandidate, int, int, int> rollDrop = null)
         {
             _inventoryRefresh = inventoryRefresh ?? throw new ArgumentNullException(nameof(inventoryRefresh));
             _connectionString = connectionString;
@@ -98,6 +98,16 @@ namespace DfoServer.Game.Quests
             var candidates = getCandidates(activeQuestIds);
             if (candidates == null) return;
 
+            var connStr = !string.IsNullOrWhiteSpace(_connectionString)
+                ? _connectionString
+                : SqliteDatabaseBootstrap.Initialize(
+                    ServerPaths.DatabasePath,
+                    ServerPaths.SchemaFilePath);
+            var accountId = session?.Account?.AccountId ?? 0;
+            var questItemDropRatePercent = Premium.PremiumEffectProvider
+                .GetCombinedEffects(connStr, accountId)
+                .QuestItemDropRatePercent;
+
             if (!InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
                 || !lease.IsOwnedBy(session.SessionId))
             {
@@ -115,7 +125,10 @@ namespace DfoServer.Game.Quests
                 {
                     int currentHeld = inventory.CountMainItem(candidate.ItemId);
 
-                    int dropCount = _rollDrop(candidate, currentHeld);
+                    int dropCount = _rollDrop(
+                        candidate,
+                        currentHeld,
+                        questItemDropRatePercent);
                     if (dropCount <= 0)
                     {
                         if (candidate.MaxStack != -1 && currentHeld >= candidate.MaxStack)
@@ -144,6 +157,7 @@ namespace DfoServer.Game.Quests
                         $"[{ProtocolLogName}] QUEST_DROP: " +
                         $"quest={candidate.QuestId} {sourceName}={sourceCode} " +
                         $"item={candidate.ItemId} x{dropCount} slot={grant.SlotIndex} " +
+                        $"growthContractDropRate={questItemDropRatePercent}% " +
                         $"preferQuestInventory={candidate.PreferQuestInventory} " +
                         $"held={currentHeld}->{currentHeld + dropCount}");
                 }

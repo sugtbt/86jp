@@ -64,15 +64,24 @@ namespace DfoServer.SelfTests
 
                 fixture.PrepareOrdinaryPartyKill();
                 memberRun = fixture.Member.Session.Player.CurrentRun;
+                killerExp = fixture.Killer.Session.Player.Exp;
                 memberExp = fixture.Member.Session.Player.Exp;
+                fixture.ActivateGrowthContractForMember();
 
                 fixture.KillMonster();
 
                 memberPackets = fixture.Member.ReadAvailableTypes();
+                var killerGain = fixture.Killer.Session.Player.Exp - killerExp;
+                var memberGain = fixture.Member.Session.Player.Exp - memberExp;
+                var expectedMemberContractBonus = killerGain * 20 / 100;
                 Check("ordinary party kill still grants member EXP and relays 0x0025/0x0026",
-                    fixture.Member.Session.Player.Exp > memberExp
+                    memberGain > 0
                     && memberPackets.Contains(0x0025)
                     && memberPackets.Contains(0x0026),
+                    ref failures);
+                Check("party member receives own growth-contract monster EXP and display component",
+                    memberGain == killerGain + expectedMemberContractBonus
+                    && memberRun.MonsterGrowthContractBonusExp == expectedMemberContractBonus,
                     ref failures);
                 Check("ordinary party kill still propagates the room kill sequence",
                     memberRun.RoomKilledSeqIds.SetEquals(new[] { MonsterSequence }),
@@ -223,6 +232,28 @@ namespace DfoServer.SelfTests
                         body)
                     .GetAwaiter()
                     .GetResult();
+            }
+
+            public void ActivateGrowthContractForMember()
+            {
+                using (var connection = new SqliteConnection(
+                    SqliteDatabaseBootstrap.BuildConnectionString(_dbPath)))
+                {
+                    connection.Open();
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+INSERT OR REPLACE INTO account_premiums (account_id, premium_type, end_time)
+VALUES (@accountId, 84, @endTime);";
+                        command.Parameters.AddWithValue(
+                            "@accountId",
+                            MemberCharacterId);
+                        command.Parameters.AddWithValue(
+                            "@endTime",
+                            DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600);
+                        command.ExecuteNonQuery();
+                    }
+                }
             }
 
             private static DungeonRun CreateRun(

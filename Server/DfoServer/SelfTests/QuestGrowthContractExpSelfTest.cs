@@ -1,6 +1,8 @@
 using DfoServer.Game.Premium;
 using DfoServer.Game.Quests;
 using DfoServer.Game.Skills;
+using DfoServer.Game.Dungeon;
+using DfoServer.GameWorld;
 using DfoServer.Network.Builders;
 using System;
 
@@ -61,7 +63,33 @@ namespace DfoServer.SelfTests
                     ExpNotificationBuilder.GrowthContractExpOffset) == contractBonus,
                 ref failures);
 
-            Console.WriteLine($"Quest growth contract exp self-test: {4 - failures} passed, {failures} failed");
+            var pvfEffects = PremiumCatalog.Load().GetEffects(84);
+            Check(
+                "PVF growth contract exposes exp and drop-rate effects",
+                pvfEffects != null
+                && pvfEffects.BonusExpPercent == 20
+                && pvfEffects.QuestItemDropRatePercent == 20
+                && pvfEffects.GetIndependentDropRatePercent(1) == 20
+                && pvfEffects.GetIndependentDropRatePercent(2) == 23
+                && pvfEffects.GetIndependentDropRatePercent(3) == 27
+                && pvfEffects.GetIndependentDropRatePercent(4) == 30,
+                ref failures);
+
+            Check(
+                "quest item drop chance receives relative contract bonus",
+                QuestDropProvider.ComputeDropThresholdBasisPoints(50, 0) == 5000
+                && QuestDropProvider.ComputeDropThresholdBasisPoints(50, 20) == 6000
+                && QuestDropProvider.ComputeDropThresholdBasisPoints(100, 20) == 10000,
+                ref failures);
+
+            Check(
+                "independent drop chance receives party contract bonus",
+                IndependentDropSystem.ComputeAdjustedProbability(500000, 0) == 500000
+                && IndependentDropSystem.ComputeAdjustedProbability(500000, 30) == 650000
+                && IndependentDropSystem.ComputeAdjustedProbability(900000, 30) == 1000000,
+                ref failures);
+
+            Console.WriteLine($"Quest growth contract exp self-test: {7 - failures} passed, {failures} failed");
             return failures == 0 ? 0 : 1;
         }
 

@@ -198,18 +198,24 @@ namespace DfoServer.GameWorld
         /// 逻辑 (IDA 实证 CheckQuestMonster):
         ///   随机选一个候选 → for(k=0; k &lt; count; k++) if(rand(100) &lt; dropRate) actualCount++
         ///   如果 maxStack 已满则换下一个候选
-        /// 简化: 单机不做装备/VIP 加成, 只用基础 dropRate
+        /// 成长之契约按 premiumlist_new.etc 的 [quest item drop rate] 对基础概率做相对加成。
         /// </summary>
-        public static int RollDrop(QuestDropCandidate candidate, int currentHeld)
+        public static int RollDrop(
+            QuestDropCandidate candidate,
+            int currentHeld,
+            int bonusRatePercent = 0)
         {
             if (candidate.MaxStack != -1 && currentHeld >= candidate.MaxStack)
                 return 0;
 
             int actual = 0;
             int maxAttempts = Math.Max(1, candidate.Count);
+            int thresholdBasisPoints = ComputeDropThresholdBasisPoints(
+                candidate.DropRate,
+                bonusRatePercent);
             for (int k = 0; k < maxAttempts; k++)
             {
-                if (Infrastructure.ServerRandom.Next(100) < candidate.DropRate)
+                if (Infrastructure.ServerRandom.Next(10000) < thresholdBasisPoints)
                     actual++;
             }
 
@@ -220,6 +226,16 @@ namespace DfoServer.GameWorld
                 actual = candidate.MaxStack - currentHeld;
 
             return Math.Max(0, actual);
+        }
+
+        internal static int ComputeDropThresholdBasisPoints(
+            int baseRatePercent,
+            int bonusRatePercent)
+        {
+            var clampedBaseRate = Math.Max(0, Math.Min(100, baseRatePercent));
+            var clampedBonusRate = Math.Max(0, bonusRatePercent);
+            var threshold = (long)clampedBaseRate * (100 + clampedBonusRate);
+            return (int)Math.Min(10000, threshold);
         }
     }
 }

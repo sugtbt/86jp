@@ -40,7 +40,8 @@ namespace DfoServer.Game.Dungeon
             var result = generator.GenerateMonsterDrops(
                 request.DropRateLevel, request.MonsterType, request.MonsterCode,
                 run.Difficulty, request.DungeonBasisLevel,
-                ref slotCounter, dropPool);
+                ref slotCounter, dropPool,
+                request.IndependentDropBonusPercent);
 
             run.SceneSlotCounter = slotCounter;
             RegisterDrops(run, result.drops);
@@ -60,7 +61,8 @@ namespace DfoServer.Game.Dungeon
 
             var drops = IndependentDropSystem.GenerateDrops(
                 request.MonsterCode, run.Difficulty, request.DungeonBasisLevel,
-                run.RoomLcg, ref slotCounter);
+                run.RoomLcg, ref slotCounter,
+                request.IndependentDropBonusPercent);
 
             if (request.IsLastGroupMonster && !request.IsAbyssMonsterScript)
             {
@@ -413,6 +415,7 @@ namespace DfoServer.Game.Dungeon
         public int MonsterType;
         public int MonsterCode;
         public int DungeonBasisLevel;
+        public int IndependentDropBonusPercent;
     }
 
     internal struct AbyssPartyDropRequest
@@ -424,6 +427,7 @@ namespace DfoServer.Game.Dungeon
         public int RewardRollCount;
         public bool IsLastGroupMonster;
         public bool IsAbyssMonsterScript;
+        public int IndependentDropBonusPercent;
     }
 
     internal struct MonsterDropResult

@@ -37,7 +37,8 @@ namespace DfoServer.Game.Dungeon
 
         public static List<DropInfo> GenerateDrops(
             int monsterCode, int difficulty, int dungeonLevel,
-            DnfLcg lcg, ref ushort slotCounter)
+            DnfLcg lcg, ref ushort slotCounter,
+            int bonusRatePercent = 0)
         {
             EnsureLoaded();
             var result = new List<DropInfo>();
@@ -59,7 +60,9 @@ namespace DfoServer.Game.Dungeon
                 if (entry.Difficulty >= 0 && entry.Difficulty != difficulty)
                     continue;
 
-                int prob = entry.Probs[diffIdx];
+                int prob = ComputeAdjustedProbability(
+                    entry.Probs[diffIdx],
+                    bonusRatePercent);
                 int count = entry.Counts[diffIdx];
                 if (prob <= 0 || count <= 0) continue;
 
@@ -104,6 +107,19 @@ namespace DfoServer.Game.Dungeon
             }
 
             return result;
+        }
+
+        internal static int ComputeAdjustedProbability(
+            int baseProbability,
+            int bonusRatePercent)
+        {
+            if (baseProbability <= 0)
+                return 0;
+
+            var adjusted = (long)baseProbability
+                * (100 + Math.Max(0, bonusRatePercent))
+                / 100;
+            return (int)Math.Min(1000000, adjusted);
         }
 
         private static void AddDrop(List<DropInfo> drops, int itemId, ref ushort slotCounter)
