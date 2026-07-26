@@ -15,6 +15,7 @@ namespace DfoServer.GameWorld
 
     public static class QuestDropProvider
     {
+        public const int EnemyTypeMonster = 1;
         public const int EnemyTypeAiCharacter = 2;
         public const int EnemyTypePassiveObject = 3;
 
@@ -23,7 +24,9 @@ namespace DfoServer.GameWorld
         /// <summary>
         /// 检查杀怪是否触发任务物品掉落。
         /// 匹配逻辑 (IDA 实证 Quest::CheckKillMonster @ 0x83535d6):
-        ///   monsterCode 精确匹配 (无通配), dungeonId -1=任意, difficulty -1=任意, enemyType 默认1
+        ///   monsterCode 精确匹配 (无通配), dungeonId -1=任意, difficulty -1=任意。
+        ///   普通怪物奖励既可能使用 [monster reward item]，也可能使用
+        ///   [enemy reward item] enemyType=1。
         /// </summary>
         public static List<QuestDropCandidate> CheckMonsterDrop(
             ICollection<int> activeQuestIds, int dungeonIndex, int difficulty, int monsterCode)
@@ -47,6 +50,36 @@ namespace DfoServer.GameWorld
                             continue;
                         if (!MatchesScope(entry.DungeonId, entry.Difficulty, dungeonIndex, difficulty))
                             continue;
+
+                        results.Add(new QuestDropCandidate
+                        {
+                            QuestId = questId,
+                            ItemId = entry.ItemId,
+                            Count = entry.Count,
+                            DropRate = entry.DropRate,
+                            MaxStack = entry.MaxStack,
+                            PreferQuestInventory =
+                                IsSeekingTargetItem(
+                                    questId,
+                                    entry.ItemId),
+                        });
+                    }
+
+                    foreach (var entry in qst.EnemyRewardItems)
+                    {
+                        if (entry.EnemyType != EnemyTypeMonster
+                            || entry.EnemyCode != monsterCode)
+                        {
+                            continue;
+                        }
+                        if (!MatchesScope(
+                                entry.DungeonId,
+                                entry.Difficulty,
+                                dungeonIndex,
+                                difficulty))
+                        {
+                            continue;
+                        }
 
                         results.Add(new QuestDropCandidate
                         {
