@@ -41,6 +41,7 @@ namespace DfoServer.Network
         private readonly MercenaryHandler _mercenaryHandler;
         private readonly GrowthCapsuleHandler _growthCapsuleHandler;
         private readonly GoldLimitHandler _goldLimitHandler;
+        private readonly CraneMiniGameHandler _craneMiniGameHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
         private readonly ISessionDirectory _sessionDirectory;
@@ -155,6 +156,7 @@ namespace DfoServer.Network
             _goldLimitHandler = new GoldLimitHandler(
                 new Game.Currency.CharacterGoldLimitRepository(databasePath, schemaFilePath),
                 _inventoryRefreshSender);
+            _craneMiniGameHandler = new CraneMiniGameHandler(_inventoryRefreshSender);
 
             _cmdDispatch = new Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>>();
             RegisterLoginHandlers(_cmdDispatch);
@@ -198,6 +200,7 @@ namespace DfoServer.Network
             Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(session, "disconnect");
             _townHandler.PersistPosition(session, forceImmediate: true, source: "disconnect");
             _lotteryItemHandler.ClearSession(session.SessionId);
+            _craneMiniGameHandler.ClearSession(session.SessionId);
             PetCreatureRuntimeService.UnregisterSession(session);
         }
 
@@ -323,6 +326,8 @@ namespace DfoServer.Network
             d[0x00CD] = _inventoryHandler.Handle_ENUM_CMDPACKET_INVEST_ITEM_AMPLIFY_OPTION;
             d[0x00D0] = _inventoryHandler.Handle_OPEN_MAGIC_BOX_SINGLE;
             d[0x00D9] = _lotteryItemHandler.HandleOverflowInfo;
+            d[(ushort)CmdPacketType.CRANE_START_USE] = _craneMiniGameHandler.HandleStartUse;
+            d[(ushort)CmdPacketType.CRANE_PICKUP] = _craneMiniGameHandler.HandlePickup;
             d[0x0050] = _inventoryHandler.Handle_ENUM_CMDPACKET_UPGRADE_ITEM;      //80
             d[0x0051] = _inventoryHandler.Handle_ENUM_CMDPACKET_RESET_ITEM_ATTR;   //81 装备品级调整箱(万花镜)
             d[0x00A0] = _inventoryHandler.Handle_OPEN_SELECTABLE_PACKAGE;
