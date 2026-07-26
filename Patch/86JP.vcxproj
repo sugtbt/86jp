@@ -70,6 +70,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="86JP.h" />
+    <ClInclude Include="AuctionRegistrationAckFix.h" />
     <ClInclude Include="HookInterface.h" />
     <ClInclude Include="XLog.h" />
   </ItemGroup>

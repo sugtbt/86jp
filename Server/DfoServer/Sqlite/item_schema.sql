@@ -753,6 +753,45 @@ CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
 
+-- Auction PR1: fixed-price listings and byte-complete ItemCore escrow.
+-- status: 0=active, 1=cancelled, 2=expired, 3=sold (reserved for a later PR).
+CREATE TABLE IF NOT EXISTS auction_listings (
+    listing_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller_account_id   INTEGER NOT NULL,
+    seller_character_id INTEGER NOT NULL,
+    source_list_type    INTEGER NOT NULL,
+    source_slot_index   INTEGER NOT NULL,
+    item_id             INTEGER NOT NULL CHECK (item_id > 0),
+    item_kind           INTEGER NOT NULL,
+    quantity            INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price          INTEGER NOT NULL CHECK (unit_price > 0),
+    total_price         INTEGER NOT NULL CHECK (total_price > 0),
+    deposit_amount      INTEGER NOT NULL CHECK (deposit_amount >= 0),
+    status              INTEGER NOT NULL DEFAULT 0 CHECK (status IN (0, 1, 2, 3)),
+    created_at          INTEGER NOT NULL,
+    expires_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    version             INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    CHECK (source_slot_index >= 0),
+    CHECK (expires_at > created_at),
+    FOREIGN KEY (seller_account_id) REFERENCES accounts(account_id) ON DELETE RESTRICT,
+    FOREIGN KEY (seller_character_id) REFERENCES characters(character_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS auction_escrow_items (
+    listing_id        INTEGER PRIMARY KEY,
+    item_core         BLOB NOT NULL CHECK (length(item_core) = 82),
+    quantity          INTEGER NOT NULL CHECK (quantity > 0),
+    return_source_key TEXT NOT NULL UNIQUE CHECK (length(return_source_key) > 0),
+    FOREIGN KEY (listing_id) REFERENCES auction_listings(listing_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_auction_listings_seller_active
+    ON auction_listings(seller_character_id, status, expires_at, listing_id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_auction_listings_active_expiry
+    ON auction_listings(status, expires_at, listing_id);
+
 CREATE TABLE IF NOT EXISTS account_settings (
     account_id INTEGER PRIMARY KEY,
     main_game_option BLOB,

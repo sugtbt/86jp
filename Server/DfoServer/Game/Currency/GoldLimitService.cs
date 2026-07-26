@@ -212,6 +212,38 @@ WHERE character_id=@cid;";
             }
         }
 
+        internal static int LoadEffectiveAuctionGoldLimit(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            if (connection == null)
+                throw new ArgumentNullException(nameof(connection));
+            if (transaction == null || transaction.Connection != connection)
+                throw new ArgumentException(
+                    "Transaction must belong to the supplied connection.",
+                    nameof(transaction));
+            if (characterId <= 0)
+                return GoldLimitDataProvider.BaseAuctionGoldLimit;
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT auction_gold_limit
+FROM character_gold_limits
+WHERE character_id=@cid;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                var raw = command.ExecuteScalar();
+                var saved = raw == null || raw == DBNull.Value
+                    ? 0
+                    : Convert.ToInt32(raw);
+                return Math.Max(
+                    GoldLimitDataProvider.BaseAuctionGoldLimit,
+                    saved);
+            }
+        }
+
         private static GoldLimitUpgradeResult Failure(
             GoldLimitUpgradeStatus status,
             CharacterGoldLimitSnapshot limits,
