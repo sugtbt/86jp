@@ -561,6 +561,12 @@ namespace DfoServer.Game.Inventory
                 {
                     case InventoryRewardGrantKind.Premium:
                         break;
+                    case InventoryRewardGrantKind.AccountCurrency:
+                        if (entry.SpecialOutcome == null
+                            || entry.SpecialOutcome.Kind != SpecialRewardKind.HappyTokenCera
+                            || !planningInventory.TryQueueHappyTokenCeraGrant(entry.GrantedCount))
+                            return false;
+                        break;
                     case InventoryRewardGrantKind.MainVirtualCount:
                         if (!planningInventory.SetMainVirtualCount(
                                 entry.SlotIndex,
@@ -873,6 +879,8 @@ namespace DfoServer.Game.Inventory
                 inventory.AttachMainVirtualCount(item.SlotIndex, item.ItemId, item.Count);
 
             inventory.ClearDirtyState();
+            if (source.PendingHappyTokenCeraGrant > 0)
+                inventory.TryQueueHappyTokenCeraGrant(source.PendingHappyTokenCeraGrant);
             return inventory;
         }
 

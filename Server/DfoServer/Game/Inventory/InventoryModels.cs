@@ -290,6 +290,19 @@ namespace DfoServer.Game.Inventory
                 };
             }
 
+            if (outcome.Kind == SpecialRewardKind.HappyTokenCera)
+            {
+                return new BoosterRewardResult
+                {
+                    ListType = InventoryListType.Main,
+                    SlotIndex = -1,
+                    ItemTemplateId = outcome.ItemTemplateId,
+                    StackCount = 0,
+                    GrantedCount = outcome.Count,
+                    SpecialOutcome = outcome,
+                };
+            }
+
             // 契约: 不入库, SlotIndex=0 不对应真实槽位
             return new BoosterRewardResult
             {

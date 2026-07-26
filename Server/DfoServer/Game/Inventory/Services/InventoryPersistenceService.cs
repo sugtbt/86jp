@@ -86,6 +86,52 @@ namespace DfoServer.Game.Inventory
             }
         }
 
+        internal static bool SaveDirtyAndLoadWallet(InventoryLease lease, out WalletSnapshot wallet)
+        {
+            wallet = null;
+            if (lease == null || lease.Inventory == null)
+                return false;
+
+            try
+            {
+                lock (lease.SyncRoot)
+                {
+                    var inventory = lease.Inventory;
+                    var hasDirtyData = HasDirtyData(inventory);
+                    var connectionString = SqliteDatabaseBootstrap.Initialize(
+                        ServerPaths.DatabasePath,
+                        ServerPaths.SchemaFilePath);
+                    using (var connection = new SqliteConnection(connectionString))
+                    {
+                        connection.Open();
+                        using (var transaction = connection.BeginTransaction())
+                        {
+                            if (hasDirtyData
+                                && !SaveDirtyInTransaction(connection, transaction, lease))
+                                return false;
+
+                            wallet = CurrencyService.LoadWallet(
+                                connection,
+                                transaction,
+                                inventory.CharacterId);
+                            transaction.Commit();
+                        }
+                    }
+
+                    if (hasDirtyData)
+                        inventory.ClearDirtyState();
+                }
+
+                return wallet != null;
+            }
+            catch (Exception ex)
+            {
+                wallet = null;
+                FileLogger.Log($"[InventoryPersistence] SaveDirtyAndLoadWallet failed cid={lease.CharacterId} aid={lease.AccountId}: {ex.Message}");
+                return false;
+            }
+        }
+
         internal static bool SaveDirtyInTransaction(
             SqliteConnection connection,
             SqliteTransaction transaction,
@@ -112,6 +158,7 @@ namespace DfoServer.Game.Inventory
             SaveDirtyCollectBox(connection, transaction, inventory);
             SaveDirtyMainVirtualCounts(connection, transaction, inventory);
             SaveDirtyContainerStates(connection, transaction, inventory);
+            SavePendingAccountCurrencyGrants(connection, transaction, inventory);
             return true;
         }
 
@@ -232,6 +279,8 @@ namespace DfoServer.Game.Inventory
 
         private static bool HasDirtyData(InventoryService inventory)
         {
+            if (inventory.PendingHappyTokenCeraGrant > 0)
+                return true;
             if (inventory.DirtyMainVirtualCountSlots.Count > 0 || inventory.DirtyListParams.Count > 0)
                 return true;
             if (inventory.AvatarDetails.DirtyDetailUids.Count > 0
@@ -252,6 +301,21 @@ namespace DfoServer.Game.Inventory
                 return true;
 
             return false;
+        }
+
+        private static void SavePendingAccountCurrencyGrants(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            InventoryService inventory)
+        {
+            if (inventory.PendingHappyTokenCeraGrant <= 0)
+                return;
+
+            CurrencyService.GrantHappyTokenCera(
+                connection,
+                transaction,
+                inventory.CharacterId,
+                inventory.PendingHappyTokenCeraGrant);
         }
 
         private static void SaveDirtyItems(
