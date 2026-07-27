@@ -32,12 +32,8 @@ namespace DfoServer.Game.Mailbox
             if (rewards.Count == 0)
                 return true;
 
-            var attachments = new List<MailboxSendAttachmentRequest>();
-            foreach (var reward in rewards)
-            {
-                if (!TryAddAttachments(reward, attachments))
-                    return Fail(result);
-            }
+            if (!TryBuildAttachmentRequests(rewards, out var attachments))
+                return Fail(result);
 
             if (attachments.Count == 0)
                 return true;
@@ -51,6 +47,23 @@ namespace DfoServer.Game.Mailbox
             }
 
             FileLogger.Log($"[InventoryOverflow] delivered rewards to mailbox cid={inventory.CharacterId} attachments={attachments.Count}");
+            return true;
+        }
+
+        internal static bool TryBuildAttachmentRequests(
+            IReadOnlyList<InventoryRewardGrantRequest> rewards,
+            out List<MailboxSendAttachmentRequest> attachments)
+        {
+            attachments = new List<MailboxSendAttachmentRequest>();
+            if (rewards == null)
+                return false;
+
+            foreach (var reward in rewards)
+            {
+                if (!TryAddAttachments(reward, attachments))
+                    return false;
+            }
+
             return true;
         }
 
@@ -68,7 +81,11 @@ namespace DfoServer.Game.Mailbox
                 if (core == null || core.ItemId <= 0)
                     return false;
 
-                attachments.Add(CreateAttachment(core, count, reward.CreateOptions));
+                if (InventoryStackRuleService.IsStackable(core))
+                    return TryAddStackableAttachments(core, count, reward.CreateOptions, attachments);
+
+                for (var index = 0; index < count; index++)
+                    attachments.Add(CreateAttachment(core, 1, reward.CreateOptions));
                 return true;
             }
 
@@ -76,11 +93,7 @@ namespace DfoServer.Game.Mailbox
                 return false;
 
             if (InventoryStackRuleService.IsStackable(sample))
-            {
-                sample.Count = count;
-                attachments.Add(CreateAttachment(sample, count, reward.CreateOptions));
-                return true;
-            }
+                return TryAddStackableAttachments(sample, count, reward.CreateOptions, attachments);
 
             attachments.Add(CreateAttachment(sample, 1, reward.CreateOptions));
             for (var index = 1; index < count; index++)
@@ -89,6 +102,37 @@ namespace DfoServer.Game.Mailbox
                     return false;
 
                 attachments.Add(CreateAttachment(core, 1, reward.CreateOptions));
+            }
+
+            return true;
+        }
+
+        private static bool TryAddStackableAttachments(
+            ItemCore sample,
+            int count,
+            InventoryCreateOptions options,
+            List<MailboxSendAttachmentRequest> attachments)
+        {
+            if (sample == null || attachments == null || count <= 0)
+                return false;
+            if (!InventoryStackRuleService.TryGetStackLimit(sample, out var stackLimit))
+                return false;
+
+            if (stackLimit == int.MaxValue)
+            {
+                attachments.Add(CreateAttachment(sample, count, options));
+                return true;
+            }
+
+            if (stackLimit <= 0)
+                return false;
+
+            var remaining = count;
+            while (remaining > 0)
+            {
+                var chunk = Math.Min(remaining, stackLimit);
+                attachments.Add(CreateAttachment(sample, chunk, options));
+                remaining -= chunk;
             }
 
             return true;

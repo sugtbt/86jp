@@ -1,5 +1,6 @@
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Mailbox;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Handlers;
 using DfoServer.Sqlite;
@@ -34,6 +35,7 @@ namespace DfoServer.SelfTests
             TestItemCorePolicy();
             TestDetailCodec();
             TestListBatching();
+            TestOverflowAttachmentSplitting();
             TestSenderHardDeleteMigration();
 
             var dbPath = Path.Combine(
@@ -295,6 +297,67 @@ namespace DfoServer.SelfTests
                 legacyAvatar != null
                 && legacyAvatar.ItemKind == ItemCore.KindAvatar
                 && legacyAvatar.AbilityNo == 4);
+        }
+
+        private static void TestOverflowAttachmentSplitting()
+        {
+            var stackLimitOneItemId = FindStackLimitOneStackableItemId();
+            if (stackLimitOneItemId <= 0)
+            {
+                Check("find stack-limit-one stackable fixture", false);
+                return;
+            }
+
+            var createRequest = InventoryRewardGrantRequest.Create(
+                stackLimitOneItemId,
+                2,
+                ItemCreateReason.Unknown);
+            Check("overflow mail splits created stack-limit-one item into separate attachments",
+                MailboxInventoryOverflowRewardSink.TryBuildAttachmentRequests(
+                    new[] { createRequest },
+                    out var createdAttachments)
+                && createdAttachments.Count == 2
+                && createdAttachments.All(attachment =>
+                    attachment.ItemId == stackLimitOneItemId
+                    && attachment.ItemCount == 1
+                    && ItemCore.FromBytes(attachment.ItemCoreData)?.Count == 1));
+
+            var existingCore = ItemCore.Create(ItemCore.KindConsumable, stackLimitOneItemId);
+            existingCore.Count = 2;
+            var existingRequest = InventoryRewardGrantRequest.Existing(
+                existingCore,
+                2,
+                ItemCreateReason.Unknown);
+            Check("overflow mail splits existing stack-limit-one ItemCore into separate attachments",
+                MailboxInventoryOverflowRewardSink.TryBuildAttachmentRequests(
+                    new[] { existingRequest },
+                    out var existingAttachments)
+                && existingAttachments.Count == 2
+                && existingAttachments.All(attachment =>
+                    attachment.ItemId == stackLimitOneItemId
+                    && attachment.ItemCount == 1
+                    && ItemCore.FromBytes(attachment.ItemCoreData)?.Count == 1));
+        }
+
+        private static int FindStackLimitOneStackableItemId()
+        {
+            var list = PvfLib.LstFile.Parse(PvfArchiveAccessor.ReadText("stackable/stackable.lst"));
+            foreach (var entry in list.Entries)
+            {
+                try
+                {
+                    var metadata = ItemMetadataResolver.Resolve(entry.Id);
+                    if (metadata != null
+                        && metadata.IsStackable
+                        && metadata.StackLimit == 1)
+                        return entry.Id;
+                }
+                catch
+                {
+                }
+            }
+
+            return 0;
         }
 
         private static void TestSenderHardDeleteMigration()
