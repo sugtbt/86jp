@@ -4,6 +4,7 @@ using DfoServer.Game.Appearance;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Settings;
 using DfoServer.Infrastructure;
+using DfoServer.Network.Builders;
 
 namespace DfoServer.Network.Handlers
 {
@@ -11,14 +12,20 @@ namespace DfoServer.Network.Handlers
     {
         private readonly AccountSettingsRepository _repo;
         private readonly ICharacterStateRepository _characterStateRepository;
+        private readonly SqliteSubtype0FieldsRepository _subtype0FieldsRepository;
+        private readonly CharacterVisibilitySettingsPersistence _visibilityPersistence;
+        private readonly Game.Session.ISessionDirectory _sessions;
 
-        public SettingsHandler()
+        public SettingsHandler(Game.Session.ISessionDirectory sessions = null)
         {
             _repo = new AccountSettingsRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             _characterStateRepository = new SqliteCharacterStateRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
+            _subtype0FieldsRepository = new SqliteSubtype0FieldsRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
+            _visibilityPersistence = new CharacterVisibilitySettingsPersistence(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
+            _sessions = sessions;
         }
 
-        public void Handle_SAVE_GAME_OPTION_1(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        public async Task Handle_SAVE_GAME_OPTION_1(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             if (body == null || body.Length < 4) return;
             int len = BitConverter.ToInt32(body, 0);
@@ -27,9 +34,49 @@ namespace DfoServer.Network.Handlers
             var blob = new byte[len];
             Buffer.BlockCopy(body, 4, blob, 0, len);
 
-            var accountId = session.Account?.AccountId ?? 1;
-            _repo.SaveMainOption(accountId, blob);
-            FileLogger.Log($"[GameProtocol] SAVE_GAME_OPTION_1: account={accountId} len={len}");
+            var (characterId, accountId) = SessionOwnerResolver.Resolve(session);
+
+            var visibilityChanged = false;
+            if (characterId > 0)
+            {
+                var tail = session?.Player?.Subtype0Tail ?? _subtype0FieldsRepository.Load(characterId);
+                if (tail != null && AccountSettings.TryApplyCharacterVisibilityOptions(
+                    blob,
+                    tail.UserStateBits,
+                    out var updatedBits))
+                {
+                    _visibilityPersistence.Save(accountId, characterId, blob, updatedBits);
+                    visibilityChanged = updatedBits != tail.UserStateBits;
+                    tail.UserStateBits = updatedBits;
+                    if (visibilityChanged && session?.Player != null)
+                    {
+                        session.Player.Subtype0Tail = tail;
+                        var packet = GamePacketEnvelopeBuilder.Build(
+                            0x00,
+                            (ushort)NotiPacketType.CHARAC_INVISIBLE_FALGS,
+                            CharacterVisibilityBodyBuilder.Build(session.Player.UserId, updatedBits));
+                        await session.SendPacketAsync(packet);
+                        if (_sessions != null && session.Player.CurrentRun == null)
+                        {
+                            await _sessions.BroadcastToAreaAsync(
+                                session.Player.CurTownId,
+                                session.Player.CurAreaId,
+                                characterId,
+                                packet);
+                        }
+                    }
+                }
+                else
+                {
+                    _repo.SaveMainOption(accountId, blob);
+                }
+            }
+            else
+            {
+                _repo.SaveMainOption(accountId, blob);
+            }
+
+            FileLogger.Log($"[GameProtocol] SAVE_GAME_OPTION_1: character={characterId} account={accountId} len={len} visibilityChanged={visibilityChanged}");
         }
 
         public void Handle_SAVE_GAME_OPTION_2(EnhancedClientSession session, GamePacketHeader header, byte[] body)
