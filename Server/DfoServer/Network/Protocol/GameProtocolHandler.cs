@@ -139,7 +139,7 @@ namespace DfoServer.Network
                 sessionDirectory);
             _secretShopHandler = new SecretShopHandler(_inventoryRefreshSender);
             _staminaHandler = new StaminaHandler(_inventoryRefreshSender);
-            _settingsHandler = new SettingsHandler();
+            _settingsHandler = new SettingsHandler(sessionDirectory);
             _ceraShopHandler = new CeraShopHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
             _skillHandler = new SkillHandler(characterRepository, _inventoryRefreshSender);
             _luckyStarHandler = new LuckyStarHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
@@ -458,7 +458,7 @@ namespace DfoServer.Network
 
         private void RegisterSettingsHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
-            d[0x00C5] = (s, h, b) => { _settingsHandler.Handle_SAVE_GAME_OPTION_1(s, h, b); return Task.CompletedTask; };
+            d[0x00C5] = _settingsHandler.Handle_SAVE_GAME_OPTION_1;
             d[0x00C6] = (s, h, b) => { _settingsHandler.Handle_SAVE_GAME_OPTION_2(s, h, b); return Task.CompletedTask; };
             d[0x0170] = (s, h, b) => { _settingsHandler.Handle_SAVE_QUICKCHAT(s, h, b); return Task.CompletedTask; };
             d[0x00FE] = _settingsHandler.Handle_CHANGE_EMOTION;
