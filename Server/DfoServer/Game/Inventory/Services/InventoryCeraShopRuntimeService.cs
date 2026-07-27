@@ -51,6 +51,8 @@ namespace DfoServer.Game.Inventory
             int buyCount,
             int paymentMode,
             byte attributeValue,
+            int purchaseCouponId,
+            short purchaseCouponSlot,
             CeraShopPurchaseOptions purchaseOptions,
             out InventoryMutationResult result,
             out bool handled)
@@ -123,6 +125,20 @@ namespace DfoServer.Game.Inventory
             else if (paymentMode != 0)
             {
                 return false;
+            }
+
+            if (purchaseCouponId > 0)
+            {
+                if (paymentMode != 0
+                    || purchaseCouponSlot < 0
+                    || !IsPurchaseCoupon(purchaseCouponId)
+                    || !inventory.TryGetItem(InventoryListType.Main, purchaseCouponSlot, out var couponItem)
+                    || couponItem == null
+                    || couponItem.ItemId != purchaseCouponId
+                    || couponItem.Count <= 0)
+                    return false;
+
+                couponId = purchaseCouponId;
             }
 
             if (!CanSpendInventoryCosts(inventory, totalGoldCost, couponId))
@@ -198,6 +214,24 @@ namespace DfoServer.Game.Inventory
                 purchaseOptions,
                 avatarDurationDays,
                 out result);
+        }
+
+        internal static bool IsPurchaseCoupon(int itemTemplateId)
+        {
+            if (itemTemplateId <= 0)
+                return false;
+
+            try
+            {
+                var metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+                return metadata != null
+                    && metadata.IsStackable
+                    && metadata.IsPrimaryStackableFamily("coupon");
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static bool TryBuySkillTreeExpansion(

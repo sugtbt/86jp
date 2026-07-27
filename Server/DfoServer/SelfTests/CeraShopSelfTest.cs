@@ -4,6 +4,7 @@ using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Shop;
 using DfoServer.Infrastructure;
+using DfoServer.Network.Parsers.CeraShop;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
@@ -58,10 +59,51 @@ namespace DfoServer.SelfTests
             CheckProduct("社区礼包(结婚戒指-男)", 102317, 2683326, 18888);
 
             Check("name tag state overwrites same character and keeps absolute expire time", CheckNameTagState());
+            Check("coupon purchase packet parses coupon item and slot", CheckCouponPurchasePacket());
+            Check("package purchase parses trailing coupon after component list", CheckPackageCouponPurchasePacket());
+            Check("PVF coupon type is accepted", InventoryCeraShopRuntimeService.IsPurchaseCoupon(10007350));
+            Check("ordinary item is rejected as coupon", !InventoryCeraShopRuntimeService.IsPurchaseCoupon(10000006));
             Check("happy-token gift box grants account currency atomically without an inventory item", CheckHappyTokenCeraGiftBox());
 
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;
+        }
+
+        private static bool CheckCouponPurchasePacket()
+        {
+            var body = new byte[]
+            {
+                0x00, 0x00, 0x01, 0x01, 0x00, 0xFF, 0xFF,
+                0x3E, 0x9B, 0x01, 0x00, 0x00, 0x00,
+                0xA5, 0xB4, 0x98, 0x00, 0x6D, 0x00,
+            };
+
+            return CeraShopPurchaseRequest.TryParse(body, out var request)
+                && request.ProductId == 105278
+                && request.CouponSelected
+                && request.CouponItemId == 10007717
+                && request.CouponSlot == 109;
+        }
+
+        private static bool CheckPackageCouponPurchasePacket()
+        {
+            var body = new byte[]
+            {
+                0x00, 0x00, 0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00,
+                0x9B, 0x01, 0x00, 0x09, 0xFD, 0x89, 0x0D, 0x06,
+                0x00, 0xAA, 0xB1, 0x0D, 0x06, 0x01, 0xC2, 0xD7,
+                0x0D, 0x06, 0x01, 0xBA, 0x14, 0x0D, 0x06, 0x00,
+                0x5F, 0xC7, 0x0C, 0x06, 0x07, 0x13, 0xEF, 0x0C,
+                0x06, 0x01, 0x4A, 0x63, 0x0D, 0x06, 0x01, 0x9B,
+                0x3B, 0x0D, 0x06, 0x01, 0x82, 0xFD, 0x0D, 0x06,
+                0x00, 0x00, 0x36, 0xB3, 0x98, 0x00, 0x44, 0x00,
+            };
+
+            return CeraShopPurchaseRequest.TryParse(body, out var request)
+                && request.ProductId == 105216
+                && request.CouponSelected
+                && request.CouponItemId == 10007350
+                && request.CouponSlot == 68;
         }
 
         private static bool CheckNameTagState()

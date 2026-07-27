@@ -14,6 +14,12 @@ namespace DfoServer.Network.Parsers.CeraShop
 
         public byte PaymentMode { get; private set; }
 
+        public bool CouponSelected { get; private set; }
+
+        public int CouponItemId { get; private set; }
+
+        public short CouponSlot { get; private set; } = -1;
+
         public int ProductId => CommodityNos.Count > 0 ? CommodityNos[0] : 0;
 
         public int ItemTemplateId => ProductId;
@@ -34,7 +40,11 @@ namespace DfoServer.Network.Parsers.CeraShop
             if (totalCount <= 0)
                 totalCount = 1;
 
-            var parsed = new CeraShopPurchaseRequest { PaymentMode = body[4] };
+            var parsed = new CeraShopPurchaseRequest
+            {
+                CouponSelected = body[3] != 0,
+                PaymentMode = body[4],
+            };
             for (var i = 0; i < totalCount; i++)
             {
                 var itemBase = HeaderSize + i * ItemStride;
@@ -55,6 +65,20 @@ namespace DfoServer.Network.Parsers.CeraShop
 
             if (parsed.CommodityNos.Count == 0)
                 return false;
+
+            if (parsed.CouponSelected)
+            {
+                // Package purchases may append a variable-length component list.
+                // The selected coupon tuple is always the final itemId(U32)+slot(U16).
+                var couponOffset = body.Length - 6;
+                if (couponOffset < 0 || couponOffset + 6 > body.Length)
+                    return false;
+
+                parsed.CouponItemId = BitConverter.ToInt32(body, couponOffset);
+                parsed.CouponSlot = BitConverter.ToInt16(body, couponOffset + 4);
+                if (parsed.CouponItemId <= 0 || parsed.CouponSlot < 0)
+                    return false;
+            }
 
             request = parsed;
             return true;
