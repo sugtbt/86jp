@@ -645,7 +645,8 @@ namespace PvfLib
                         if (sz.Length >= 2) { maze.Width = sz[0]; maze.Height = sz[1]; }
                         break;
                     case "greed":
-                        maze.Greed = StripBacktick(data);
+                        maze.Greed = StripBacktick(
+                            ReadAllDataItems(node, text));
                         break;
                     case "map specification":
                         maze.MapSpecification = string.IsNullOrEmpty(maze.MapSpecification)
@@ -902,6 +903,24 @@ namespace PvfLib
         #endregion
 
         #region 辅助
+
+        private static string ReadAllDataItems(
+            ScriptNode node,
+            string text)
+        {
+            if (node?.DataItems == null || node.DataItems.Count == 0)
+                return string.Empty;
+
+            var parts = new List<string>(node.DataItems.Count);
+            foreach (var item in node.DataItems)
+            {
+                var value = item?.GetContent(text)?.Trim();
+                if (!string.IsNullOrWhiteSpace(value))
+                    parts.Add(value);
+            }
+
+            return string.Join(" ", parts);
+        }
 
         private static string ReadRawNodeData(ScriptNode node, string text, string data)
         {
