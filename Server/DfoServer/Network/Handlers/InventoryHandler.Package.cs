@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Quests;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Inventory;
 using System;
@@ -116,6 +117,7 @@ namespace DfoServer.Network.Handlers
             byte[] body)
         {
             const string FirstAwakenClearAction = "[first awaken clear]";
+            const string AnyQuestClearAction = "[any quest clear]";
 
             if (body == null || body.Length < 3 || session?.GameSession?.QuestManager == null)
             {
@@ -135,14 +137,18 @@ namespace DfoServer.Network.Handlers
             }
 
             int itemTemplateId;
+            string itemAction;
+            IReadOnlyCollection<int> actionQuestIds;
             lock (lease.SyncRoot)
             {
                 var source = lease.Inventory.GetItem(listType, slotIndex);
                 itemTemplateId = source?.ItemId ?? 0;
                 var stackable = source != null ? StackableItemProvider.Load(source.ItemId) : null;
-                var action = InventoryPackageRewardResolver.NormalizeStackableType(
+                itemAction = InventoryPackageRewardResolver.NormalizeStackableType(
                     stackable?.ActionTypeName);
-                if (!action.Equals(FirstAwakenClearAction, StringComparison.OrdinalIgnoreCase))
+                actionQuestIds = stackable?.ActionTypeParams?.ToArray() ?? Array.Empty<int>();
+                if (!itemAction.Equals(FirstAwakenClearAction, StringComparison.OrdinalIgnoreCase)
+                    && !itemAction.Equals(AnyQuestClearAction, StringComparison.OrdinalIgnoreCase))
                     itemTemplateId = 0;
             }
 
@@ -156,15 +162,33 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var awakeningResult = session.GameSession.QuestManager.TryClearFirstAwakeningQuests();
-            if (!awakeningResult.Success)
+            QuestActionClearResult questActionResult = null;
+            FirstAwakeningClearResult awakeningResult = null;
+            if (itemAction.Equals(AnyQuestClearAction, StringComparison.OrdinalIgnoreCase))
             {
-                FileLogger.Log(
-                    $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken rejected: " +
-                    $"cid={characterId} item={itemTemplateId} reason={awakeningResult.Error}");
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                    0x01, header.type, new byte[] { 0x00, 0x16 }));
-                return;
+                questActionResult = session.GameSession.QuestManager.TryClearQuestsFromAction(actionQuestIds);
+                if (!questActionResult.Success)
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] USE_STACKABLE_ACTION any-quest-clear rejected: " +
+                        $"cid={characterId} item={itemTemplateId} reason={questActionResult.Error}");
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x01, header.type, new byte[] { 0x00, 0x16 }));
+                    return;
+                }
+            }
+            else
+            {
+                awakeningResult = session.GameSession.QuestManager.TryClearFirstAwakeningQuests();
+                if (!awakeningResult.Success)
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken rejected: " +
+                        $"cid={characterId} item={itemTemplateId} reason={awakeningResult.Error}");
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x01, header.type, new byte[] { 0x00, 0x16 }));
+                    return;
+                }
             }
 
             InventoryMutationResult consumeResult;
@@ -184,8 +208,8 @@ namespace DfoServer.Network.Handlers
             if (!consumed)
             {
                 FileLogger.Log(
-                    $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken item consume failed after quest update: " +
-                    $"cid={characterId} item={itemTemplateId} slot={slotIndex}");
+                    $"[{ProtocolName}] USE_STACKABLE_ACTION {itemAction} item consume failed after quest update: " +
+                    $"cid={characterId} item={itemTemplateId} listType={listType} slot={slotIndex}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01, header.type, new byte[] { 0x00, 0x16 }));
                 return;
@@ -194,12 +218,24 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x01, header.type, CommonPacketBodyBuilder.BuildSuccessAck()));
             await _refresh.SendUpdateItemList(session, listType, slotIndex);
-            await session.GameSession.QuestManager.NotifyFirstAwakeningClearAsync();
-
-            FileLogger.Log(
-                $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken OK: cid={characterId} " +
-                $"item={itemTemplateId} slot={slotIndex} quests={awakeningResult.ClearedQuestIds.Count} " +
-                $"awakening={awakeningResult.AwakeningGrowNumber}");
+            if (questActionResult != null)
+            {
+                await session.GameSession.QuestManager.NotifyQuestActionClearAsync(
+                    questActionResult.ExpandedEquipmentSlotIds.Count > 0);
+                FileLogger.Log(
+                    $"[{ProtocolName}] USE_STACKABLE_ACTION any-quest-clear OK: cid={characterId} " +
+                    $"item={itemTemplateId} slot={slotIndex} " +
+                    $"quests={string.Join(",", questActionResult.ClearedQuestIds)} " +
+                    $"expandedSlots={string.Join(",", questActionResult.ExpandedEquipmentSlotIds)}");
+            }
+            else
+            {
+                await session.GameSession.QuestManager.NotifyFirstAwakeningClearAsync();
+                FileLogger.Log(
+                    $"[{ProtocolName}] USE_STACKABLE_ACTION first-awaken OK: cid={characterId} " +
+                    $"item={itemTemplateId} slot={slotIndex} quests={awakeningResult.ClearedQuestIds.Count} " +
+                    $"awakening={awakeningResult.AwakeningGrowNumber}");
+            }
         }
 
         public async Task Handle_ADD_EQUIPMENT_EFFECT(EnhancedClientSession session, GamePacketHeader header, byte[] body)

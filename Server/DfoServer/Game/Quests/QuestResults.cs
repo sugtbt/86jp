@@ -4,6 +4,27 @@ using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.Quests
 {
+    internal sealed class QuestActionClearResult
+    {
+        public bool Success { get; private set; }
+        public string Error { get; private set; }
+        public IReadOnlyList<ushort> ClearedQuestIds { get; private set; } = Array.Empty<ushort>();
+        public IReadOnlyList<int> ExpandedEquipmentSlotIds { get; private set; } = Array.Empty<int>();
+
+        public static QuestActionClearResult Fail(string error)
+            => new QuestActionClearResult { Error = error ?? "failed" };
+
+        public static QuestActionClearResult Ok(
+            IReadOnlyList<ushort> questIds,
+            IReadOnlyList<int> expandedEquipmentSlotIds)
+            => new QuestActionClearResult
+            {
+                Success = true,
+                ClearedQuestIds = questIds ?? Array.Empty<ushort>(),
+                ExpandedEquipmentSlotIds = expandedEquipmentSlotIds ?? Array.Empty<int>(),
+            };
+    }
+
     internal sealed class FirstAwakeningClearResult
     {
         public bool Success { get; private set; }

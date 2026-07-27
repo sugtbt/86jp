@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
 using Microsoft.Data.Sqlite;
@@ -1045,6 +1046,93 @@ namespace DfoServer.Game.Quests
                         $"grow=0x{growType:X2}->0x{((awakeningGrowNumber << 4) | firstGrow):X2} " +
                         $"quests={questIds.Count}");
                     return FirstAwakeningClearResult.Ok(questIds, awakeningGrowNumber);
+                }
+            }
+        }
+
+        internal QuestActionClearResult TryClearQuestsFromAction(
+            int characterId,
+            IReadOnlyCollection<int> requestedQuestIds)
+        {
+            if (characterId <= 0)
+                return QuestActionClearResult.Fail("invalid character");
+            if (requestedQuestIds == null || requestedQuestIds.Count == 0)
+                return QuestActionClearResult.Fail("quest list is empty");
+
+            var questIds = requestedQuestIds
+                .Where(id => id > 0 && id <= ushort.MaxValue)
+                .Select(id => (ushort)id)
+                .Distinct()
+                .ToList();
+            if (questIds.Count == 0)
+                return QuestActionClearResult.Fail("quest list has no valid ids");
+
+            using (var conn = new SqliteConnection(_connStr))
+            {
+                conn.Open();
+                using (var tx = conn.BeginTransaction())
+                {
+                    int job;
+                    int level;
+                    byte growType;
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.Transaction = tx;
+                        cmd.CommandText = "SELECT job, level, grow_type FROM characters WHERE character_id=@cid";
+                        cmd.Parameters.AddWithValue("@cid", characterId);
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (!reader.Read())
+                                return QuestActionClearResult.Fail("character not found");
+
+                            job = reader.GetInt32(0);
+                            level = reader.GetInt32(1);
+                            growType = (byte)reader.GetInt32(2);
+                        }
+                    }
+
+                    var newlyCleared = new List<ushort>();
+                    var expandedSlotIds = new List<int>();
+                    var questSet = new HashSet<ushort>(questIds);
+                    foreach (var active in QuestRepository.LoadActiveQuests(conn, tx, characterId))
+                    {
+                        if (questSet.Contains(active.QuestId))
+                            QuestRepository.DeleteActiveQuest(conn, tx, characterId, active.Slot);
+                    }
+
+                    foreach (var questId in questIds)
+                    {
+                        if (!QuestRepository.IsQuestCleared(conn, tx, characterId, questId))
+                        {
+                            QuestRepository.MarkQuestCleared(conn, tx, characterId, questId);
+                            newlyCleared.Add(questId);
+                        }
+
+                        var reward = GameWorld.QuestData.GetRewardExp(
+                            questId,
+                            playerLevel: level,
+                            playerJob: job,
+                            playerGrowType: growType);
+                        if (reward.ChainType == GameWorld.QuestData.ChainTypeSlotExpansion
+                            && reward.GrowNumber >= 21
+                            && reward.GrowNumber <= 23)
+                        {
+                            UpdateSlotExpansion(conn, tx, characterId, reward.GrowNumber);
+                            if (!expandedSlotIds.Contains(reward.GrowNumber))
+                                expandedSlotIds.Add(reward.GrowNumber);
+                        }
+                    }
+
+                    if (newlyCleared.Count == 0)
+                        return QuestActionClearResult.Fail("all target quests already cleared");
+
+                    SyncQuestClearParentProgress(conn, tx, characterId);
+                    tx.Commit();
+
+                    FileLogger.Log(
+                        $"[QuestService] ACTION_QUEST_CLEAR: cid={characterId} " +
+                        $"quests={string.Join(",", newlyCleared)} slots={string.Join(",", expandedSlotIds)}");
+                    return QuestActionClearResult.Ok(newlyCleared, expandedSlotIds);
                 }
             }
         }

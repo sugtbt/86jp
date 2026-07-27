@@ -255,6 +255,26 @@ namespace DfoServer.Game.Quests
             await SendAcceptableQuestListAsync();
         }
 
+        internal QuestActionClearResult TryClearQuestsFromAction(IReadOnlyCollection<int> questIds)
+        {
+            int cid = _sender.CharacterId;
+            return cid > 0
+                ? _service.TryClearQuestsFromAction(cid, questIds)
+                : QuestActionClearResult.Fail("character not selected");
+        }
+
+        internal async Task NotifyQuestActionClearAsync(bool equipmentSlotExpanded)
+        {
+            int cid = _sender.CharacterId;
+            if (cid <= 0)
+                return;
+
+            if (equipmentSlotExpanded)
+                await SendUserInfoBroadcast(cid);
+            await SendActiveQuestListAsync();
+            await SendAcceptableQuestListAsync();
+        }
+
         public async Task SyncMonsterRewardItemProgressAsync(ICollection<int> itemFilter)
         {
             await SyncItemSeekingQuestProgressAsync(itemFilter);

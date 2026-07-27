@@ -13,6 +13,7 @@ namespace DfoServer.SelfTests
     {
         private const int CharacterId = 169001;
         private const int AccountId = 169001;
+        private const int TicketCharacterId = 169002;
         private const ushort SupportSlotQuestId = 649;
         private const ushort MagicStoneQuestId = 650;
 
@@ -38,6 +39,15 @@ namespace DfoServer.SelfTests
                 GrowType = 0,
                 Level = 65,
             });
+            characterRepository.Create(new CharacterRecord
+            {
+                CharacterId = TicketCharacterId,
+                AccountId = AccountId,
+                Name = Encoding.UTF8.GetBytes("slot-ticket-test"),
+                Job = 0,
+                GrowType = 0,
+                Level = 1,
+            });
 
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
@@ -61,6 +71,23 @@ namespace DfoServer.SelfTests
                     && magicSlotId == 22,
                 ref failures);
             Check("support + magic stone flags persisted", LoadExEquipSlotStat(dbPath) == 0x03, ref failures);
+
+            var ticketResult = questService.TryClearQuestsFromAction(
+                TicketCharacterId,
+                new[] { 674, 649 });
+            Check("support equipment quest ticket succeeds", ticketResult.Success, ref failures);
+            Check("ticket clears both PVF action quests",
+                ticketResult.Success
+                    && ticketResult.ClearedQuestIds.Count == 2
+                    && new QuestRepository(connStr).IsQuestCleared(TicketCharacterId, 674)
+                    && new QuestRepository(connStr).IsQuestCleared(TicketCharacterId, 649),
+                ref failures);
+            Check("ticket unlocks support equipment slot",
+                LoadExEquipSlotStat(dbPath, TicketCharacterId) == 0x01,
+                ref failures);
+            Check("ticket cannot be consumed again when all targets are clear",
+                !questService.TryClearQuestsFromAction(TicketCharacterId, new[] { 674, 649 }).Success,
+                ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
@@ -103,6 +130,9 @@ VALUES (@aid, @mid, '');";
         }
 
         private static int LoadExEquipSlotStat(string dbPath)
+            => LoadExEquipSlotStat(dbPath, CharacterId);
+
+        private static int LoadExEquipSlotStat(string dbPath, int characterId)
         {
             using (var conn = new SqliteConnection(SqliteDatabaseBootstrap.BuildConnectionString(dbPath)))
             {
@@ -110,7 +140,7 @@ VALUES (@aid, @mid, '');";
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = "SELECT ex_equip_slot_stat FROM characters WHERE character_id=@cid;";
-                    cmd.Parameters.AddWithValue("@cid", CharacterId);
+                    cmd.Parameters.AddWithValue("@cid", characterId);
                     return Convert.ToInt32(cmd.ExecuteScalar());
                 }
             }
