@@ -16,6 +16,9 @@ namespace DfoServer.SelfTests
 
         private static readonly int[] AvatarCandidates =
         {
+            401500167,
+            40819,
+            41540,
             108550662,
             108560645,
             108570739,

@@ -53,6 +53,59 @@ namespace DfoServer.Game.Mailbox
             return string.Empty;
         }
 
+        internal static string Capture(ItemCore core, InventoryCreateOptions options)
+        {
+            if (core == null || options == null)
+                return string.Empty;
+
+            if (core.ItemKind == ItemCore.KindAvatar
+                && (options.AvatarDetailTemplate != null || options.ExpireTime > 0))
+            {
+                var template = options.AvatarDetailTemplate;
+                return JsonSerializer.Serialize(new DetailEnvelope
+                {
+                    Kind = "avatar",
+                    Avatar = new AvatarPayload
+                    {
+                        ExpireDate = options.ExpireTime > 0
+                            ? options.ExpireTime
+                            : (template?.ExpireDate ?? 0),
+                        ClearAvatarId = template?.ClearAvatarId ?? 0,
+                        JewelSocket = template?.JewelSocket ?? Array.Empty<byte>(),
+                        Color1 = template?.Color1 ?? 0,
+                        Color2 = template?.Color2 ?? 0,
+                        DeleteDate = template?.DeleteDate ?? 0,
+                    }
+                });
+            }
+
+            if (core.ItemKind == ItemCore.KindCreature
+                && (options.CreatureDetailTemplate != null || options.ExpireTime > 0))
+            {
+                var template = options.CreatureDetailTemplate;
+                return JsonSerializer.Serialize(new DetailEnvelope
+                {
+                    Kind = "creature",
+                    Creature = new CreaturePayload
+                    {
+                        NameBytes = template?.NameBytes ?? Array.Empty<byte>(),
+                        Field04 = template?.Field04 ?? 100,
+                        ModeFlag = template?.ModeFlag ?? 0,
+                        Mode1Field0A = template?.Mode1Field0A ?? 0,
+                        Mode1Field0B = template?.Mode1Field0B ?? 0,
+                        ProgressValue32 = template?.ProgressValue32 ?? 0,
+                        FieldAfterValue32 = template?.FieldAfterValue32 ?? 1,
+                        ExpireDate = options.ExpireTime > 0
+                            ? options.ExpireTime
+                            : (template?.ExpireDate ?? 0),
+                        TailFlag = template?.TailFlag ?? 0,
+                    }
+                });
+            }
+
+            return string.Empty;
+        }
+
         internal static InventoryCreateOptions BuildCreateOptions(string detailJson)
         {
             if (string.IsNullOrWhiteSpace(detailJson))

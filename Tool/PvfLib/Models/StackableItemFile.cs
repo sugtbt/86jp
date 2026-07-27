@@ -87,6 +87,14 @@ namespace PvfLib
         public List<int> Values { get; set; } = new List<int>();
     }
 
+    public sealed class AvatarSelectAbilityChangeEntry
+    {
+        public string SourceScope { get; set; }
+        public string TargetScope { get; set; }
+        public int AvatarGrade { get; set; } = -1;
+        public int Param { get; set; } = -1;
+    }
+
     public sealed class EquipmentLevelEmancipateProbability
     {
         public int MaximumLevel { get; set; }
@@ -133,6 +141,8 @@ namespace PvfLib
         public List<string> AvatarEmblemTargetTypes { get; set; } = new List<string>();
         // [usable equip type] 限定可作用的装备部位, 例如品级调整箱按武器/防具/首饰分箱。空表示不限部位。
         public List<string> UsableEquipTypes { get; set; } = new List<string>();
+        public List<AvatarSelectAbilityChangeEntry> AvatarSelectAbilityChanges { get; set; } = new List<AvatarSelectAbilityChangeEntry>();
+        public bool HasAvatarSelectAbilityChange => AvatarSelectAbilityChanges.Count > 0;
         public byte AvatarEmblemSocketType { get; set; }
         public int SubType { get; set; } = -1;
         public string AttachType { get; set; }
@@ -275,6 +285,7 @@ namespace PvfLib
                         stk.AvatarEmblemSocketType = ResolveAvatarEmblemSocketType(stk.AvatarEmblemTargetTypes);
                         break;
                     case "usable equip type": stk.UsableEquipTypes = ParseStringList(node, content); break;
+                    case "avatar select ability change": stk.AvatarSelectAbilityChanges = ParseAvatarSelectAbilityChanges(node, content); break;
                     case "sub type": stk.SubType = ParseInt(data); break;
                     case "attach type": stk.AttachType = StripBacktick(data); break;
                     case "item group name": stk.ItemGroupName = StripBacktick(data); break;
@@ -888,6 +899,55 @@ namespace PvfLib
                 var fallback = StripBacktick(raw);
                 if (!string.IsNullOrWhiteSpace(fallback))
                     result.Add(fallback);
+            }
+
+            return result;
+        }
+
+        private static List<AvatarSelectAbilityChangeEntry> ParseAvatarSelectAbilityChanges(
+            ScriptNode node,
+            string content)
+        {
+            var result = new List<AvatarSelectAbilityChangeEntry>();
+            if (node == null || node.DataItems == null)
+                return result;
+
+            string pendingSourceScope = null;
+            foreach (var item in node.DataItems)
+            {
+                var raw = item.GetContent(content) ?? string.Empty;
+                var scopes = ParseBracketScopes(raw);
+                var values = ParseInts(raw);
+                if (values.Count == 0)
+                {
+                    if (scopes.Count > 0)
+                        pendingSourceScope = scopes[0];
+                    continue;
+                }
+
+                result.Add(new AvatarSelectAbilityChangeEntry
+                {
+                    SourceScope = scopes.Count > 1 ? scopes[0] : pendingSourceScope,
+                    TargetScope = scopes.Count > 1 ? scopes[1] : scopes.Count > 0 ? scopes[0] : null,
+                    AvatarGrade = values[0],
+                    Param = values.Count > 1 ? values[1] : -1,
+                });
+            }
+
+            return result;
+        }
+
+        private static List<string> ParseBracketScopes(string text)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(text))
+                return result;
+
+            foreach (Match match in Regex.Matches(text, "`?\\[(?<scope>[^\\]]+)\\]`?"))
+            {
+                var scope = match.Groups["scope"].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(scope))
+                    result.Add("[" + scope + "]");
             }
 
             return result;

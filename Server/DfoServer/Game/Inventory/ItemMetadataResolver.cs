@@ -1,4 +1,5 @@
 using DfoServer.GameWorld;
+using DfoServer.Game.ItemUpgrade;
 using PvfLib;
 using System;
 using System.Collections.Concurrent;
@@ -850,6 +851,13 @@ namespace DfoServer.Game.Inventory
 
         internal static bool IsAvatarItem(ItemMetadata metadata)
         {
+            var equipmentType = EquipmentTypeInfo.ParseOrUnknown(metadata?.EquipmentType);
+            if (equipmentType >= EquipmentType.HatAvatar
+                && equipmentType <= EquipmentType.WeaponAvatar)
+            {
+                return true;
+            }
+
             var path = metadata?.PvfFilePath;
             if (string.IsNullOrWhiteSpace(path))
                 return false;

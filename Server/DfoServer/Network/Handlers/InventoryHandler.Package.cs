@@ -1,5 +1,6 @@
 using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Mailbox;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Inventory;
 using System;
@@ -605,7 +606,7 @@ namespace DfoServer.Network.Handlers
                     lease.Inventory,
                     request,
                     ResolveCharacterJobLabel(characterId),
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -627,7 +628,7 @@ namespace DfoServer.Network.Handlers
                     lease.Inventory,
                     slotIndex,
                     selectedItemTemplateIds,
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -647,7 +648,7 @@ namespace DfoServer.Network.Handlers
                 return InventorySpecialConsumableService.TryOpenAvatarPackage(
                     lease.Inventory,
                     request,
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -667,7 +668,7 @@ namespace DfoServer.Network.Handlers
                 return InventorySpecialConsumableService.TryOpenSelectablePackage(
                     lease.Inventory,
                     request,
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -1273,19 +1274,20 @@ namespace DfoServer.Network.Handlers
 
             var respBody2 = w2.ToArray();
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x03EA, respBody2));
+            await _refresh.SendUpdateItemList(session, InventoryListType.Main, result.ConsumeSlot);
             FileLogger.Log($"  [CompoundAvatarSet] OK: consumed {consumeSlots.Length} avatar items + 1x slot {consumeStackableSlot}(template {result.ConsumedItemTemplateId}), abilityNo={option}, added item {result.NewItemIds[0]} at slot {result.NewSlots[0]}");
 
         }
 
         private static ushort ReadCompoundAvatarAbilityNo(byte[] body, int offset)
         {
-            if (body == null || body.Length < offset + 4)
+            if (body == null || body.Length < offset + 2)
                 return 0;
 
-            var value = BitConverter.ToInt32(body, offset);
+            var value = BitConverter.ToUInt16(body, offset);
             if (value <= 0)
                 return 0;
-            return value > ushort.MaxValue ? ushort.MaxValue : (ushort)value;
+            return value;
         }
 
         private static byte[] BuildCompoundAvatarErrorBody(bool includeTailByte)
