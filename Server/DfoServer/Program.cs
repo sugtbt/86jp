@@ -1,6 +1,7 @@
 using DfoServer.Network;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 
 namespace DfoServer
@@ -61,7 +62,8 @@ namespace DfoServer
             ("--selftest-udp-relay", SelfTests.UdpRelaySelfTest.Run),
             ("--selftest-growth-capsule", SelfTests.GrowthCapsuleSelfTest.Run),
             ("--selftest-crane-minigame", SelfTests.CraneMiniGameSelfTest.Run),
-        };
+            ("--selftest-mailbox", SelfTests.MailboxSelfTest.Run),
+          };
 
         // 顺序跑全部自测, 输出汇总表; 任一失败(或抛异常)退出码为 1。
         private static int RunAllSelfTests()
@@ -229,6 +231,11 @@ namespace DfoServer
             try
             {
                 GameWorld.PvfArchiveAccessor.ReadText("character/character.lst");
+                var itemMetadataWarmupTimer = Stopwatch.StartNew();
+                Game.Inventory.ItemMetadataResolver.Warmup();
+                itemMetadataWarmupTimer.Stop();
+                FileLogger.Log(
+                    $"[Startup] ITEM_METADATA_WARMUP totalMs={itemMetadataWarmupTimer.Elapsed.TotalMilliseconds:F3}");
                 Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();
                 Game.Mercenary.StrikerDefaultAvatarDataProvider.Warmup();

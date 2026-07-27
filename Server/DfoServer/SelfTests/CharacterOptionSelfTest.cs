@@ -107,6 +107,50 @@ namespace DfoServer.SelfTests
                 var snapshotWithMainOption = dataSource.Load(CharacterId, AccountId);
                 Check("main game option uses account settings", ByteEquals(snapshotWithMainOption.InitializationSnapshot.MainGameOptionBlob, mainOption));
 
+                WriteOption(mainOption, AccountSettings.FullAvatarOptionIndex, false);
+                WriteOption(mainOption, AccountSettings.VisibleGrowAvatarOptionIndex, false);
+                Check("hidden avatar options map visible bits 3 to 9",
+                    AccountSettings.TryApplyCharacterVisibilityOptions(mainOption, 3, out var hiddenBits)
+                    && hiddenBits == 9);
+                Check("avatar option mapping preserves unrelated bits",
+                    AccountSettings.TryApplyCharacterVisibilityOptions(mainOption, 0x73, out var preservedBits)
+                    && preservedBits == 0x79);
+
+                WriteOption(mainOption, AccountSettings.FullAvatarOptionIndex, true);
+                WriteOption(mainOption, AccountSettings.VisibleGrowAvatarOptionIndex, true);
+                Check("visible avatar options map visible bits 9 to 3",
+                    AccountSettings.TryApplyCharacterVisibilityOptions(mainOption, 9, out var visibleBits)
+                    && visibleBits == 3);
+
+                WriteOption(mainOption, AccountSettings.FullAvatarOptionIndex, false);
+                WriteOption(mainOption, AccountSettings.VisibleGrowAvatarOptionIndex, false);
+                var visibilityPersistence = new CharacterVisibilitySettingsPersistence(tempDb, ServerPaths.SchemaFilePath);
+                visibilityPersistence.Save(AccountId, CharacterId, mainOption, hiddenBits);
+                var subtypeRepo = new SqliteSubtype0FieldsRepository(tempDb, ServerPaths.SchemaFilePath);
+                Check("visibility settings persist account option and character bits atomically",
+                    ByteEquals(accountSettingsRepo.Load(AccountId)?.MainGameOption, mainOption)
+                    && subtypeRepo.Load(CharacterId)?.UserStateBits == 9);
+
+                var rejectedOption = CopyBytes(mainOption);
+                WriteOption(rejectedOption, AccountSettings.VisibleGrowAvatarOptionIndex, false);
+                var rolledBack = false;
+                try
+                {
+                    visibilityPersistence.Save(AccountId, CharacterId + 1, rejectedOption, 0);
+                }
+                catch (SqliteException)
+                {
+                    rolledBack = true;
+                }
+                Check("visibility settings roll back account option when character save fails",
+                    rolledBack
+                    && ByteEquals(accountSettingsRepo.Load(AccountId)?.MainGameOption, mainOption));
+
+                Check("character visibility refresh body is uid plus visible bits",
+                    ByteEquals(
+                        CharacterVisibilityBodyBuilder.Build(0x1234, 9),
+                        new byte[] { 0x34, 0x12, 0x09 }));
+
                 var characterHotkeys = BuildHotkeyBlob(0x0002, 0x1234, 0x5678, 0x0099);
                 stateRepo.SaveHotkeyConfig(CharacterId, characterHotkeys);
                 var snapshotWithHotkeys = dataSource.Load(CharacterId, AccountId);
@@ -331,6 +375,11 @@ WHERE character_id = 8201001 AND mood_value = 9
                     return migratedCorrectly && Convert.ToInt32(cmd.ExecuteScalar()) == 1;
                 }
             }
+        }
+
+        private static void WriteOption(byte[] mainGameOption, int optionIndex, bool enabled)
+        {
+            Buffer.BlockCopy(BitConverter.GetBytes((ushort)(enabled ? 1 : 0)), 0, mainGameOption, optionIndex * 2, 2);
         }
 
         private static bool ByteEquals(byte[] left, byte[] right)

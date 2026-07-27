@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using DfoServer.Game.Currency;
 using DfoServer.Game.Shop;
 using DfoServer.Game.Skills;
@@ -50,6 +51,7 @@ namespace DfoServer.Game.Inventory
             int buyCount,
             int paymentMode,
             byte attributeValue,
+            CeraShopPurchaseOptions purchaseOptions,
             out InventoryMutationResult result,
             out bool handled)
         {
@@ -193,6 +195,7 @@ namespace DfoServer.Game.Inventory
                 couponId,
                 isAvatar,
                 attributeValue,
+                purchaseOptions,
                 avatarDurationDays,
                 out result);
         }
@@ -325,6 +328,7 @@ namespace DfoServer.Game.Inventory
             int couponId,
             bool isAvatar,
             byte attributeValue,
+            CeraShopPurchaseOptions purchaseOptions,
             int avatarDurationDays,
             out InventoryMutationResult result)
         {
@@ -336,6 +340,7 @@ namespace DfoServer.Game.Inventory
                 effectiveCount,
                 isAvatar,
                 attributeValue,
+                purchaseOptions,
                 avatarDurationDays);
             if (requests.Count == 0)
                 return false;
@@ -343,7 +348,10 @@ namespace DfoServer.Game.Inventory
             if (!InventoryRewardGrantService.TryPlanBatch(inventory, requests, out var plan)
                 || plan == null
                 || !plan.Success)
+            {
+                FileLogger.Log($"[CeraShopRuntime] grant plan failed product=0x{product.ProductId:X8} item=0x{product.ItemTemplateId:X8} error={plan?.Error} rewards={FormatGrantRequests(requests, 12)}");
                 return false;
+            }
 
             if (!TrySpendPayment(inventory, totalGoldCost, totalCeraCost, ceraMode, out var payment))
                 return false;
@@ -497,11 +505,17 @@ namespace DfoServer.Game.Inventory
             int effectiveCount,
             bool isAvatar,
             byte attributeValue,
+            CeraShopPurchaseOptions purchaseOptions,
             int avatarDurationDays)
         {
             var requests = new List<InventoryRewardGrantRequest>();
-            if (TryResolveMallAutoOpenRewards(characterId, product.ItemTemplateId, effectiveCount, out var rewards))
-                return InventorySpecialConsumableService.BuildRewardRequests(rewards);
+            if (TryResolveMallAutoOpenRequests(
+                    characterId,
+                    product.ItemTemplateId,
+                    effectiveCount,
+                    purchaseOptions,
+                    out var mallRequests))
+                return mallRequests;
 
             requests.Add(InventoryRewardGrantRequest.Create(
                 product.ItemTemplateId,
@@ -509,6 +523,52 @@ namespace DfoServer.Game.Inventory
                 ItemCreateReason.MallPurchase,
                 CreateOptions(isAvatar, attributeValue, avatarDurationDays)));
             return requests;
+        }
+
+        private static bool TryResolveMallAutoOpenRequests(
+            int characterId,
+            int itemTemplateId,
+            int effectiveCount,
+            CeraShopPurchaseOptions purchaseOptions,
+            out List<InventoryRewardGrantRequest> requests)
+        {
+            requests = null;
+            try
+            {
+                var stackable = StackableItemProvider.Load(itemTemplateId);
+                if (stackable == null)
+                    return false;
+
+                var stackableType = InventoryPackageRewardResolver.NormalizeStackableType(stackable.StackableType);
+                if (stackableType.Equals("[cera package]", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (HasPackageSelectionGroups(stackable) || (purchaseOptions != null && purchaseOptions.HasAny))
+                    {
+                        if (!TryBuildSelectedCeraPackageRequests(
+                                itemTemplateId,
+                                stackable,
+                                purchaseOptions,
+                                out var unitRequests))
+                            return false;
+
+                        requests = RepeatRequests(unitRequests, effectiveCount);
+                        return requests.Count > 0;
+                    }
+                }
+
+                if (!TryResolveMallAutoOpenRewards(characterId, itemTemplateId, effectiveCount, out var rewards))
+                    return false;
+
+                requests = InventorySpecialConsumableService.BuildRewardRequests(
+                    rewards,
+                    skipExpiredStaticItems: true);
+                return requests.Count > 0;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"[CeraShopRuntime] resolve mall auto-open requests failed item=0x{itemTemplateId:X8}: {ex.Message}");
+                return false;
+            }
         }
 
         private static bool TryResolveMallAutoOpenRewards(
@@ -554,6 +614,210 @@ namespace DfoServer.Game.Inventory
                 FileLogger.Log($"[CeraShopRuntime] resolve mall auto-open rewards failed item=0x{itemTemplateId:X8}: {ex.Message}");
                 return false;
             }
+        }
+
+        private static bool TryBuildSelectedCeraPackageRequests(
+            int packageItemTemplateId,
+            PvfLib.StackableItemFile stackable,
+            CeraShopPurchaseOptions purchaseOptions,
+            out List<InventoryRewardGrantRequest> requests)
+        {
+            requests = new List<InventoryRewardGrantRequest>();
+            if (stackable == null)
+                return false;
+
+            var avatarChoices = BuildAvatarChoiceMap(purchaseOptions);
+            foreach (var reward in stackable.PackageRewards ?? new List<PvfLib.BoosterRewardEntry>())
+            {
+                if (reward == null || reward.ItemId <= 0 || reward.Count <= 0)
+                    continue;
+
+                byte avatarAbilityNo = 0;
+                if (IsAvatarReward(reward.ItemId)
+                    && avatarChoices.Count > 0
+                    && !avatarChoices.TryGetValue(reward.ItemId, out avatarAbilityNo))
+                    return false;
+
+                InventorySpecialConsumableService.AddRewardRequest(
+                    requests,
+                    reward.ItemId,
+                    reward.Count,
+                    ResolveRewardExpireTime(reward),
+                    avatarAbilityNo,
+                    skipExpiredStaticItems: true);
+            }
+
+            var selectionGroups = ParsePackageSelectionGroups(stackable);
+            if (selectionGroups.Count == 0)
+                return requests.Count > 0;
+
+            if (purchaseOptions == null || purchaseOptions.SelectionChoices.Count == 0)
+                return false;
+
+            var selectedGroups = new HashSet<int>();
+            foreach (var choice in purchaseOptions.SelectionChoices)
+            {
+                if (choice == null)
+                    continue;
+                if (choice.PackageItemTemplateId > 0 && choice.PackageItemTemplateId != packageItemTemplateId)
+                    return false;
+
+                var groupIndex = (int)choice.GroupIndex;
+                if (groupIndex < 0 || groupIndex >= selectionGroups.Count)
+                    return false;
+                if (!selectedGroups.Add(groupIndex))
+                    return false;
+
+                var group = selectionGroups[groupIndex];
+                var selectionIndex = (int)choice.SelectionIndex;
+                if (selectionIndex < 0 || selectionIndex >= group.Count)
+                    return false;
+
+                var reward = group[selectionIndex];
+                InventorySpecialConsumableService.AddRewardRequest(
+                    requests,
+                    reward.ItemId,
+                    reward.Count,
+                    ResolveRewardExpireTime(reward),
+                    0,
+                    skipExpiredStaticItems: true);
+            }
+
+            return selectedGroups.Count == selectionGroups.Count && requests.Count > 0;
+        }
+
+        private static Dictionary<int, byte> BuildAvatarChoiceMap(CeraShopPurchaseOptions purchaseOptions)
+        {
+            var map = new Dictionary<int, byte>();
+            if (purchaseOptions == null)
+                return map;
+
+            foreach (var choice in purchaseOptions.AvatarChoices)
+            {
+                if (choice == null || choice.ItemTemplateId <= 0)
+                    continue;
+                if (!map.ContainsKey(choice.ItemTemplateId))
+                    map.Add(choice.ItemTemplateId, choice.OptionValue);
+            }
+
+            return map;
+        }
+
+        private static bool HasPackageSelectionGroups(PvfLib.StackableItemFile stackable)
+        {
+            return ParsePackageSelectionGroups(stackable).Count > 0;
+        }
+
+        private static List<List<PvfLib.BoosterRewardEntry>> ParsePackageSelectionGroups(
+            PvfLib.StackableItemFile stackable)
+        {
+            var groups = new List<List<PvfLib.BoosterRewardEntry>>();
+            if (stackable?.Root == null)
+                return groups;
+
+            foreach (var node in stackable.Root.GetChildren("package data selection"))
+            {
+                var values = ParseInts(node.GetContent(stackable.Content));
+                var group = new List<PvfLib.BoosterRewardEntry>();
+                for (var index = 0; index + 1 < values.Count; index += 2)
+                {
+                    if (values[index] <= 0)
+                        continue;
+
+                    group.Add(new PvfLib.BoosterRewardEntry
+                    {
+                        RewardKind = "package selection",
+                        ItemId = values[index],
+                        Count = Math.Max(1, values[index + 1]),
+                    });
+                }
+
+                if (group.Count > 0)
+                    groups.Add(group);
+            }
+
+            return groups;
+        }
+
+        private static List<int> ParseInts(string value)
+        {
+            var values = new List<int>();
+            foreach (Match match in Regex.Matches(value ?? string.Empty, "-?\\d+"))
+            {
+                if (int.TryParse(match.Value, out var parsed))
+                    values.Add(parsed);
+            }
+
+            return values;
+        }
+
+        private static int ResolveRewardExpireTime(PvfLib.BoosterRewardEntry reward)
+        {
+            return reward != null && reward.UsablePeriodDays > 0
+                ? PvfExpirationMetadata.AddDaysFromNow(reward.UsablePeriodDays)
+                : 0;
+        }
+
+        private static bool IsAvatarReward(int itemTemplateId)
+        {
+            try
+            {
+                return SelectablePackageDefinitionResolver.IsAvatarEquipment(itemTemplateId);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static List<InventoryRewardGrantRequest> RepeatRequests(
+            IReadOnlyList<InventoryRewardGrantRequest> unitRequests,
+            int effectiveCount)
+        {
+            var requests = new List<InventoryRewardGrantRequest>();
+            if (unitRequests == null || unitRequests.Count == 0)
+                return requests;
+
+            var repeat = Math.Max(1, effectiveCount);
+            for (var index = 0; index < repeat; index++)
+            {
+                foreach (var request in unitRequests)
+                {
+                    if (request == null)
+                        continue;
+
+                    requests.Add(InventoryRewardGrantRequest.Create(
+                        request.ItemTemplateId,
+                        request.Count,
+                        request.Reason,
+                        request.CreateOptions));
+                }
+            }
+
+            return requests;
+        }
+
+        private static string FormatGrantRequests(
+            IReadOnlyList<InventoryRewardGrantRequest> requests,
+            int maxCount)
+        {
+            if (requests == null || requests.Count == 0)
+                return "none";
+
+            var parts = new List<string>();
+            var limit = Math.Min(requests.Count, Math.Max(0, maxCount));
+            for (var index = 0; index < limit; index++)
+            {
+                var request = requests[index];
+                parts.Add(request == null
+                    ? "null"
+                    : $"0x{request.ItemTemplateId:X8}x{request.Count}");
+            }
+
+            if (requests.Count > limit)
+                parts.Add($"...+{requests.Count - limit}");
+
+            return string.Join(",", parts);
         }
 
         private static bool TryResolveCosts(

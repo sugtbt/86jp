@@ -4,6 +4,7 @@ using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Lottery;
+using DfoServer.Game.Mailbox;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -140,12 +141,18 @@ namespace DfoServer.Network
                 sessionDirectory);
             _secretShopHandler = new SecretShopHandler(_inventoryRefreshSender);
             _staminaHandler = new StaminaHandler(_inventoryRefreshSender);
-            _settingsHandler = new SettingsHandler();
+            _settingsHandler = new SettingsHandler(sessionDirectory);
             _ceraShopHandler = new CeraShopHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
             _skillHandler = new SkillHandler(characterRepository, _inventoryRefreshSender);
             _luckyStarHandler = new LuckyStarHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             _rentalHandler = new RentalHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
-            _mailboxHandler = new MailboxHandler();
+            var mailboxRepository = new MailboxRepository(databasePath, schemaFilePath);
+            var mailboxService = new MailboxService(mailboxRepository);
+            _mailboxHandler = new MailboxHandler(
+                characterRepository,
+                mailboxService,
+                sessionDirectory,
+                _inventoryRefreshSender);
             _collectionBoxHandler = new CollectionBoxHandler(_inventoryRefreshSender);
             _shopCoinEventHandler = new ShopCoinEventHandler(reviveCoinService, _inventoryRefreshSender);
             _mercenaryHandler = new MercenaryHandler(characterRepository);
@@ -351,6 +358,7 @@ namespace DfoServer.Network
             d[0x0133] = _inventoryHandler.Handle_DEPOSIT_MONEY;                    //307 金库存金币
             d[0x0134] = _inventoryHandler.Handle_WITHDRAW_MONEY;                   //308 金库取金币
             d[0x0198] = _inventoryHandler.Handle_UPGRADE_CARGO;                    //408 扩容个人仓库
+            d[0x01CC] = _inventoryHandler.Handle_AVATAR_OPTION_CHANGE;             //460 时装属性调整箱
             d[KnightShieldDeckBodyBuilder.ChangeDeckCommandType] = _knightShieldHandler.HandleChangeDeckInfo;
         }
 
@@ -463,7 +471,7 @@ namespace DfoServer.Network
 
         private void RegisterSettingsHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
-            d[0x00C5] = (s, h, b) => { _settingsHandler.Handle_SAVE_GAME_OPTION_1(s, h, b); return Task.CompletedTask; };
+            d[0x00C5] = _settingsHandler.Handle_SAVE_GAME_OPTION_1;
             d[0x00C6] = (s, h, b) => { _settingsHandler.Handle_SAVE_GAME_OPTION_2(s, h, b); return Task.CompletedTask; };
             d[0x0170] = (s, h, b) => { _settingsHandler.Handle_SAVE_QUICKCHAT(s, h, b); return Task.CompletedTask; };
             d[0x00FE] = _settingsHandler.Handle_CHANGE_EMOTION;
@@ -499,7 +507,12 @@ namespace DfoServer.Network
 
         private void RegisterMailboxHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
+            d[0x005E] = _mailboxHandler.HandleSendMailbox;
+            d[0x005F] = _mailboxHandler.HandleClaimMailbox;
             d[0x0060] = _mailboxHandler.HandleOpenMailbox;
+            d[0x0086] = _mailboxHandler.HandleChangeLetterStatMailbox;
+            d[0x013B] = _mailboxHandler.HandleSendMultiMailbox;
+            d[0x0144] = _mailboxHandler.HandleQueryCharacterInfoMailbox;
         }
 
         private void RegisterCollectionBoxHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)

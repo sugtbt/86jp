@@ -56,6 +56,7 @@ namespace DfoServer.Game.Inventory
         private readonly Dictionary<InventoryListType, ushort> _listParams =
             new Dictionary<InventoryListType, ushort>();
         private readonly HashSet<InventoryListType> _dirtyListParams = new HashSet<InventoryListType>();
+        private int _pendingHappyTokenCeraGrant;
 
         public InventoryService(int characterId, int accountId)
         {
@@ -99,6 +100,8 @@ namespace DfoServer.Game.Inventory
         public IReadOnlyCollection<short> DirtyMainVirtualCountSlots => _dirtyMainVirtualSlots;
 
         public IReadOnlyCollection<InventoryListType> DirtyListParams => _dirtyListParams;
+
+        public int PendingHappyTokenCeraGrant => _pendingHappyTokenCeraGrant;
 
         public static InventoryService LoadFromDb(SqliteConnection connection, int characterId, int accountId)
         {
@@ -485,11 +488,25 @@ namespace DfoServer.Game.Inventory
             return new List<short>(slots);
         }
 
+        public bool TryQueueHappyTokenCeraGrant(int count)
+        {
+            if (count <= 0)
+                return false;
+
+            var updated = (long)_pendingHappyTokenCeraGrant + count;
+            if (updated > int.MaxValue)
+                return false;
+
+            _pendingHappyTokenCeraGrant = (int)updated;
+            return true;
+        }
+
         public void ClearDirtyState()
         {
             _dirtySlots.Clear();
             _dirtyMainVirtualSlots.Clear();
             _dirtyListParams.Clear();
+            _pendingHappyTokenCeraGrant = 0;
             AvatarDetails.ClearDirtyState();
             CreatureDetails.ClearDirtyState();
             Cargo.ClearDirtyState();

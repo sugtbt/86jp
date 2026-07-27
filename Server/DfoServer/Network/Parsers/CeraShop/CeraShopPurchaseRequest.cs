@@ -1,26 +1,25 @@
 using System;
+using System.Collections.Generic;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Network.Parsers.CeraShop
 {
     public sealed class CeraShopPurchaseRequest
     {
-        // 一次购买可包含多件不同商品(购物车), 每件一个 commodityNo
-        public System.Collections.Generic.List<int> CommodityNos { get; } = new System.Collections.Generic.List<int>();
+        public List<int> CommodityNos { get; } = new List<int>();
 
-        // 每件商品对应的属性选择字节，仅装扮类商品生效。
-        public System.Collections.Generic.List<byte> AttributeValues { get; } = new System.Collections.Generic.List<byte>();
+        public List<byte> AttributeValues { get; } = new List<byte>();
 
-        // 支付方式: 0=点券(Cera), 1=装扮兑换券(AvatarCoupon)。
+        internal List<CeraShopPurchaseOptions> ItemOptions { get; } = new List<CeraShopPurchaseOptions>();
+
         public byte PaymentMode { get; private set; }
 
-        // 兼容旧调用: 取第一件
         public int ProductId => CommodityNos.Count > 0 ? CommodityNos[0] : 0;
-        public int ItemTemplateId => ProductId;
-        public int Count => 1; // 每个 commodityNo 购买 1 份, 份内数量由 cerashop 商品定义
 
-        // 请求 body 布局(由客户端 sendBuyPacket 逆向):
-        //   [0..1] 未知  [2] totalCount(byte)  [3] 未知  [4] paymentMode(0=点券,1=兑换券)
-        //   之后每件商品项 15 字节, commodityNo(int) 在项内偏移 +3
+        public int ItemTemplateId => ProductId;
+
+        public int Count => 1;
+
         private const int HeaderSize = 4;
         private const int ItemStride = 15;
         private const int CommodityOffsetInItem = 3;
@@ -31,29 +30,86 @@ namespace DfoServer.Network.Parsers.CeraShop
             if (body == null || body.Length < HeaderSize + ItemStride)
                 return false;
 
-            int totalCount = body[2];
+            var totalCount = body[2];
             if (totalCount <= 0)
                 totalCount = 1;
 
             var parsed = new CeraShopPurchaseRequest { PaymentMode = body[4] };
-            for (int i = 0; i < totalCount; i++)
+            for (var i = 0; i < totalCount; i++)
             {
-                int itemBase = HeaderSize + i * ItemStride;
-                int commodityOffset = itemBase + CommodityOffsetInItem;
+                var itemBase = HeaderSize + i * ItemStride;
+                var commodityOffset = itemBase + CommodityOffsetInItem;
                 if (commodityOffset + 4 > body.Length)
                     break;
-                int commodityNo = BitConverter.ToInt32(body, commodityOffset);
-                if (commodityNo > 0)
-                {
-                    parsed.CommodityNos.Add(commodityNo);
-                    parsed.AttributeValues.Add(body[itemBase + 1]);
-                }
+
+                var commodityNo = BitConverter.ToInt32(body, commodityOffset);
+                if (commodityNo <= 0)
+                    continue;
+
+                parsed.CommodityNos.Add(commodityNo);
+                parsed.AttributeValues.Add(body[itemBase + 1]);
+                parsed.ItemOptions.Add(totalCount == 1
+                    ? ParseItemOptions(body, commodityOffset + 4)
+                    : new CeraShopPurchaseOptions());
             }
 
             if (parsed.CommodityNos.Count == 0)
                 return false;
+
             request = parsed;
             return true;
+        }
+
+        private static CeraShopPurchaseOptions ParseItemOptions(byte[] body, int offset)
+        {
+            var options = new CeraShopPurchaseOptions();
+            if (body == null || offset < 0 || offset >= body.Length)
+                return options;
+
+            var cursor = offset;
+            var avatarCount = body[cursor];
+            var avatarEnd = cursor + 1 + avatarCount * 5;
+            if (avatarCount > 0 && avatarCount <= 32 && avatarEnd <= body.Length)
+            {
+                cursor++;
+                for (var index = 0; index < avatarCount; index++, cursor += 5)
+                {
+                    var itemTemplateId = BitConverter.ToInt32(body, cursor);
+                    if (itemTemplateId <= 0)
+                        continue;
+
+                    options.AvatarChoices.Add(new AvatarPackageChoice
+                    {
+                        ItemTemplateId = itemTemplateId,
+                        OptionValue = body[cursor + 4],
+                    });
+                }
+            }
+
+            if (cursor >= body.Length)
+                return options;
+
+            var selectionCount = body[cursor];
+            var selectionEnd = cursor + 1 + selectionCount * 8;
+            if (selectionCount == 0 || selectionCount > 16 || selectionEnd > body.Length)
+                return options;
+
+            cursor++;
+            for (var index = 0; index < selectionCount; index++, cursor += 8)
+            {
+                var packageItemTemplateId = BitConverter.ToInt32(body, cursor);
+                if (packageItemTemplateId <= 0)
+                    continue;
+
+                options.SelectionChoices.Add(new CeraShopSelectionChoice
+                {
+                    PackageItemTemplateId = packageItemTemplateId,
+                    GroupIndex = BitConverter.ToUInt16(body, cursor + 4),
+                    SelectionIndex = BitConverter.ToUInt16(body, cursor + 6),
+                });
+            }
+
+            return options;
         }
     }
 }
