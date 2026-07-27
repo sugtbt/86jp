@@ -234,6 +234,27 @@ namespace DfoServer.Game.Quests
             await _sender.SendNotiAsync(0x023F, noti);
         }
 
+        internal FirstAwakeningClearResult TryClearFirstAwakeningQuests()
+        {
+            int cid = _sender.CharacterId;
+            return cid > 0
+                ? _service.TryClearFirstAwakeningQuests(cid)
+                : FirstAwakeningClearResult.Fail("character not selected");
+        }
+
+        internal async Task NotifyFirstAwakeningClearAsync()
+        {
+            int cid = _sender.CharacterId;
+            if (cid <= 0)
+                return;
+
+            await SendSkillInfoRefreshAsync(cid);
+            await SendJobChangeNotification(cid);
+            await SendUserInfoBroadcast(cid);
+            await SendActiveQuestListAsync();
+            await SendAcceptableQuestListAsync();
+        }
+
         public async Task SyncMonsterRewardItemProgressAsync(ICollection<int> itemFilter)
         {
             await SyncItemSeekingQuestProgressAsync(itemFilter);
