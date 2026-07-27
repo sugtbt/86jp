@@ -26,6 +26,7 @@ namespace DfoServer.Game.Inventory
         InventoryItem = 1,
         MainVirtualCount = 2,
         Premium = 3,
+        AccountCurrency = 4,
     }
 
     internal sealed class InventoryRewardGrantRequest
@@ -472,6 +473,14 @@ namespace DfoServer.Game.Inventory
             if (TryPlanPremium(itemTemplateId, count, request, out entry))
                 return true;
 
+            if (SpecialRewardRouter.TryResolveAccountCurrencyReward(itemTemplateId, count, out var accountCurrencyOutcome))
+                return TryPlanAccountCurrency(
+                    planningInventory,
+                    request,
+                    accountCurrencyOutcome,
+                    out entry,
+                    out error);
+
             if (TryResolveMainVirtualReward(itemTemplateId, out var slotIndex, out var slotItemId))
                 return TryPlanMainVirtualCount(planningInventory, request, itemTemplateId, count, slotIndex, slotItemId, out entry, out error);
 
@@ -565,6 +574,8 @@ namespace DfoServer.Game.Inventory
             {
                 case InventoryRewardGrantKind.Premium:
                     return Complete(result);
+                case InventoryRewardGrantKind.AccountCurrency:
+                    return TryApplyAccountCurrency(inventory, entry, result);
                 case InventoryRewardGrantKind.MainVirtualCount:
                     return TryApplyMainVirtualCount(inventory, entry, result);
                 case InventoryRewardGrantKind.InventoryItem:
@@ -572,6 +583,21 @@ namespace DfoServer.Game.Inventory
                 default:
                     return Fail(result, InventoryRewardGrantError.InvalidRequest);
             }
+        }
+
+        private static bool TryApplyAccountCurrency(
+            InventoryService inventory,
+            InventoryRewardGrantPlanEntry entry,
+            InventoryRewardGrantResult result)
+        {
+            if (inventory == null)
+                return Fail(result, InventoryRewardGrantError.InvalidInventory);
+            if (entry?.SpecialOutcome == null
+                || entry.SpecialOutcome.Kind != SpecialRewardKind.HappyTokenCera
+                || !inventory.TryQueueHappyTokenCeraGrant(entry.GrantedCount))
+                return Fail(result, InventoryRewardGrantError.VirtualApplyFailed);
+
+            return Complete(result);
         }
 
         private static bool TryApplyMainVirtualCount(
@@ -651,6 +677,39 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
+        private static bool TryPlanAccountCurrency(
+            InventoryService planningInventory,
+            InventoryRewardGrantRequest request,
+            SpecialRewardOutcome outcome,
+            out InventoryRewardGrantPlanEntry entry,
+            out InventoryRewardGrantError error)
+        {
+            entry = null;
+            error = InventoryRewardGrantError.None;
+            if (planningInventory == null || outcome == null || outcome.Count <= 0)
+            {
+                error = InventoryRewardGrantError.InvalidRequest;
+                return false;
+            }
+
+            if (!planningInventory.TryQueueHappyTokenCeraGrant(outcome.Count))
+            {
+                error = InventoryRewardGrantError.VirtualApplyFailed;
+                return false;
+            }
+
+            entry = new InventoryRewardGrantPlanEntry
+            {
+                Request = request,
+                Kind = InventoryRewardGrantKind.AccountCurrency,
+                ItemTemplateId = outcome.ItemTemplateId,
+                RequestedCount = outcome.Count,
+                GrantedCount = outcome.Count,
+                SpecialOutcome = outcome,
+            };
+            return true;
+        }
+
         private static bool TryPlanMainVirtualCount(
             InventoryService planningInventory,
             InventoryRewardGrantRequest request,
@@ -713,6 +772,16 @@ namespace DfoServer.Game.Inventory
                 return true;
             }
 
+            if (SpecialRewardRouter.TryResolveAccountCurrencyReward(itemTemplateId, count, out var accountCurrencyOutcome))
+            {
+                result.Success = true;
+                result.Error = InventoryRewardGrantError.None;
+                result.Kind = InventoryRewardGrantKind.AccountCurrency;
+                result.GrantedCount = count;
+                result.SpecialOutcome = accountCurrencyOutcome;
+                return true;
+            }
+
             if (!TryResolveMainVirtualReward(itemTemplateId, out var slotIndex, out var slotItemId))
                 return false;
 
@@ -764,6 +833,8 @@ namespace DfoServer.Game.Inventory
                 inventory.AttachMainVirtualCount(item.SlotIndex, item.ItemId, item.Count);
 
             inventory.ClearDirtyState();
+            if (source.PendingHappyTokenCeraGrant > 0)
+                inventory.TryQueueHappyTokenCeraGrant(source.PendingHappyTokenCeraGrant);
             return inventory;
         }
 

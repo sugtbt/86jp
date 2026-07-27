@@ -111,41 +111,65 @@ namespace DfoServer.Game.Quests
             lock (lease.SyncRoot)
             {
                 var inventory = lease.Inventory;
+                var plannedDrops =
+                    new List<(QuestDropCandidate Candidate, int HeldCount, int DropCount)>();
+                var projectedHeldCounts = new Dictionary<int, int>();
+
                 foreach (var candidate in candidates)
                 {
-                    int currentHeld = inventory.CountMainItem(candidate.ItemId);
+                    if (!projectedHeldCounts.TryGetValue(candidate.ItemId, out var currentHeld))
+                        currentHeld = inventory.CountMainItem(candidate.ItemId);
 
                     int dropCount = _rollDrop(candidate, currentHeld);
                     if (dropCount <= 0)
-                    {
-                        if (candidate.MaxStack != -1 && currentHeld >= candidate.MaxStack)
-                            FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped maxStack {sourceName}={sourceCode} item={candidate.ItemId} held={currentHeld} max={candidate.MaxStack}");
-                        else if (candidate.DropRate >= 100)
-                            FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped despite guaranteed rate {sourceName}={sourceCode} item={candidate.ItemId} held={currentHeld} count={candidate.Count}");
                         continue;
+
+                    plannedDrops.Add((candidate, currentHeld, dropCount));
+                    projectedHeldCounts[candidate.ItemId] =
+                        currentHeld > int.MaxValue - dropCount
+                            ? int.MaxValue
+                            : currentHeld + dropCount;
+                }
+
+                if (plannedDrops.Count > 0)
+                {
+                    var requests = new List<InventoryRewardGrantRequest>(plannedDrops.Count);
+                    foreach (var planned in plannedDrops)
+                    {
+                        requests.Add(InventoryRewardGrantRequest.Create(
+                            planned.Candidate.ItemId,
+                            planned.DropCount,
+                            ItemCreateReason.QuestReward));
                     }
 
-                    if (!InventoryRewardGrantService.TryCreateAndInsert(
-                            inventory,
-                            candidate.ItemId,
-                            ItemCreateReason.QuestReward,
-                            dropCount,
-                            out var grant)
-                        || !grant.Success
-                        || grant.SlotIndex < 0)
+                    var batchSucceeded = InventoryRewardGrantService.TryGrantBatch(
+                        inventory,
+                        requests,
+                        out var batchResult);
+                    if (!batchSucceeded)
                     {
-                        FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: failed to insert {sourceName}={sourceCode} item={candidate.ItemId} x{dropCount} held={currentHeld}");
-                        continue;
+                        FileLogger.Log(
+                            $"[{ProtocolLogName}] QUEST_DROP: batch insert failed " +
+                            $"{sourceName}={sourceCode} requests={requests.Count} error={batchResult.Error}");
                     }
 
-                    grantedItemIds.Add(candidate.ItemId);
-                    grantedSlots.Add(grant.SlotIndex);
-                    FileLogger.Log(
-                        $"[{ProtocolLogName}] QUEST_DROP: " +
-                        $"quest={candidate.QuestId} {sourceName}={sourceCode} " +
-                        $"item={candidate.ItemId} x{dropCount} slot={grant.SlotIndex} " +
-                        $"preferQuestInventory={candidate.PreferQuestInventory} " +
-                        $"held={currentHeld}->{currentHeld + dropCount}");
+                    var resultCount = Math.Min(plannedDrops.Count, batchResult.Results.Count);
+                    for (var index = 0; index < resultCount; index++)
+                    {
+                        var planned = plannedDrops[index];
+                        var grant = batchResult.Results[index];
+                        if (!grant.Success || grant.SlotIndex < 0)
+                        {
+                            FileLogger.Log(
+                                $"[{ProtocolLogName}] QUEST_DROP: failed to insert " +
+                                $"{sourceName}={sourceCode} item={planned.Candidate.ItemId} " +
+                                $"x{planned.DropCount} held={planned.HeldCount} error={grant.Error}");
+                            continue;
+                        }
+
+                        grantedItemIds.Add(planned.Candidate.ItemId);
+                        grantedSlots.Add(grant.SlotIndex);
+                    }
                 }
             }
 
@@ -158,12 +182,13 @@ namespace DfoServer.Game.Quests
             }
             else
             {
-                await session.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(grantedItemIds);
+                // Avoid per-drop ACCEPTED_QUEST (0x023F); it causes a visible client hitch.
+                session.GameSession.QuestManager
+                    .RecalibrateItemSeekingQuestProgressWithoutNotification(grantedItemIds);
             }
 
             // During a dungeon, refresh only the changed slots after quest progress has settled.
             await _inventoryRefresh.SendUpdateItemList(session, InventoryListType.Main, grantedSlots);
-            FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: UPDATE_ITEM_LIST sent slots={string.Join(",", grantedSlots)}");
         }
 
         private HashSet<int> LoadActiveQuestIds(

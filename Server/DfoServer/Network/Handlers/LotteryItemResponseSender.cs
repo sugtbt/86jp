@@ -80,6 +80,13 @@ namespace DfoServer.Network.Handlers
                 firstNoticeItem,
                 suppressDuplicateNotices: !useDoubleResultFlow);
             await SendAvatarOrPetUpdates(session, result.Rewards);
+            if (result.RequiredItemChangedSlots.Count > 0)
+            {
+                await _refresh.SendUpdateItemList(
+                    session,
+                    InventoryListType.Main,
+                    result.RequiredItemChangedSlots);
+            }
             if (LotteryPresentationPolicy.ShouldSendGoldRefresh(result))
                 await _refresh.SendUpdateItemList(session, InventoryListType.Main, 0);
         }

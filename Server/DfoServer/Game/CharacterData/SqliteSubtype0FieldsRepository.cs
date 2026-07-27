@@ -125,6 +125,24 @@ namespace DfoServer.Game.CharacterData
             }
         }
 
+        internal static void SaveUserStateBits(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            byte value)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"INSERT INTO character_subtype0_fields(character_id, user_state_bits)
+                    VALUES(@cid, @value)
+                    ON CONFLICT(character_id) DO UPDATE SET user_state_bits=excluded.user_state_bits";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@value", (int)value);
+                command.ExecuteNonQuery();
+            }
+        }
+
         public static void RefreshDynamicTailFields(SqliteConnection conn, int characterId, UserInfoMinimumTailSnapshot snapshot)
         {
             if (snapshot == null)

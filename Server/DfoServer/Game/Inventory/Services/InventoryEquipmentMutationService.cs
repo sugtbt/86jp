@@ -1684,6 +1684,110 @@ namespace DfoServer.Game.Inventory
             };
         }
 
+        //  0x0051 RESET_ITEM_ATTR: 黄金蜜蜡重新封装装备。
+        //  消耗 N 个蜜蜡 → 装备封印(seal_flag=1) + 封装次数+1(上限7)。
+        internal static bool TryWaxReseal(
+            InventoryService inventory,
+            short targetSlot,
+            int expectedTargetItemId,
+            short waxSlot,
+            out WaxResealResult result)
+        {
+            result = null;
+
+            if (inventory == null || targetSlot < 0 || waxSlot < 0)
+                return false;
+
+            var target = inventory.GetItem(InventoryListType.Main, targetSlot);
+            if (target == null || target.ItemId <= 0 || !target.IsEquipmentItem())
+                return false;
+
+            if (expectedTargetItemId != 0 && target.ItemId != expectedTargetItemId)
+                return false;
+
+            if (IsItemLocked(inventory, target))
+                return false;
+
+            var metadata = ItemMetadataResolver.Resolve(target.ItemId);
+            var rarity = metadata?.Rarity ?? 0;
+            var minimumLevel = metadata?.MinimumLevel ?? 0;
+
+            var currentCount = target.ReSealCount;
+            if (currentCount >= 7)
+                return false;
+
+            var newCount = (byte)(currentCount + 1);
+            var waxCost = ComputeWaxResealCost(rarity, minimumLevel, newCount);
+
+            var waxItem = inventory.GetItem(InventoryListType.Main, waxSlot);
+            if (waxItem == null || waxItem.Count < waxCost)
+                return false;
+
+            var updatedTarget = target.Copy();
+            updatedTarget.SealFlag = 1;
+            updatedTarget.ReSealCount = newCount;
+
+            if (!inventory.SetItem(InventoryListType.Main, targetSlot, updatedTarget))
+                return false;
+
+            if (!InventoryDeleteService.TryDecreaseStack(
+                    inventory,
+                    InventoryListType.Main,
+                    waxSlot,
+                    waxCost,
+                    out var deleteResult)
+                || !deleteResult.Success)
+            {
+                inventory.SetItem(InventoryListType.Main, targetSlot, target);
+                return false;
+            }
+
+            result = new WaxResealResult
+            {
+                TargetSlotIndex = targetSlot,
+                TargetItemTemplateId = target.ItemId,
+                WaxSlotIndex = waxSlot,
+                WaxCost = waxCost,
+                NewSealFlag = 1,
+                NewReSealCount = newCount,
+            };
+            return true;
+        }
+
+        internal static int ComputeWaxResealCost(int rarity, int minimumLevel, int newResealCount)
+        {
+            if (newResealCount < 1) newResealCount = 1;
+            if (newResealCount > 7) newResealCount = 7;
+
+            var baseCost = rarity switch
+            {
+                2 => minimumLevel switch // 稀有
+                {
+                    <= 30 => 3,
+                    <= 50 => 6,
+                    <= 70 => 9,
+                    _ => 12,
+                },
+                3 => minimumLevel switch // 神器
+                {
+                    <= 30 => 4,
+                    <= 50 => 8,
+                    <= 70 => 12,
+                    _ => 16,
+                },
+                6 => minimumLevel switch // 传说
+                {
+                    <= 30 => 6,
+                    <= 50 => 12,
+                    <= 70 => 18,
+                    _ => 24,
+                },
+                _ => 1,
+            };
+
+            return baseCost + (newResealCount - 1);
+        }
+
         private sealed class EquipmentEffectTargetCandidate
         {
             public InventoryListType ListType { get; set; }
@@ -1701,5 +1805,15 @@ namespace DfoServer.Game.Inventory
 
             public ItemCore Core { get; set; }
         }
+    }
+
+    internal sealed class WaxResealResult
+    {
+        public short TargetSlotIndex { get; set; }
+        public int TargetItemTemplateId { get; set; }
+        public short WaxSlotIndex { get; set; }
+        public int WaxCost { get; set; }
+        public byte NewSealFlag { get; set; }
+        public byte NewReSealCount { get; set; }
     }
 }

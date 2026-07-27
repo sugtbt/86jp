@@ -1,4 +1,6 @@
+using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Mailbox;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Inventory;
 using System;
@@ -604,7 +606,7 @@ namespace DfoServer.Network.Handlers
                     lease.Inventory,
                     request,
                     ResolveCharacterJobLabel(characterId),
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -626,7 +628,7 @@ namespace DfoServer.Network.Handlers
                     lease.Inventory,
                     slotIndex,
                     selectedItemTemplateIds,
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -646,7 +648,7 @@ namespace DfoServer.Network.Handlers
                 return InventorySpecialConsumableService.TryOpenAvatarPackage(
                     lease.Inventory,
                     request,
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -666,7 +668,7 @@ namespace DfoServer.Network.Handlers
                 return InventorySpecialConsumableService.TryOpenSelectablePackage(
                     lease.Inventory,
                     request,
-                    RejectingInventoryOverflowRewardSink.Instance,
+                    MailboxInventoryOverflowRewardSink.Instance,
                     out result);
             }
         }
@@ -681,6 +683,7 @@ namespace DfoServer.Network.Handlers
 
         private async Task SendBoosterUseResult(EnhancedClientSession session, ushort responseType, BoosterUseResult result)
         {
+            var wallet = PersistHappyTokenCeraRewards(session, result);
             var useNativeMagicBoxBatchAck = responseType == 0x03F3 && ShouldUseNativeMagicBoxBatchAck(result);
             var grantedItems = responseType == 0x03F3 && !useNativeMagicBoxBatchAck
                 ? ToPackageGrantedItems(result)
@@ -736,12 +739,46 @@ namespace DfoServer.Network.Handlers
                 await _refresh.SendEmptyUpdateItemList(session, InventoryListType.Main, result.SourceSlotIndex);
 
             await SendBoosterMainItemUpdates(session, result, result.SourceRemainingStackCount > 0);
+            if (wallet != null)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    0x0035,
+                    CeraUpdateBuilder.Build(
+                        wallet.Cera,
+                        wallet.TokenCera,
+                        wallet.HappyTokenCera)));
+                FileLogger.Log(
+                    $"[{ProtocolName}] HAPPY_TOKEN_CERA_UPDATE: cera={wallet.Cera} " +
+                    $"token={wallet.TokenCera} happy={wallet.HappyTokenCera}");
+            }
             await SendAvatarOrPetUpdateListForBoosterRewards(session, result);
             if (ShouldSendCreatureListRefreshForBoosterRewards(result))
                 await _refresh.SendCreatureItemListRefresh(session);
 
             if (result.ActivatedPremiums.Count > 0)
                 await Game.Premium.PremiumService.ActivateAndNotify(session, result.ActivatedPremiums);
+        }
+
+        private static WalletSnapshot PersistHappyTokenCeraRewards(
+            EnhancedClientSession session,
+            BoosterUseResult result)
+        {
+            if (result?.Rewards?.Any(
+                    reward => reward?.SpecialOutcome?.Kind == SpecialRewardKind.HappyTokenCera) != true)
+                return null;
+
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (characterId <= 0
+                || !InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(session.SessionId)
+                || !InventoryPersistenceService.SaveDirtyAndLoadWallet(lease, out var wallet))
+            {
+                FileLogger.Log($"[{nameof(InventoryHandler)}] happy-token reward persistence failed cid={characterId}");
+                return null;
+            }
+
+            return wallet;
         }
 
         private static async Task SendBoosterMaterialNotice(EnhancedClientSession session, BoosterUseResult result)
@@ -899,7 +936,11 @@ namespace DfoServer.Network.Handlers
 
             foreach (var reward in result.Rewards)
             {
-                if (reward != null && reward.ListType == InventoryListType.Main)
+                if (reward != null
+                    && reward.ListType == InventoryListType.Main
+                    && reward.SlotIndex >= 0
+                    && (reward.SpecialOutcome == null
+                        || reward.SpecialOutcome.Kind == SpecialRewardKind.ReviveCoin))
                     slots.Add(reward.SlotIndex);
             }
 
@@ -1233,19 +1274,20 @@ namespace DfoServer.Network.Handlers
 
             var respBody2 = w2.ToArray();
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x03EA, respBody2));
+            await _refresh.SendUpdateItemList(session, InventoryListType.Main, result.ConsumeSlot);
             FileLogger.Log($"  [CompoundAvatarSet] OK: consumed {consumeSlots.Length} avatar items + 1x slot {consumeStackableSlot}(template {result.ConsumedItemTemplateId}), abilityNo={option}, added item {result.NewItemIds[0]} at slot {result.NewSlots[0]}");
 
         }
 
         private static ushort ReadCompoundAvatarAbilityNo(byte[] body, int offset)
         {
-            if (body == null || body.Length < offset + 4)
+            if (body == null || body.Length < offset + 2)
                 return 0;
 
-            var value = BitConverter.ToInt32(body, offset);
+            var value = BitConverter.ToUInt16(body, offset);
             if (value <= 0)
                 return 0;
-            return value > ushort.MaxValue ? ushort.MaxValue : (ushort)value;
+            return value;
         }
 
         private static byte[] BuildCompoundAvatarErrorBody(bool includeTailByte)

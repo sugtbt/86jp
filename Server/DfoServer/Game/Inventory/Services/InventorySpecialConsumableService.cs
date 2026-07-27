@@ -561,6 +561,12 @@ namespace DfoServer.Game.Inventory
                 {
                     case InventoryRewardGrantKind.Premium:
                         break;
+                    case InventoryRewardGrantKind.AccountCurrency:
+                        if (entry.SpecialOutcome == null
+                            || entry.SpecialOutcome.Kind != SpecialRewardKind.HappyTokenCera
+                            || !planningInventory.TryQueueHappyTokenCeraGrant(entry.GrantedCount))
+                            return false;
+                        break;
                     case InventoryRewardGrantKind.MainVirtualCount:
                         if (!planningInventory.SetMainVirtualCount(
                                 entry.SlotIndex,
@@ -588,6 +594,13 @@ namespace DfoServer.Game.Inventory
         internal static List<InventoryRewardGrantRequest> BuildRewardRequests(
             IEnumerable<PvfLib.BoosterRewardEntry> rewards)
         {
+            return BuildRewardRequests(rewards, skipExpiredStaticItems: false);
+        }
+
+        internal static List<InventoryRewardGrantRequest> BuildRewardRequests(
+            IEnumerable<PvfLib.BoosterRewardEntry> rewards,
+            bool skipExpiredStaticItems)
+        {
             var requests = new List<InventoryRewardGrantRequest>();
             if (rewards == null)
                 return requests;
@@ -602,21 +615,29 @@ namespace DfoServer.Game.Inventory
                     reward.ItemId,
                     reward.Count,
                     ResolveUsablePeriodExpireTime(reward.UsablePeriodDays),
-                    0);
+                    0,
+                    skipExpiredStaticItems);
             }
 
             return requests;
         }
 
-        private static void AddRewardRequest(
+        internal static void AddRewardRequest(
             List<InventoryRewardGrantRequest> requests,
             int itemTemplateId,
             int count,
             int expireTime,
-            byte avatarAbilityNo)
+            byte avatarAbilityNo,
+            bool skipExpiredStaticItems = false)
         {
             if (requests == null || itemTemplateId <= 0 || count <= 0)
                 return;
+
+            if (skipExpiredStaticItems && IsStaticExpirationExpired(itemTemplateId))
+            {
+                FileLogger.Log($"[InventoryReward] skip expired static reward item=0x{itemTemplateId:X8}");
+                return;
+            }
 
             var options = CreateOptions(expireTime, avatarAbilityNo);
             var requestCount = ShouldSplitNonStackableReward(itemTemplateId)
@@ -672,6 +693,35 @@ namespace DfoServer.Game.Inventory
             return usablePeriodDays > 0
                 ? PvfExpirationMetadata.AddDaysFromNow(usablePeriodDays)
                 : 0;
+        }
+
+        internal static bool IsStaticExpirationExpired(int itemTemplateId)
+        {
+            var expireTime = ResolveStaticExpirationTime(itemTemplateId);
+            return expireTime > 0 && expireTime <= DateTimeOffset.Now.ToUnixTimeSeconds();
+        }
+
+        private static int ResolveStaticExpirationTime(int itemTemplateId)
+        {
+            if (itemTemplateId <= 0)
+                return 0;
+
+            try
+            {
+                if (ItemMetadataResolver.TryLoadStackableFile(itemTemplateId, out var stackable)
+                    && StackableExpirationPolicyResolver.TryResolve(stackable, out var stackablePolicy))
+                    return stackablePolicy.AbsoluteExpirationUnixTime;
+
+                if (ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment)
+                    && EquipmentExpirationPolicyResolver.TryResolve(equipment, out var equipmentPolicy))
+                    return equipmentPolicy.AbsoluteExpirationUnixTime;
+            }
+            catch
+            {
+                return 0;
+            }
+
+            return 0;
         }
 
         private static bool TryResolveBoosterSource(
@@ -873,6 +923,8 @@ namespace DfoServer.Game.Inventory
                 inventory.AttachMainVirtualCount(item.SlotIndex, item.ItemId, item.Count);
 
             inventory.ClearDirtyState();
+            if (source.PendingHappyTokenCeraGrant > 0)
+                inventory.TryQueueHappyTokenCeraGrant(source.PendingHappyTokenCeraGrant);
             return inventory;
         }
 
