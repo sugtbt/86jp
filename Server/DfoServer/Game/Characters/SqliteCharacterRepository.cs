@@ -216,6 +216,20 @@ SELECT character_id FROM characters WHERE rowid = last_insert_rowid();";
             }
         }
 
+        public CharacterRecord GetByNameIncludingDeleted(string name)
+        {
+            var nameBytes = System.Text.Encoding.UTF8.GetBytes(name ?? "");
+            using (var conn = Open())
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = SelectColumns + " WHERE name = @name OR name = @nameBytes ORDER BY delete_flag ASC LIMIT 1;";
+                cmd.Parameters.AddWithValue("@name", name);
+                cmd.Parameters.AddWithValue("@nameBytes", nameBytes);
+                using (var reader = cmd.ExecuteReader())
+                    return reader.Read() ? Map(reader) : null;
+            }
+        }
+
         public int CountByAccount(int accountId)
         {
             using (var conn = Open())

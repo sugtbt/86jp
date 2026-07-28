@@ -573,7 +573,230 @@ CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );")),
+
+            (40, "mailbox persistence on ItemCore inventory", MigrateMailboxItemCore),
+            (41, "mailbox sender snapshot survives character deletion", MigrateMailboxSenderSnapshot),
+            (42, "mercenary expedition assignments and reward outbox", MigrateMercenaryExpedition),
         };
+
+        private static void MigrateMercenaryExpedition(SqliteConnection connection)
+        {
+            ExecuteBatch(connection, @"
+CREATE TABLE IF NOT EXISTS account_mercenary_assignments (
+    assignment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    character_id INTEGER NOT NULL UNIQUE,
+    character_level INTEGER NOT NULL,
+    start_time INTEGER NOT NULL,
+    finish_time INTEGER NOT NULL,
+    area_index INTEGER NOT NULL,
+    period_index INTEGER NOT NULL,
+    avatar_bonus_tier INTEGER NOT NULL DEFAULT 0,
+    status INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_mercenary_assignments_account
+    ON account_mercenary_assignments(account_id, character_id);
+
+CREATE TABLE IF NOT EXISTS mercenary_reward_outbox (
+    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL UNIQUE,
+    mailbox_message_id INTEGER,
+    account_id INTEGER NOT NULL,
+    character_id INTEGER NOT NULL,
+    area_index INTEGER NOT NULL,
+    period_index INTEGER NOT NULL,
+    completed_hours INTEGER NOT NULL DEFAULT 0,
+    is_early_return INTEGER NOT NULL DEFAULT 0,
+    return_purpose INTEGER NOT NULL DEFAULT 0,
+    base_gold INTEGER NOT NULL DEFAULT 0,
+    bonus_gold INTEGER NOT NULL DEFAULT 0,
+    item_template_id INTEGER NOT NULL DEFAULT 0,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    mail_title_key TEXT NOT NULL,
+    mail_message_key TEXT NOT NULL,
+    critical_multiplier_milli INTEGER NOT NULL DEFAULT 1000,
+    delivery_status TEXT NOT NULL DEFAULT 'pending',
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    last_delivery_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TEXT,
+    FOREIGN KEY (mailbox_message_id) REFERENCES mailbox_messages(message_id) ON DELETE SET NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_mercenary_outbox_delivery
+    ON mercenary_reward_outbox(delivery_status, outbox_id);
+
+CREATE TABLE IF NOT EXISTS mercenary_reward_items (
+    outbox_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    item_template_id INTEGER NOT NULL CHECK(item_template_id > 0),
+    item_count INTEGER NOT NULL CHECK(item_count > 0),
+    PRIMARY KEY (outbox_id, ordinal),
+    FOREIGN KEY (outbox_id) REFERENCES mercenary_reward_outbox(outbox_id) ON DELETE CASCADE
+);
+");
+        }
+
+        private static void MigrateMailboxItemCore(SqliteConnection connection)
+        {
+            SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_messages", new[]
+            {
+                ("idempotency_key", "TEXT"),
+                ("request_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("unlimited_flag", "INTEGER NOT NULL DEFAULT 0"),
+            });
+            SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_recipients", new[]
+            {
+                ("saved_flag", "INTEGER NOT NULL DEFAULT 0"),
+                ("saved_at", "TEXT"),
+            });
+            SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_attachments", new[]
+            {
+                ("item_core", "BLOB"),
+                ("detail_json", "TEXT NOT NULL DEFAULT ''"),
+            });
+            SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_campaigns", new[]
+            {
+                ("max_character_id", "INTEGER NOT NULL DEFAULT 0"),
+            });
+
+            ExecuteBatch(connection, @"
+UPDATE mailbox_messages
+SET unlimited_flag = 1
+WHERE unlimited_flag = 0
+  AND mail_type != 0
+  AND expire_at >= '9999-01-01 00:00:00';
+
+DROP INDEX IF EXISTS idx_mailbox_messages_expiry;
+CREATE INDEX idx_mailbox_messages_expiry
+    ON mailbox_messages(unlimited_flag, expire_at, message_id);
+CREATE INDEX IF NOT EXISTS idx_mailbox_recipients_character_state
+    ON mailbox_recipients(character_id, folder, saved_flag, deleted_flag, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mailbox_messages_idempotency
+    ON mailbox_messages(sender_character_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mailbox_attachments_message_ordinal
+    ON mailbox_attachments(message_id, ordinal);
+
+CREATE TRIGGER IF NOT EXISTS trg_mailbox_messages_validate_insert
+BEFORE INSERT ON mailbox_messages
+WHEN NEW.gold < 0 OR NEW.fee_gold < 0
+BEGIN
+    SELECT RAISE(ABORT, 'invalid mailbox money');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_mailbox_messages_validate_update
+BEFORE UPDATE OF gold, fee_gold ON mailbox_messages
+WHEN NEW.gold < 0 OR NEW.fee_gold < 0
+BEGIN
+    SELECT RAISE(ABORT, 'invalid mailbox money');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_mailbox_attachments_validate_insert
+BEFORE INSERT ON mailbox_attachments
+WHEN NEW.item_template_id <= 0 OR NEW.item_count <= 0 OR NEW.claimed_flag NOT IN (0, 1, 2)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid mailbox attachment');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_mailbox_attachments_validate_update
+BEFORE UPDATE OF item_template_id, item_count, claimed_flag ON mailbox_attachments
+WHEN NEW.item_template_id <= 0 OR NEW.item_count <= 0 OR NEW.claimed_flag NOT IN (0, 1, 2)
+BEGIN
+    SELECT RAISE(ABORT, 'invalid mailbox attachment');
+END;");
+        }
+
+        private static void MigrateMailboxSenderSnapshot(SqliteConnection connection)
+        {
+            if (!TableSqlContains(connection, "mailbox_messages", "FOREIGN KEY (sender_character_id)"))
+                return;
+
+            bool foreignKeysEnabled;
+            using (var command = new SqliteCommand("PRAGMA foreign_keys;", connection))
+                foreignKeysEnabled = Convert.ToInt32(command.ExecuteScalar()) != 0;
+            if (foreignKeysEnabled)
+                ExecuteBatch(connection, "PRAGMA foreign_keys=OFF;");
+
+            try
+            {
+                using (var transaction = connection.BeginTransaction())
+                {
+                    ExecuteBatch(connection, transaction, @"
+DROP TABLE IF EXISTS mailbox_messages_v41;
+CREATE TABLE mailbox_messages_v41 (
+    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_character_id INTEGER NOT NULL,
+    sender_account_id INTEGER NOT NULL DEFAULT 0,
+    sender_name TEXT NOT NULL DEFAULT '',
+    receiver_character_id INTEGER NOT NULL,
+    receiver_account_id INTEGER NOT NULL DEFAULT 0,
+    receiver_name TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    gold INTEGER NOT NULL DEFAULT 0 CHECK(gold >= 0),
+    fee_gold INTEGER NOT NULL DEFAULT 0 CHECK(fee_gold >= 0),
+    mail_type INTEGER NOT NULL DEFAULT 0,
+    source_protocol INTEGER NOT NULL DEFAULT 0,
+    idempotency_key TEXT,
+    request_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    unlimited_flag INTEGER NOT NULL DEFAULT 0 CHECK(unlimited_flag IN (0, 1)),
+    expire_at TEXT NOT NULL,
+    deleted_by_sender INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (receiver_character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+INSERT INTO mailbox_messages_v41 (
+    message_id, sender_character_id, sender_account_id, sender_name,
+    receiver_character_id, receiver_account_id, receiver_name,
+    title, body, gold, fee_gold, mail_type, source_protocol,
+    idempotency_key, request_hash, created_at, unlimited_flag,
+    expire_at, deleted_by_sender
+)
+SELECT
+    message_id, sender_character_id, sender_account_id, sender_name,
+    receiver_character_id, receiver_account_id, receiver_name,
+    title, body, gold, fee_gold, mail_type, source_protocol,
+    idempotency_key, request_hash, created_at, unlimited_flag,
+    expire_at, deleted_by_sender
+FROM mailbox_messages;
+DROP TABLE mailbox_messages;
+ALTER TABLE mailbox_messages_v41 RENAME TO mailbox_messages;
+
+CREATE INDEX idx_mailbox_messages_receiver_created
+    ON mailbox_messages(receiver_character_id, created_at);
+CREATE INDEX idx_mailbox_messages_sender_created
+    ON mailbox_messages(sender_character_id, created_at);
+CREATE INDEX idx_mailbox_messages_expiry
+    ON mailbox_messages(unlimited_flag, expire_at, message_id);
+CREATE UNIQUE INDEX ux_mailbox_messages_idempotency
+    ON mailbox_messages(sender_character_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+
+CREATE TRIGGER trg_mailbox_messages_validate_insert
+BEFORE INSERT ON mailbox_messages
+WHEN NEW.gold < 0 OR NEW.fee_gold < 0
+BEGIN
+    SELECT RAISE(ABORT, 'invalid mailbox money');
+END;
+CREATE TRIGGER trg_mailbox_messages_validate_update
+BEFORE UPDATE OF gold, fee_gold ON mailbox_messages
+WHEN NEW.gold < 0 OR NEW.fee_gold < 0
+BEGIN
+    SELECT RAISE(ABORT, 'invalid mailbox money');
+END;");
+                    transaction.Commit();
+                }
+            }
+            finally
+            {
+                if (foreignKeysEnabled)
+                    ExecuteBatch(connection, "PRAGMA foreign_keys=ON;");
+            }
+        }
 
         private static void MigrateKnightShieldDeck(SqliteConnection connection)
         {

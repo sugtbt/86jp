@@ -2,6 +2,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Mercenary;
 using DfoServer.Game.Progression;
 using DfoServer.Game.Quests;
 using DfoServer.Game.SelectCharacter;
@@ -24,6 +25,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal SqliteSelectCharacterDataSource SelectCharacterDataSource { get; }
         internal IRentalTimeProvider RentalTimeProvider { get; }
         internal InventoryRefreshSender InventoryRefresh { get; }
+        internal IMercenaryRestrictionService MercenaryRestrictions { get; }
 
         internal Game.ReviveCoin.ReviveCoinService ReviveCoin { get; }
         internal Game.DeathTower.DeathTowerHandler DeathTower { get; }
@@ -57,7 +59,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             Game.Party.PartyManager partyManager = null,
             Game.Session.ISessionDirectory sessions = null,
             Game.Quests.QuestDropService questDropService = null,
-            AccountExperienceProgressService accountExperience = null)
+            AccountExperienceProgressService accountExperience = null,
+            IMercenaryRestrictionService mercenaryRestrictions = null)
         {
             ReviveCoin = reviveCoin ?? throw new ArgumentNullException(nameof(reviveCoin));
             CharacterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
@@ -68,6 +71,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             Sessions = sessions;
             SelectCharacterDataSource = selectCharacterDataSource ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
             InventoryRefresh = inventoryRefresh;
+            MercenaryRestrictions = mercenaryRestrictions;
             RentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
             QuestDrops = questDropService ?? new Game.Quests.QuestDropService(
                 inventoryRefresh,

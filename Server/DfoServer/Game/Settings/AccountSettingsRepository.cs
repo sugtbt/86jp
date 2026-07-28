@@ -43,6 +43,25 @@ namespace DfoServer.Game.Settings
             Upsert(accountId, "main_game_option", blob);
         }
 
+        internal static void SaveMainOption(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int accountId,
+            byte[] blob)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+                    INSERT INTO account_settings (account_id, main_game_option)
+                    VALUES (@aid, @val)
+                    ON CONFLICT(account_id) DO UPDATE SET main_game_option=@val";
+                command.Parameters.AddWithValue("@aid", accountId);
+                command.Parameters.AddWithValue("@val", (object)blob ?? DBNull.Value);
+                command.ExecuteNonQuery();
+            }
+        }
+
         public void SaveHotkeySlots(int accountId, byte[] slots)
         {
             Upsert(accountId, "hotkey_slots", slots);

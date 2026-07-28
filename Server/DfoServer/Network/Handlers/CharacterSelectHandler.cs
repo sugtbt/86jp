@@ -3,6 +3,7 @@ using DfoServer.Game.Appearance;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
+using DfoServer.Game.Mercenary;
 using DfoServer.Game.Names;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
@@ -24,6 +25,7 @@ namespace DfoServer.Network.Handlers
         private readonly HonorLevelSyncService _honorLevel;
         private readonly Game.Session.ISessionDirectory _sessions;   // 他人外观 PULL: 按 uid 找目标在线会话; 可空(上游注册表)
         private readonly GrowthCapsuleSyncService _growthCapsule;
+        private readonly IMercenaryRestrictionService _mercenaryRestrictions;
 
         public string ProtocolName => "GameProtocol";
 
@@ -31,7 +33,8 @@ namespace DfoServer.Network.Handlers
             ISelectCharacterDataSource selectCharacterDataSource,
             ICharacterRepository characterRepository,
             GetUserInfoTemplate getUserInfoTemplate,
-            Game.Session.ISessionDirectory sessions = null)
+            Game.Session.ISessionDirectory sessions = null,
+            IMercenaryRestrictionService mercenaryRestrictions = null)
         {
             _selectCharacterDataSource = selectCharacterDataSource ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
             _characterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
@@ -39,6 +42,7 @@ namespace DfoServer.Network.Handlers
             _honorLevel = new HonorLevelSyncService(_characterRepository);
             _sessions = sessions;
             _growthCapsule = new GrowthCapsuleSyncService(_characterRepository);
+            _mercenaryRestrictions = mercenaryRestrictions;
         }
 
         // 按 UserId 找在线会话(他人外观拉取用)。
@@ -235,6 +239,12 @@ namespace DfoServer.Network.Handlers
 
             foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(_selectCharacterDataSource, ownerCharId, ownerAcctId))
                 await session.SendPacketAsync(packet);
+
+            var visibilityBits = session.Player.Subtype0Tail?.UserStateBits ?? (byte)3;
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                (ushort)NotiPacketType.CHARAC_INVISIBLE_FALGS,
+                CharacterVisibilityBodyBuilder.Build(session.Player.UserId, visibilityBits)));
 
             var cloneTitle = AppearanceService.LoadCloneTitleItemId(ownerCharId);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
@@ -486,6 +496,17 @@ namespace DfoServer.Network.Handlers
             {
                 FileLogger.Log($"[{ProtocolName}] DELETE_CHARACTER: name mismatch slot={slotIndex} expected='{target.DisplayName}' got='{name}'");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0006, new byte[] { 0x15 }));
+                return;
+            }
+
+            if (_mercenaryRestrictions != null && !_mercenaryRestrictions.CanDelete(target.CharacterId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] DELETE_CHARACTER blocked: character_id={target.CharacterId} is on mercenary expedition");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x0006,
+                    new byte[] { 0x28 }));
                 return;
             }
 

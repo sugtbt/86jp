@@ -26,12 +26,16 @@ namespace DfoServer.SelfTests
         private const short HeroLotterySlot = 108;
         private const short AncientHeroLotterySlot = 109;
         private const short ConcurrentLotterySlot = 110;
+        private const short RequiredItemLotterySlot = 111;
+        private const short RequiredItemSlot = 157;
         private const short RewardSlot = 120;
         private const int SampleLotteryItemId = 10014964;
         private const int SampleRewardItemId = 400360011;
         private const int MagicBoxItemId = 10007368;
         private const int HeroLotteryItemId = 8095;
         private const int AncientHeroLotteryItemId = 8213;
+        private const int RequiredItemLotteryItemId = 10007501;
+        private const int RequiredLotteryMaterialItemId = 10007498;
         private const int CannedAvatarItemId = 39075;
         private const int LegacyEquipmentItemId = 100150516;
         private const int EpicEquipmentItemId = 101000004;
@@ -211,6 +215,11 @@ namespace DfoServer.SelfTests
                 AncientHeroLotteryItemId,
                 out var ancientDefinition)
                 && ancientDefinition.GoldCost > 0, ref failures);
+            Check("lottery required item comes from PVF", definitions.TryGet(
+                RequiredItemLotteryItemId,
+                out var requiredItemDefinition)
+                && requiredItemDefinition.RequiredItemTemplateId == RequiredLotteryMaterialItemId
+                && requiredItemDefinition.RequiredItemCount == 1, ref failures);
             var syntheticItemId = 7654321;
             var syntheticGoldCost = 1234567;
             var syntheticLottery = new PvfLib.StackableItemFile
@@ -391,6 +400,37 @@ namespace DfoServer.SelfTests
                 && ancientResult.ConsumedGold == ancientGoldCost
                 && ancientResult.UpdatedGold == 0, ref failures);
 
+            Check("required-item lottery precheck accepts exact material", service.CanOpen(
+                inventory,
+                RequiredItemLotterySlot,
+                out _), ref failures);
+            Check("required-item lottery consumes PVF material", service.TryOpen(
+                inventory,
+                RequiredItemLotterySlot,
+                false,
+                RejectingInventoryOverflowRewardSink.Instance,
+                out var requiredItemResult)
+                && requiredItemResult.ConsumedRequiredItemTemplateId == RequiredLotteryMaterialItemId
+                && requiredItemResult.ConsumedRequiredItemCount == 1
+                && requiredItemResult.RequiredItemChangedSlots.Contains(RequiredItemSlot)
+                && inventory.CountMainItem(RequiredLotteryMaterialItemId) == 0, ref failures);
+
+            var missingMaterialInventory = new InventoryService(CharacterId, AccountId);
+            missingMaterialInventory.SetListParam16(InventoryListType.Main, 24);
+            AttachStackable(
+                missingMaterialInventory,
+                RequiredItemLotterySlot,
+                RequiredItemLotteryItemId,
+                1);
+            Check("required-item lottery rejects missing material", !service.CanOpen(
+                missingMaterialInventory,
+                RequiredItemLotterySlot,
+                out _), ref failures);
+            Check("missing material does not consume lottery item", LoadStackCount(
+                missingMaterialInventory,
+                RequiredItemLotterySlot,
+                RequiredItemLotteryItemId) == 1, ref failures);
+
             var firstDoublePlan = planner.Resolve(CharacterId, AccountId, true);
             Check("active contract plans double open", firstDoublePlan.UseDoubleReward, ref failures);
             Check("double open grants two result units", service.TryOpen(
@@ -506,6 +546,8 @@ VALUES (@accountId, @premiumType, @endTime);
             AttachStackable(inventory, HeroLotterySlot, HeroLotteryItemId, 1);
             AttachStackable(inventory, AncientHeroLotterySlot, AncientHeroLotteryItemId, 1);
             AttachStackable(inventory, ConcurrentLotterySlot, SampleLotteryItemId, 1);
+            AttachStackable(inventory, RequiredItemLotterySlot, RequiredItemLotteryItemId, 1);
+            AttachStackable(inventory, RequiredItemSlot, RequiredLotteryMaterialItemId, 1);
             inventory.ClearDirtyState();
             return inventory;
         }

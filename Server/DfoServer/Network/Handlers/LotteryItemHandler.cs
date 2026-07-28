@@ -1,5 +1,6 @@
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Lottery;
+using DfoServer.Game.Mailbox;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Lottery;
@@ -178,7 +179,7 @@ namespace DfoServer.Network.Handlers
                         lease.Inventory,
                         slotIndex,
                         openPlan.UseDoubleReward,
-                        RejectingInventoryOverflowRewardSink.Instance,
+                        MailboxInventoryOverflowRewardSink.Instance,
                         out result))
                     return false;
             }

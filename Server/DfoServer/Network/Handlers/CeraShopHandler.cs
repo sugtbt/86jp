@@ -34,7 +34,7 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY parsed: {request.CommodityNos.Count} item(s) [{string.Join(", ", request.CommodityNos)}] paymentMode={request.PaymentMode}");
+            FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY parsed: {request.CommodityNos.Count} item(s) [{string.Join(", ", request.CommodityNos)}] paymentMode={request.PaymentMode} coupon={(request.CouponSelected ? $"0x{request.CouponItemId:X8}@{request.CouponSlot}" : "none")}");
             var cid = session.Player?.CharacterId ?? 0;
             var aid = session.Account?.AccountId ?? 0;
             if (cid <= 0 || aid <= 0)
@@ -61,6 +61,7 @@ namespace DfoServer.Network.Handlers
             {
                 var commodityNo = request.CommodityNos[idx];
                 var attrValue = idx < request.AttributeValues.Count ? request.AttributeValues[idx] : (byte)0;
+                var itemOptions = idx < request.ItemOptions.Count ? request.ItemOptions[idx] : null;
 
                 var (dcOk, dcResult) = await Game.Premium.PremiumService.TryBuyDevilContractSlot(
                     session,
@@ -85,6 +86,9 @@ namespace DfoServer.Network.Handlers
                         1,
                         request.PaymentMode,
                         attrValue,
+                        request.CouponSelected ? request.CouponItemId : 0,
+                        request.CouponSelected ? request.CouponSlot : (short)-1,
+                        itemOptions,
                         out result,
                         out handledByRuntime);
                 }
@@ -99,7 +103,7 @@ namespace DfoServer.Network.Handlers
                 }
                 else
                 {
-                    FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY: FAILED commodityNo={commodityNo}");
+                    FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY: FAILED commodityNo={commodityNo} avatarChoices={itemOptions?.AvatarChoices.Count ?? 0} selections={itemOptions?.SelectionChoices.Count ?? 0}");
                 }
             }
 

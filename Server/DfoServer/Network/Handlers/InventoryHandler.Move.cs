@@ -10,6 +10,7 @@ namespace DfoServer.Network.Handlers
     public sealed partial class InventoryHandler
     {
         internal const string CharmQuickSlotLimitNoticeMessage = "\u5FEB\u6377\u680F\u6700\u591A\u53EA\u80FD\u653E\u7F6E1\u4E2A\u7B26\u5492\u3002";
+        internal const byte MercenaryAvatarMutationErrorCode = 0xB4;
 
         public async Task Handle_ENUM_CMDPACKET_MOVE_ITEMSPACE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
@@ -39,6 +40,19 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log($"[{ProtocolName}] MOVE fields: src=({request.SourceListType},slot{request.SourceSlotIndex},IV=0x{srcIV:X8},stk{srcStack}) dst=({request.DestinationListType},slot{request.DestinationSlotIndex},IV=0x{request.DestinationInstanceValue:X8},stk{dstStack})");
 
             var (cid, _) = ResolveOwner(session);
+            if (IsAvatarEquipMutation(request)
+                && _mercenaryRestrictions != null
+                && !_mercenaryRestrictions.CanMutateAppearance(cid))
+            {
+                FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: MERCENARY_AVATAR_BLOCKED characterId={cid}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0013,
+                    MoveItemSpaceAckBuilder.BuildError(
+                        MercenaryAvatarMutationErrorCode,
+                        (byte)request.SourceListType,
+                        (byte)request.DestinationListType)));
+                return;
+            }
+
             if (!InventoryContext.TryGetLease(cid, out var lease) || !lease.IsOwnedBy(session.SessionId))
             {
                 FileLogger.Log($"[{ProtocolName}] MOVE_ITEMSPACE: ONLINE_INVENTORY_MISSING characterId={cid} session={session?.SessionId}");
@@ -80,6 +94,17 @@ namespace DfoServer.Network.Handlers
 
             if (ShouldSendSubtype0AppearanceUpdate(session, moveResult))
                 await _refresh.SendNoti2AppearanceUpdate(session);
+        }
+
+        internal static bool IsAvatarEquipMutation(InventoryMoveRequest request)
+        {
+            if (request == null)
+                return false;
+
+            return (request.SourceListType == InventoryListType.Avatar
+                    && request.DestinationListType == InventoryListType.Equipment)
+                || (request.SourceListType == InventoryListType.Equipment
+                    && request.DestinationListType == InventoryListType.Avatar);
         }
 
         private static InventoryMoveResult CreateMoveAckResult(InventoryMoveRequest request, InventoryMoveServiceResult result)

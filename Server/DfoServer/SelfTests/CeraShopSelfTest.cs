@@ -1,8 +1,10 @@
 using System;
 using System.IO;
+using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Shop;
 using DfoServer.Infrastructure;
+using DfoServer.Network.Parsers.CeraShop;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
@@ -57,9 +59,51 @@ namespace DfoServer.SelfTests
             CheckProduct("社区礼包(结婚戒指-男)", 102317, 2683326, 18888);
 
             Check("name tag state overwrites same character and keeps absolute expire time", CheckNameTagState());
+            Check("coupon purchase packet parses coupon item and slot", CheckCouponPurchasePacket());
+            Check("package purchase parses trailing coupon after component list", CheckPackageCouponPurchasePacket());
+            Check("PVF coupon type is accepted", InventoryCeraShopRuntimeService.IsPurchaseCoupon(10007350));
+            Check("ordinary item is rejected as coupon", !InventoryCeraShopRuntimeService.IsPurchaseCoupon(10000006));
+            Check("happy-token gift box grants account currency atomically without an inventory item", CheckHappyTokenCeraGiftBox());
 
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;
+        }
+
+        private static bool CheckCouponPurchasePacket()
+        {
+            var body = new byte[]
+            {
+                0x00, 0x00, 0x01, 0x01, 0x00, 0xFF, 0xFF,
+                0x3E, 0x9B, 0x01, 0x00, 0x00, 0x00,
+                0xA5, 0xB4, 0x98, 0x00, 0x6D, 0x00,
+            };
+
+            return CeraShopPurchaseRequest.TryParse(body, out var request)
+                && request.ProductId == 105278
+                && request.CouponSelected
+                && request.CouponItemId == 10007717
+                && request.CouponSlot == 109;
+        }
+
+        private static bool CheckPackageCouponPurchasePacket()
+        {
+            var body = new byte[]
+            {
+                0x00, 0x00, 0x01, 0x01, 0x00, 0xFF, 0xFF, 0x00,
+                0x9B, 0x01, 0x00, 0x09, 0xFD, 0x89, 0x0D, 0x06,
+                0x00, 0xAA, 0xB1, 0x0D, 0x06, 0x01, 0xC2, 0xD7,
+                0x0D, 0x06, 0x01, 0xBA, 0x14, 0x0D, 0x06, 0x00,
+                0x5F, 0xC7, 0x0C, 0x06, 0x07, 0x13, 0xEF, 0x0C,
+                0x06, 0x01, 0x4A, 0x63, 0x0D, 0x06, 0x01, 0x9B,
+                0x3B, 0x0D, 0x06, 0x01, 0x82, 0xFD, 0x0D, 0x06,
+                0x00, 0x00, 0x36, 0xB3, 0x98, 0x00, 0x44, 0x00,
+            };
+
+            return CeraShopPurchaseRequest.TryParse(body, out var request)
+                && request.ProductId == 105216
+                && request.CouponSelected
+                && request.CouponItemId == 10007350
+                && request.CouponSlot == 68;
         }
 
         private static bool CheckNameTagState()
@@ -129,6 +173,147 @@ VALUES(@characterId, @accountId, 'cerashop-name-tag');";
                     {
                     }
                 }
+            }
+        }
+
+        private static bool CheckHappyTokenCeraGiftBox()
+        {
+            const int accountId = 903011;
+            const int characterId = 903012;
+            const short sourceSlot = 40;
+            const int giftBoxItemId = 0x0098AAFE;
+            const int expectedGrant = 1800;
+            var databasePath = Path.Combine(
+                Path.GetTempPath(),
+                "cerashop-happy-token-" + Guid.NewGuid().ToString("N") + ".db");
+
+            try
+            {
+                var voucher = StackableItemProvider.Load(SpecialRewardRouter.HappyTokenCeraVoucherItemId);
+                if (voucher == null
+                    || voucher.Name?.Trim('`', ' ', '\t', '\r', '\n') != "欢乐代币券"
+                    || voucher.StackableType?.IndexOf("[material]", StringComparison.OrdinalIgnoreCase) < 0)
+                    return false;
+
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        using (var command = connection.CreateCommand())
+                        {
+                            command.Transaction = transaction;
+                            command.CommandText = @"
+INSERT INTO accounts(account_id, m_id, password_hash)
+VALUES(@accountId, 'cerashop-happy-token-selftest', '');
+INSERT INTO characters(character_id, account_id, name)
+VALUES(@characterId, @accountId, 'cerashop-happy-token');";
+                            command.Parameters.AddWithValue("@accountId", accountId);
+                            command.Parameters.AddWithValue("@characterId", characterId);
+                            command.ExecuteNonQuery();
+                        }
+
+                        var source = ItemCore.Create(ItemCore.KindConsumable, giftBoxItemId);
+                        source.Count = 1;
+                        InventoryItemRepository.UpsertCharacterSlot(
+                            connection,
+                            transaction,
+                            characterId,
+                            InventoryListType.Main,
+                            sourceSlot,
+                            source);
+                        transaction.Commit();
+                    }
+
+                    var inventory = InventoryService.LoadFromDb(connection, characterId, accountId);
+                    if (!InventorySpecialConsumableService.TryOpenPackage0207(
+                            inventory,
+                            sourceSlot,
+                            Array.Empty<int>(),
+                            RejectingInventoryOverflowRewardSink.Instance,
+                            out var result)
+                        || result?.Rewards.Count != 1
+                        || result.Rewards[0].SpecialOutcome?.Kind != SpecialRewardKind.HappyTokenCera
+                        || result.Rewards[0].ItemTemplateId != SpecialRewardRouter.HappyTokenCeraVoucherItemId
+                        || result.Rewards[0].GrantedCount != expectedGrant
+                        || result.Rewards[0].SlotIndex != -1
+                        || inventory.PendingHappyTokenCeraGrant != expectedGrant
+                        || inventory.CountMainItem(SpecialRewardRouter.HappyTokenCeraVoucherItemId) != 0
+                        || inventory.GetItem(InventoryListType.Main, sourceSlot) != null)
+                        return false;
+
+                    var lease = new InventoryLease(Guid.NewGuid(), characterId, inventory, 1);
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        if (!InventoryPersistenceService.SaveDirtyInTransaction(connection, transaction, lease)
+                            || CurrencyService.LoadWallet(connection, transaction, characterId).HappyTokenCera != expectedGrant
+                            || CountSourceRows(connection, transaction, characterId, sourceSlot) != 0)
+                            return false;
+                    }
+
+                    if (CurrencyService.LoadWallet(connection, null, characterId).HappyTokenCera != 0
+                        || InventoryItemRepository.LoadCharacterSlot(
+                            connection,
+                            characterId,
+                            InventoryListType.Main,
+                            sourceSlot) == null)
+                        return false;
+
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        if (!InventoryPersistenceService.SaveDirtyInTransaction(connection, transaction, lease))
+                            return false;
+                        transaction.Commit();
+                    }
+
+                    return CurrencyService.LoadWallet(connection, null, characterId).HappyTokenCera == expectedGrant
+                        && InventoryItemRepository.LoadCharacterSlot(
+                            connection,
+                            characterId,
+                            InventoryListType.Main,
+                            sourceSlot) == null;
+                }
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                foreach (var path in new[] { databasePath, databasePath + "-wal", databasePath + "-shm" })
+                {
+                    try
+                    {
+                        if (File.Exists(path))
+                            File.Delete(path);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+
+        private static int CountSourceRows(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            short sourceSlot)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT COUNT(*)
+FROM character_new_items
+WHERE owner_scope = 'character'
+  AND owner_id = @characterId
+  AND list_type = @listType
+  AND slot_index = @sourceSlot;";
+                command.Parameters.AddWithValue("@characterId", characterId);
+                command.Parameters.AddWithValue("@listType", (int)InventoryListType.Main);
+                command.Parameters.AddWithValue("@sourceSlot", sourceSlot);
+                return Convert.ToInt32(command.ExecuteScalar());
             }
         }
     }
