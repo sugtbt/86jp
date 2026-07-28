@@ -35,6 +35,27 @@ namespace DfoServer.Game.Settings
             return true;
         }
 
+        public static bool TryApplyCharacterVisibilityBitsToOptions(
+            byte[] mainGameOption,
+            byte visibleBits)
+        {
+            if (mainGameOption == null
+                || mainGameOption.Length < (FullAvatarOptionIndex + 1) * 2)
+                return false;
+
+            const byte growAvatarVisibleMask = 1 << 1;
+            const byte hideFullAvatarMask = 1 << 3;
+
+            return TryWriteOption(
+                    mainGameOption,
+                    VisibleGrowAvatarOptionIndex,
+                    (visibleBits & growAvatarVisibleMask) != 0)
+                && TryWriteOption(
+                    mainGameOption,
+                    FullAvatarOptionIndex,
+                    (visibleBits & hideFullAvatarMask) == 0);
+        }
+
         private static bool TryReadOption(byte[] mainGameOption, int optionIndex, out bool enabled)
         {
             enabled = false;
@@ -43,6 +64,17 @@ namespace DfoServer.Game.Settings
                 return false;
 
             enabled = System.BitConverter.ToUInt16(mainGameOption, offset) != 0;
+            return true;
+        }
+
+        private static bool TryWriteOption(byte[] mainGameOption, int optionIndex, bool enabled)
+        {
+            var offset = optionIndex * 2;
+            if (mainGameOption == null || mainGameOption.Length < offset + 2)
+                return false;
+
+            mainGameOption[offset] = enabled ? (byte)1 : (byte)0;
+            mainGameOption[offset + 1] = 0;
             return true;
         }
 

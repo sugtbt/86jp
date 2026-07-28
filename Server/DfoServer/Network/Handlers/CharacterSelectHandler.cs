@@ -236,6 +236,12 @@ namespace DfoServer.Network.Handlers
             foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(_selectCharacterDataSource, ownerCharId, ownerAcctId))
                 await session.SendPacketAsync(packet);
 
+            var visibilityBits = session.Player.Subtype0Tail?.UserStateBits ?? (byte)3;
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                (ushort)NotiPacketType.CHARAC_INVISIBLE_FALGS,
+                CharacterVisibilityBodyBuilder.Build(session.Player.UserId, visibilityBits)));
+
             var cloneTitle = AppearanceService.LoadCloneTitleItemId(ownerCharId);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x01,

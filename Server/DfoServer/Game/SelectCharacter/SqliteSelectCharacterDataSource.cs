@@ -217,7 +217,8 @@ namespace DfoServer.Game.SelectCharacter
                 var goldLimits = _goldLimitRepository.LoadOrCreate(characterId, character.Level);
                 initSnapshot.GoldLimitUpgradeLevel = goldLimits.UpgradeLevel;
             }
-            initSnapshot.MainGameOptionBlob = acctSettings?.MainGameOption ?? Settings.AccountSettings.DefaultMainGameOption;
+            initSnapshot.MainGameOptionBlob = (byte[])(acctSettings?.MainGameOption
+                ?? Settings.AccountSettings.DefaultMainGameOption).Clone();
             initSnapshot.QuickchatBank0 = acctSettings?.QuickchatBank0;
             initSnapshot.QuickchatBank1 = acctSettings?.QuickchatBank1;
             var hkSlots = initSnapshot.HotkeyConfigSlots.Count > 0
@@ -298,6 +299,13 @@ namespace DfoServer.Game.SelectCharacter
                     _databasePath, _schemaFilePath).Load(characterId);
                 if (tailSnap != null)
                     characterRecord.Subtype0Tail = tailSnap;
+
+                if (characterRecord.Subtype0Tail != null)
+                {
+                    Settings.AccountSettings.TryApplyCharacterVisibilityBitsToOptions(
+                        initSnapshot.MainGameOptionBlob,
+                        characterRecord.Subtype0Tail.UserStateBits);
+                }
 
                 
                 if (characterRecord.Subtype0Tail != null && initSnapshot.UserInfoAddition != null)
