@@ -180,8 +180,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     session.Player.Exp,
                     skillPoints,
                     honor,
-                    growthContractBonusExp,
-                    GrowthCapsuleDataProvider.GetDisplayProgress(
+                    growthContractBonusExp: growthContractBonusExp,
+                    growthCapsuleExp: GrowthCapsuleDataProvider.GetDisplayProgress(
                         session.Player.Level,
                         capsule))));
         }
