@@ -43,6 +43,12 @@ namespace PvfLib
         public int DestinationY { get; set; }
     }
 
+    public class NamedMonsterMapPosition
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
+    }
+
     public class MazeMinimapIconInfo
     {
         public int X { get; set; }
@@ -225,6 +231,8 @@ namespace PvfLib
         public string ClearRewardItem { get; set; }
         public string BossRoomEntranceCondition { get; set; }
         public string NamedMonsterMapPos { get; set; }
+        public List<NamedMonsterMapPosition> NamedMonsterMapPositions { get; set; } =
+            new List<NamedMonsterMapPosition>();
         public string WarpMapCondition { get; set; }
         public List<WarpMapConditionEntry> WarpMapConditions { get; set; } =
             new List<WarpMapConditionEntry>();
@@ -565,7 +573,10 @@ namespace PvfLib
                     case "clear map": dgn.ClearMap = data; break;
                     case "clear reward item": dgn.ClearRewardItem = data; break;
                     case "boss room entrance condition": dgn.BossRoomEntranceCondition = ReadRawNodeData(node, text, data); break;
-                    case "named monster map pos": dgn.NamedMonsterMapPos = data; break;
+                    case "named monster map pos":
+                        dgn.NamedMonsterMapPos = data;
+                        dgn.NamedMonsterMapPositions = ParseNamedMonsterMapPositions(data);
+                        break;
                     case "warp map condition":
                         dgn.WarpMapCondition = node.GetContent(text).Trim();
                         dgn.WarpMapConditions = ParseWarpMapConditions(node, text);
@@ -722,6 +733,23 @@ namespace PvfLib
                 });
                 sourceX = null;
                 sourceY = null;
+            }
+
+            return result;
+        }
+
+        private static List<NamedMonsterMapPosition> ParseNamedMonsterMapPositions(
+            string data)
+        {
+            var result = new List<NamedMonsterMapPosition>();
+            var values = ParseIntArray(data);
+            for (var index = 0; index + 1 < values.Length; index += 2)
+            {
+                result.Add(new NamedMonsterMapPosition
+                {
+                    X = values[index],
+                    Y = values[index + 1],
+                });
             }
 
             return result;

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using DfoServer.Game.Inventory;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.Quests;
 using DfoServer.GameWorld;
 using DfoServer.Network.Handlers.Dungeon;
@@ -17,6 +19,8 @@ namespace DfoServer.SelfTests
         private const int BlackChurchDungeonId = 73;
         private const int BlackChurchAiCharacterCode = 21604;
         private const int BlackChurchQuestItemId = 4755;
+        private const ushort ThievesCityQuestId = 2066;
+        private const int ThievesCityQuestItemId = 10089306;
 
         public static int Run()
         {
@@ -24,10 +28,39 @@ namespace DfoServer.SelfTests
             var failures = 0;
 
             VerifyConfiguredDrops(ref failures);
+            VerifyItemMetadataWarmupAndCache(ref failures);
+            VerifyUnifiedItemAcquisition(ref failures);
             VerifyNotificationBatcher(ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void VerifyItemMetadataWarmupAndCache(ref int failures)
+        {
+            ItemMetadataResolver.Warmup();
+            Check(
+                "item metadata warmup loads both immutable item lists",
+                ItemMetadataResolver.AreItemListsWarmed,
+                ref failures);
+
+            var firstMetadata = ItemMetadataResolver.Resolve(
+                NightmareRatTailItemId);
+            var secondMetadata = ItemMetadataResolver.Resolve(
+                NightmareRatTailItemId);
+            var firstFileLoaded = ItemMetadataResolver.TryLoadStackableFile(
+                NightmareRatTailItemId,
+                out var firstFile);
+            var secondFileLoaded = ItemMetadataResolver.TryLoadStackableFile(
+                NightmareRatTailItemId,
+                out var secondFile);
+            Check(
+                "quest-item metadata and parsed template are reused process-wide",
+                ReferenceEquals(firstMetadata, secondMetadata)
+                && firstFileLoaded
+                && secondFileLoaded
+                && ReferenceEquals(firstFile, secondFile),
+                ref failures);
         }
 
         private static void VerifyConfiguredDrops(ref int failures)
@@ -73,6 +106,59 @@ namespace DfoServer.SelfTests
                         MaxStack = 10,
                     },
                     currentHeld: 9) == 1,
+                ref failures);
+
+            var thievesCityQuest = QuestData.GetQuestFile(ThievesCityQuestId);
+            var thievesCityEntry = thievesCityQuest?.MonsterRewardItems.Find(
+                entry => entry.ItemId == ThievesCityQuestItemId);
+            var thievesCityCandidates = thievesCityEntry != null
+                ? QuestDropProvider.CheckMonsterDrop(
+                    new[] { (int)ThievesCityQuestId },
+                    thievesCityEntry.DungeonId > 0
+                        ? thievesCityEntry.DungeonId
+                        : 0,
+                    thievesCityEntry.Difficulty >= 0
+                        ? thievesCityEntry.Difficulty
+                        : 0,
+                    thievesCityEntry.MonsterCode)
+                : null;
+            var thievesCityCandidate = default(QuestDropCandidate);
+            var hasThievesCityCandidate = false;
+            if (thievesCityCandidates != null)
+            {
+                foreach (var candidate in thievesCityCandidates)
+                {
+                    if (candidate.ItemId != ThievesCityQuestItemId)
+                        continue;
+                    thievesCityCandidate = candidate;
+                    hasThievesCityCandidate = true;
+                    break;
+                }
+            }
+            Check(
+                "Thieves' City uses seeking count 20 over monster maxStack 50",
+                thievesCityEntry != null
+                    && thievesCityEntry.MaxStack == 50
+                    && hasThievesCityCandidate
+                    && thievesCityCandidate.SeekingRequiredCount == 20
+                    && QuestDropProvider.GetEffectiveHeldLimit(
+                        thievesCityCandidate) == 20,
+                ref failures);
+            Check(
+                "application clamp rejects an injected roller above seeking count",
+                hasThievesCityCandidate
+                    && QuestDropService.ClampDropCount(
+                        thievesCityCandidate,
+                        currentHeld: 0,
+                        requestedCount: 24) == 20
+                    && QuestDropService.ClampDropCount(
+                        thievesCityCandidate,
+                        currentHeld: 19,
+                        requestedCount: 24) == 1
+                    && QuestDropService.ClampDropCount(
+                        thievesCityCandidate,
+                        currentHeld: 20,
+                        requestedCount: 24) == 0,
                 ref failures);
 
             var blackChurchQuest =
@@ -130,6 +216,70 @@ namespace DfoServer.SelfTests
                 ref failures);
         }
 
+        private static void VerifyUnifiedItemAcquisition(ref int failures)
+        {
+            var inventory = new InventoryService(135002, 135002);
+            var acquisition = new DungeonItemAcquisitionService(
+                new DropService());
+            var granted = acquisition.TryGrantItems(
+                inventory,
+                new[]
+                {
+                    new DungeonItemGrantRequest
+                    {
+                        QuestId = NightmareDimensionQuestId,
+                        ItemTemplateId = NightmareRatTailItemId,
+                        Count = 1,
+                        Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
+                    },
+                    new DungeonItemGrantRequest
+                    {
+                        QuestId = BlackChurchIntrusionQuestId,
+                        ItemTemplateId = BlackChurchQuestItemId,
+                        Count = 1,
+                        Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
+                    },
+                },
+                out var result);
+            Check(
+                "unified dungeon item acquisition grants a planned quest batch",
+                granted
+                    && result.Success
+                    && result.Entries.Count == 2
+                    && result.Changes.HasChanges
+                    && inventory.CountMainItem(NightmareRatTailItemId) == 1
+                    && inventory.CountMainItem(BlackChurchQuestItemId) == 1,
+                ref failures);
+
+            var heldBeforeInvalid = inventory.CountMainItem(NightmareRatTailItemId);
+            var rejected = acquisition.TryGrantItems(
+                inventory,
+                new[]
+                {
+                    new DungeonItemGrantRequest
+                    {
+                        QuestId = NightmareDimensionQuestId,
+                        ItemTemplateId = NightmareRatTailItemId,
+                        Count = 1,
+                        Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
+                    },
+                    new DungeonItemGrantRequest
+                    {
+                        QuestId = NightmareDimensionQuestId,
+                        ItemTemplateId = int.MaxValue,
+                        Count = 1,
+                        Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
+                    },
+                },
+                out _);
+            Check(
+                "invalid quest batch is rejected before any dungeon item is inserted",
+                !rejected
+                    && inventory.CountMainItem(NightmareRatTailItemId)
+                        == heldBeforeInvalid,
+                ref failures);
+        }
+
         private static void VerifyNotificationBatcher(ref int failures)
         {
             var session = new Network.EnhancedClientSession(
@@ -137,15 +287,9 @@ namespace DfoServer.SelfTests
                 null);
             session.Player.CharacterId = 135001;
 
-            var questRefreshCount = 0;
             var inventoryRefreshCount = 0;
             var refreshedSlots = new HashSet<short>();
             var batcher = new QuestDropNotificationBatcher(
-                _ =>
-                {
-                    questRefreshCount++;
-                    return Task.CompletedTask;
-                },
                 (_, slots) =>
                 {
                     inventoryRefreshCount++;
@@ -154,20 +298,19 @@ namespace DfoServer.SelfTests
                     return Task.CompletedTask;
                 });
 
-            batcher.Queue(session, true, new short[] { 178 });
-            batcher.Queue(session, true, new short[] { 178, 179 });
+            batcher.Queue(session, new short[] { 178 });
+            batcher.Queue(session, new short[] { 178, 179 });
             Check(
                 "quest-drop refresh is deferred during a kill burst",
-                questRefreshCount == 0 && inventoryRefreshCount == 0,
+                inventoryRefreshCount == 0,
                 ref failures);
 
             var flushed = batcher.FlushPendingAsync(session)
                 .GetAwaiter()
                 .GetResult();
             Check(
-                "quest-drop burst sends one quest and one inventory refresh",
+                "quest-drop burst sends one inventory refresh without a full quest list",
                 flushed
-                    && questRefreshCount == 1
                     && inventoryRefreshCount == 1,
                 ref failures);
             Check(
@@ -177,7 +320,6 @@ namespace DfoServer.SelfTests
             Check(
                 "quest-drop flush consumes the pending batch once",
                 !batcher.FlushPendingAsync(session).GetAwaiter().GetResult()
-                    && questRefreshCount == 1
                     && inventoryRefreshCount == 1,
                 ref failures);
 

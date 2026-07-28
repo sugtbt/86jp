@@ -33,13 +33,19 @@ namespace DfoServer.Game.Quests
         {
             var list = new List<ActiveQuest>();
             using (var cmd = new SqliteCommand(
-                "SELECT slot, quest_id, trigger_value FROM character_active_quests WHERE character_id=@cid ORDER BY slot", conn, tx))
+                "SELECT slot, quest_id, trigger_value, version FROM character_active_quests WHERE character_id=@cid ORDER BY slot", conn, tx))
             {
                 cmd.Parameters.AddWithValue("@cid", characterId);
                 using (var r = cmd.ExecuteReader())
                 {
                     while (r.Read())
-                        list.Add(new ActiveQuest { Slot = r.GetInt32(0), QuestId = (ushort)r.GetInt32(1), TriggerValue = (uint)r.GetInt64(2) });
+                        list.Add(new ActiveQuest
+                        {
+                            Slot = r.GetInt32(0),
+                            QuestId = (ushort)r.GetInt32(1),
+                            TriggerValue = (uint)r.GetInt64(2),
+                            Version = r.GetInt64(3),
+                        });
                 }
             }
             return list;
@@ -52,6 +58,13 @@ namespace DfoServer.Game.Quests
                 conn.Open();
                 using (var tx = conn.BeginTransaction())
                 {
+                    using (var clear = conn.CreateCommand())
+                    {
+                        clear.Transaction = tx;
+                        clear.CommandText = "DELETE FROM character_active_quests WHERE character_id=@cid";
+                        clear.Parameters.AddWithValue("@cid", characterId);
+                        clear.ExecuteNonQuery();
+                    }
                     foreach (var q in quests)
                         InsertActiveQuest(conn, tx, characterId, q.Slot, q.QuestId, q.TriggerValue);
                     tx.Commit();
@@ -62,7 +75,7 @@ namespace DfoServer.Game.Quests
         public static void InsertActiveQuest(SqliteConnection conn, SqliteTransaction tx, int characterId, int slot, ushort questId, uint triggerValue)
         {
             using (var cmd = new SqliteCommand(
-                "INSERT OR REPLACE INTO character_active_quests (character_id, slot, quest_id, trigger_value) VALUES (@cid, @s, @qid, @tv)",
+                "INSERT INTO character_active_quests (character_id, slot, quest_id, trigger_value, version) VALUES (@cid, @s, @qid, @tv, 0)",
                 conn,
                 tx))
             {
@@ -94,19 +107,10 @@ namespace DfoServer.Game.Quests
             }
         }
 
-        public void UpdateTriggerValue(int characterId, int slot, uint triggerValue)
-        {
-            using (var conn = new SqliteConnection(_connStr))
-            {
-                conn.Open();
-                UpdateTriggerValue(conn, null, characterId, slot, triggerValue);
-            }
-        }
-
         public static void UpdateTriggerValue(SqliteConnection conn, SqliteTransaction tx, int characterId, int slot, uint triggerValue)
         {
             using (var cmd = new SqliteCommand(
-                "UPDATE character_active_quests SET trigger_value=@tv WHERE character_id=@cid AND slot=@s", conn, tx))
+                "UPDATE character_active_quests SET trigger_value=@tv, version=version+1 WHERE character_id=@cid AND slot=@s", conn, tx))
             {
                 cmd.Parameters.AddWithValue("@tv", (long)triggerValue);
                 cmd.Parameters.AddWithValue("@cid", characterId);
@@ -115,21 +119,50 @@ namespace DfoServer.Game.Quests
             }
         }
 
-        // 批量回写触发器值, 一个事务内完成。
-        public void UpdateTriggerValues(int characterId, IReadOnlyList<ActiveQuest> quests)
+        public static bool TryUpdateTriggerValueCas(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            ushort questId,
+            long expectedVersion,
+            uint expectedTrigger,
+            uint triggerValue)
         {
-            if (quests == null || quests.Count == 0)
-                return;
-
-            using (var conn = new SqliteConnection(_connStr))
+            using (var cmd = new SqliteCommand(
+                @"UPDATE character_active_quests
+                  SET trigger_value=@newTrigger, version=version+1
+                  WHERE character_id=@cid AND quest_id=@qid
+                    AND version=@version AND trigger_value=@oldTrigger",
+                conn,
+                tx))
             {
-                conn.Open();
-                using (var tx = conn.BeginTransaction())
-                {
-                    foreach (var q in quests)
-                        UpdateTriggerValue(conn, tx, characterId, q.Slot, q.TriggerValue);
-                    tx.Commit();
-                }
+                cmd.Parameters.AddWithValue("@newTrigger", (long)triggerValue);
+                cmd.Parameters.AddWithValue("@cid", characterId);
+                cmd.Parameters.AddWithValue("@qid", (int)questId);
+                cmd.Parameters.AddWithValue("@version", expectedVersion);
+                cmd.Parameters.AddWithValue("@oldTrigger", (long)expectedTrigger);
+                return cmd.ExecuteNonQuery() == 1;
+            }
+        }
+
+        public static bool TryInsertProgressEvent(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            Guid eventId,
+            string eventKind)
+        {
+            using (var cmd = new SqliteCommand(
+                @"INSERT OR IGNORE INTO quest_progress_event_inbox
+                  (character_id, event_id, event_kind)
+                  VALUES (@cid, @eid, @kind)",
+                conn,
+                tx))
+            {
+                cmd.Parameters.AddWithValue("@cid", characterId);
+                cmd.Parameters.AddWithValue("@eid", eventId.ToString("N"));
+                cmd.Parameters.AddWithValue("@kind", eventKind ?? string.Empty);
+                return cmd.ExecuteNonQuery() == 1;
             }
         }
 

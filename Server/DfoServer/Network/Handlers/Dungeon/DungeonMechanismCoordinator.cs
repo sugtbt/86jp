@@ -56,11 +56,11 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static void OnRunCreated(
             EnhancedClientSession session,
-            int dungeonId,
+            DungeonRun run,
             string source)
             => SpecialDungeonRunCoordinator.InitializeRuntime(
                 session,
-                dungeonId,
+                run,
                 source);
 
         internal static Task ClearRunEffectsAsync(
@@ -68,8 +68,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             string reason)
             => SpecialDungeonNotifier.ClearRunBuffsAsync(session, reason);
 
+        internal static Task ClearRunEffectsAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            string reason)
+            => SpecialDungeonNotifier.ClearRunBuffsAsync(session, run, reason);
+
         internal static void CancelRunTimers(EnhancedClientSession session)
             => DungeonMechanismTimerCoordinator.Cancel(session);
+
+        internal static void CancelRunTimers(DungeonRun run)
+            => DungeonMechanismTimerCoordinator.Cancel(run);
 
         internal static void ConfigureSelection(
             EnhancedClientSession session,
@@ -125,12 +134,14 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static MoveMapContext ApplyMoveTargetOverride(
             EnhancedClientSession session,
+            DungeonRun run,
             int requestedX,
             int requestedY,
             ref DungeonRoomPoint moveTarget)
         {
             var timeSpiral = TimeSpiralDungeonCoordinator.ApplyTeleportOverride(
                 session,
+                run,
                 requestedX,
                 requestedY,
                 ref moveTarget);
@@ -139,10 +150,12 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static void ApplyMapOverride(
             EnhancedClientSession session,
+            DungeonRun run,
             DungeonRoomPoint moveTarget,
             ref int overrideMapId)
             => SpecialDungeonRunCoordinator.TryApplyGentWarpOverride(
                 session,
+                run,
                 moveTarget,
                 ref overrideMapId);
 
@@ -180,41 +193,73 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static void AppendStartMapActors(
             EnhancedClientSession session,
+            DungeonRun run,
             DungeonData.MazeSumInfo maze)
-            => SpecialDungeonRunCoordinator.AppendStartMapActors(session, maze);
+            => SpecialDungeonRunCoordinator.AppendStartMapActors(
+                session,
+                run,
+                maze);
 
         internal static void OnRoomStateCreated(
             EnhancedClientSession session,
+            DungeonRun run,
             RoomState roomState)
             => TimeSpiralDungeonCoordinator.RegisterHiddenBossAfterStartMap(
                 session,
+                run,
                 roomState);
 
         internal static async Task OnStartMapSentAsync(
-            EnhancedClientSession session)
+            EnhancedClientSession session,
+            DungeonRoomIdentity roomIdentity)
         {
+            var run = session?.Player?.CurrentRun;
+            if (run == null || !run.Matches(roomIdentity))
+                return;
+
             // Preserve the established order: gauge state first, then the
             // scene condition that depends on client START_MAP actors.
-            await SpecialDungeonNotifier.SendStartMapStateAsync(session);
-            await EventMonsterConditionCoordinator.AdvanceAfterStartMapAsync(session);
+            await SpecialDungeonNotifier.SendStartMapStateAsync(session, run);
+            if (!session.Player.IsCurrentDungeonRoom(roomIdentity))
+                return;
+            await EventMonsterConditionCoordinator.AdvanceAfterStartMapAsync(
+                session,
+                run,
+                roomIdentity);
         }
 
         internal static async Task<ClearRequest> OnMonsterKilledAsync(
             EnhancedClientSession session,
+            DungeonEventEnvelope killEvent,
             ushort sequenceId,
             int monsterCode,
             byte monsterType)
         {
+            var run = session?.Player?.CurrentRun;
+            if (run == null
+                || killEvent == null
+                || !run.Matches(killEvent.RunIdentity)
+                || (killEvent.RoomInstanceId.HasValue
+                    && killEvent.RoomInstanceId.Value
+                        != run.CurrentRoomInstanceId))
+            {
+                return default;
+            }
+
             ScriptedFatalEndpointCoordinator.OnMonsterKilled(
                 session,
+                run,
                 monsterCode);
             await SpecialDungeonNotifier.ObserveMonsterKilledAsync(
                 session,
+                run,
                 monsterCode,
                 monsterType);
 
-            var run = session?.Player?.CurrentRun;
-            if (run == null)
+            if (!session.Player.IsCurrentDungeonRun(killEvent.RunIdentity)
+                || (killEvent.RoomInstanceId.HasValue
+                    && run.CurrentRoomInstanceId
+                        != killEvent.RoomInstanceId.Value))
                 return default;
 
             RoomState roomState;
@@ -253,15 +298,32 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static void OnPassiveObjectDestroyed(
             EnhancedClientSession session,
             int objectCode)
+            => OnPassiveObjectDestroyed(
+                session,
+                session?.Player?.CurrentRun,
+                objectCode);
+
+        internal static void OnPassiveObjectDestroyed(
+            EnhancedClientSession session,
+            DungeonRun run,
+            int objectCode)
             => ScriptedFatalEndpointCoordinator.OnPassiveObjectDestroyed(
                 session,
+                run,
                 objectCode);
 
         internal static CharacterDeathResolution OnCharacterDied(
             EnhancedClientSession session)
+            => OnCharacterDied(
+                session,
+                session?.Player?.CurrentRun);
+
+        internal static CharacterDeathResolution OnCharacterDied(
+            EnhancedClientSession session,
+            DungeonRun run)
         {
             var result =
-                ScriptedFatalEndpointCoordinator.OnCharacterDied(session);
+                ScriptedFatalEndpointCoordinator.OnCharacterDied(session, run);
             return new CharacterDeathResolution(
                 result.SuppressRespawn,
                 result.ShouldClearDungeon
@@ -275,10 +337,22 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static ClearRequest OnBossDieCheck(
             EnhancedClientSession session,
             BossDieCheckRequest request)
+            => OnBossDieCheck(
+                session,
+                session?.Player?.CurrentRun,
+                request);
+
+        internal static ClearRequest OnBossDieCheck(
+            EnhancedClientSession session,
+            DungeonRun run,
+            BossDieCheckRequest request)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null)
+            if (session?.Player == null
+                || run == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
+            {
                 return default;
+            }
 
             run.SpecialDungeon?.NoteSeizeMoneyBossSeq(request.BossSequence);
             FileLogger.Log(
@@ -307,67 +381,22 @@ namespace DfoServer.Network.Handlers.Dungeon
                 bossCode: bossCode);
         }
 
-        internal static Task HandleSummonMonsterCommandAsync(
+        internal static Task OnCommandReceivedAsync(
             EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body)
-            => SpecialDungeonNotifier.HandleBossSummonRequestAsync(
-                session,
-                header,
-                body);
-
-        internal static Task HandleTimerModifyInfoCommandAsync(
-            EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body)
-            => SpecialDungeonNotifier.HandleGentInfiltrateTimerModifyInfoAsync(
-                session,
-                header,
-                body);
-
-        internal static Task HandleSeaChaseResultCommandAsync(
-            EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body)
-            => SpecialDungeonNotifier.HandleSeaChaseMiniGameResultAsync(
-                session,
-                header,
-                body);
-
-        internal static Task ObserveSeaChaseCommandAsync(
-            EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body)
-            => SpecialDungeonNotifier.ObserveSeaChasePacketAsync(
-                session,
-                header,
-                body);
-
-        internal static Task HandleNpcItemDropCommandAsync(
-            EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body,
+            DungeonCommand command,
             DropService drops)
-            => DungeonNpcItemDropCoordinator.HandleCommandAsync(
+            => DungeonCommandReceivedDispatcher.DispatchAsync(
                 session,
-                header,
-                body,
+                command,
                 drops);
-
-        internal static Task HandleBreakTrapResultCommandAsync(
-            EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body)
-            => TimeSpiralDungeonCoordinator.HandleBreakTrapResultAsync(
-                session,
-                header,
-                body);
 
         internal static Task OnResultPreparingAsync(
             EnhancedClientSession session,
+            DungeonRun run,
             byte[] body)
             => SpecialDungeonSettlementCoordinator.OnResultPreparingAsync(
                 session,
+                run,
                 body);
     }
 }

@@ -1,0 +1,61 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
+
+namespace DfoServer.Game.Quests
+{
+    public sealed class QuestRunSnapshotEntry
+    {
+        internal QuestRunSnapshotEntry(ActiveQuest quest)
+        {
+            Slot = quest.Slot;
+            QuestId = quest.QuestId;
+            Version = quest.Version;
+            Trigger = new QuestTrigger(quest.TriggerValue);
+        }
+
+        public int Slot { get; }
+        public ushort QuestId { get; }
+        public long Version { get; }
+        public QuestTrigger Trigger { get; }
+    }
+
+    public sealed class QuestRunSnapshot
+    {
+        private readonly Dictionary<ushort, QuestRunSnapshotEntry> _entries;
+
+        public static QuestRunSnapshot Empty { get; } =
+            new QuestRunSnapshot(new Dictionary<ushort, QuestRunSnapshotEntry>());
+
+        private QuestRunSnapshot(Dictionary<ushort, QuestRunSnapshotEntry> entries)
+        {
+            _entries = entries;
+            QuestIds = new ReadOnlyCollection<ushort>(
+                entries.Keys.OrderBy(id => id).ToArray());
+        }
+
+        public IReadOnlyCollection<ushort> QuestIds { get; }
+        public int Count => _entries.Count;
+
+        public bool Contains(ushort questId) => _entries.ContainsKey(questId);
+
+        public bool TryGet(ushort questId, out QuestRunSnapshotEntry entry) =>
+            _entries.TryGetValue(questId, out entry);
+
+        public static QuestRunSnapshot Capture(IReadOnlyList<ActiveQuest> activeQuests)
+        {
+            if (activeQuests == null || activeQuests.Count == 0)
+                return Empty;
+
+            var entries = new Dictionary<ushort, QuestRunSnapshotEntry>();
+            foreach (var quest in activeQuests)
+            {
+                if (quest == null || quest.QuestId == 0 || entries.ContainsKey(quest.QuestId))
+                    continue;
+                entries.Add(quest.QuestId, new QuestRunSnapshotEntry(quest));
+            }
+            return entries.Count == 0 ? Empty : new QuestRunSnapshot(entries);
+        }
+    }
+}

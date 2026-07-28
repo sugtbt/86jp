@@ -131,7 +131,7 @@ namespace DfoServer.Network.Builders
 
                 writer.WriteUInt16(monster.TemplateOrder);
                 writer.WriteInt32(packetIndex);
-                writer.WriteUInt16((ushort)(firstMonsterSequence + i + 1));
+                writer.WriteUInt16((ushort)(firstMonsterSequence + i));
                 writer.WriteInt32(monster.Code);
                 writer.WriteByte(monster.Level);
                 writer.WriteByte(monster.Type);
@@ -357,7 +357,8 @@ namespace DfoServer.Network.Builders
             int blackDiamondExp = 0, int growthContractExp = 0,
             int monsterGrowthContractExp = 0, int adventureGroupExp = 0,
             uint monsterExp = 0, int bossExp = 0, int championExp = 0, int superChampionExp = 0,
-            int freeCardGold = 0, int freeCardItemId = 0, int freeCardItemCount = 0)
+            int freeCardGold = 0, int freeCardItemId = 0, int freeCardItemCount = 0,
+            int paidCardCost = 0)
         {
             var w = new GamePacketWriter();
 
@@ -409,8 +410,8 @@ namespace DfoServer.Network.Builders
             for (int i = 1; i < 8; i++)
                 w.WriteByte(0);
 
-            // === TOTAL REWARD SUM (4B) ===
-            w.WriteInt32(0);
+            // === PAID-CARD COMMISSION (4B) ===
+            w.WriteInt32(Math.Max(0, paidCardCost));
 
             // === BUFF TABLE 2 (8B) ===
             for (int i = 0; i < 8; i++)

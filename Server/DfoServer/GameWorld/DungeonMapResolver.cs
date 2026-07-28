@@ -74,6 +74,10 @@ namespace DfoServer.GameWorld
             MapDungeonOwnerCache =
                 new ConcurrentDictionary<int, int>();
 
+        private static readonly ConcurrentDictionary<int, bool>
+            MapDungeonStartAreaCache =
+                new ConcurrentDictionary<int, bool>();
+
         private static readonly ConcurrentDictionary<int, string>
             MapGreedSignatureCache =
                 new ConcurrentDictionary<int, string>();
@@ -83,7 +87,7 @@ namespace DfoServer.GameWorld
 
         internal static int ResolveMapId(int dungeonId, int x, int y, MazeInfo maze, int mazeIndex, int[] bossPos)
         {
-            var maplst = Dungeon.LoadLstFile(Path.Combine("map", "map.lst"));
+            var maplst = DungeonMapCatalog.LoadMapList();
             var loaded = Dungeon.LoadDungeonFileWithPath(dungeonId);
 
             var towerFloor = loaded.File.TowerOfDespair > 0
@@ -116,6 +120,36 @@ namespace DfoServer.GameWorld
                     allowMapTypeForBossRoom: false);
                 if (explicitBossMapId > 0)
                     return explicitBossMapId;
+
+                // An omitted Boss cell may share its physical coordinate with
+                // assets owned by another quest maze. Anchor the implicit Boss
+                // to this maze's declared MAP resource group before using the
+                // directory-wide coordinate fallback.
+                if (!HasMapSpecificationAt(maze, x, y))
+                {
+                    var expectedGreed = TryGetMazeCellGreed(
+                        maze,
+                        x,
+                        y,
+                        out var bossGreed)
+                            ? bossGreed
+                            : string.Empty;
+                    var anchoredBoss = PickImplicitBossByExplicitMapAffinity(
+                        index,
+                        maze,
+                        maplst,
+                        dungeonId,
+                        expectedGreed);
+                    if (anchoredBoss > 0)
+                    {
+                        FileLogger.Log(
+                            $"[DungeonMapResolver] BOSS_AFFINITY: " +
+                            $"dungeon={dungeonId} maze={mazeIndex} " +
+                            $"room=({x},{y}) greed={expectedGreed} " +
+                            $"map={anchoredBoss}");
+                        return anchoredBoss;
+                    }
+                }
             }
 
             // Keep a maze's explicit typed start when several start variants share
@@ -220,6 +254,23 @@ namespace DfoServer.GameWorld
             return false;
         }
 
+        private static bool HasMapSpecificationAt(
+            MazeInfo maze,
+            int x,
+            int y)
+        {
+            if (maze?.MapSpecifications == null)
+                return false;
+
+            foreach (var specification in maze.MapSpecifications)
+            {
+                if (specification.X == x && specification.Y == y)
+                    return true;
+            }
+
+            return false;
+        }
+
         internal static bool HasExplicitBossCandidatePool(
             MazeInfo maze,
             int x,
@@ -302,7 +353,7 @@ namespace DfoServer.GameWorld
             if (!HasExplicitBossCandidatePool(maze, x, y))
                 return -1;
 
-            var maplst = Dungeon.LoadLstFile(Path.Combine("map", "map.lst"));
+            var maplst = DungeonMapCatalog.LoadMapList();
             return ResolveFromMapSpecification(
                 maplst,
                 maze,
@@ -608,6 +659,33 @@ namespace DfoServer.GameWorld
                     return nearestStart;
                 if (hasCoordinateStartCandidates)
                     return -1;
+
+                // Some numeric MAP resources are entrance templates even though
+                // the maze omits its start coordinate from [map specification].
+                // Use the MAP's own [dungeon start area] marker and its affinity
+                // to this maze's explicit resources before the generic normal pool.
+                var anchoredStart = PickDungeonStartAreaByExplicitMapAffinity(
+                    index,
+                    maze,
+                    maplst,
+                    dungeonId,
+                    out var hasDungeonStartAreaCandidates);
+                if (anchoredStart > 0)
+                {
+                    FileLogger.Log(
+                        $"[DungeonMapResolver] DUNGEON_START_AREA_ANCHORED: " +
+                        $"dungeon={dungeonId} maze={mazeIndex} " +
+                        $"room=({x},{y}) map={anchoredStart}");
+                    return anchoredStart;
+                }
+                if (hasDungeonStartAreaCandidates)
+                {
+                    FileLogger.Log(
+                        $"[DungeonMapResolver] DUNGEON_START_AREA_AMBIGUOUS: " +
+                        $"dungeon={dungeonId} maze={mazeIndex} " +
+                        $"room=({x},{y})");
+                    return -1;
+                }
             }
             if (isBossRoom)
             {
@@ -738,14 +816,7 @@ namespace DfoServer.GameWorld
                 {
                     try
                     {
-                        var mapFilePath = Dungeon.ResolveFilePath(
-                            maplst,
-                            id,
-                            "map");
-                        var mapFile = MapFile.Parse(
-                            PvfArchiveAccessor.ReadText(Path.Combine(
-                                "map",
-                                mapFilePath)));
+                        var mapFile = DungeonMapCatalog.GetMapFile(id);
                         if (string.IsNullOrWhiteSpace(mapFile.Greed))
                             return string.Empty;
 
@@ -870,6 +941,189 @@ namespace DfoServer.GameWorld
                         : -1;
 
             return bestMapId;
+        }
+
+        private static int PickDungeonStartAreaByExplicitMapAffinity(
+            DungeonMapDirectoryIndex index,
+            MazeInfo maze,
+            LstFile maplst,
+            int dungeonId,
+            out bool hasCandidates)
+        {
+            hasCandidates = false;
+            if (index == null
+                || maze?.MapSpecifications == null
+                || maze.MapSpecifications.Count == 0
+                || maplst == null)
+            {
+                return -1;
+            }
+
+            var anchors = new HashSet<int>();
+            foreach (var specification in maze.MapSpecifications)
+            {
+                AddPositiveMapId(anchors, specification.Index);
+                if (specification.MapCandidates != null)
+                {
+                    foreach (var mapId in specification.MapCandidates)
+                        AddPositiveMapId(anchors, mapId);
+                }
+                if (specification.LayeredMapIds != null)
+                {
+                    foreach (var mapId in specification.LayeredMapIds)
+                        AddPositiveMapId(anchors, mapId);
+                }
+            }
+            if (anchors.Count == 0)
+                return -1;
+
+            var candidateIds = new HashSet<int>();
+            var bestDirectoryPriority = int.MaxValue;
+            foreach (var pool in index.ByType.Values)
+            {
+                foreach (var entry in pool)
+                {
+                    if (entry.MapId <= 0
+                        || anchors.Contains(entry.MapId)
+                        || GetMapDungeonOwner(maplst, entry.MapId) != dungeonId
+                        || !HasDungeonStartArea(maplst, entry.MapId))
+                    {
+                        continue;
+                    }
+
+                    if (entry.DirectoryPriority < bestDirectoryPriority)
+                    {
+                        bestDirectoryPriority = entry.DirectoryPriority;
+                        candidateIds.Clear();
+                    }
+                    if (entry.DirectoryPriority == bestDirectoryPriority)
+                        candidateIds.Add(entry.MapId);
+                }
+            }
+
+            hasCandidates = candidateIds.Count > 0;
+            if (!hasCandidates)
+                return -1;
+
+            var bestMapId = -1;
+            var bestDistance = long.MaxValue;
+            var tied = false;
+            foreach (var candidateId in candidateIds)
+            {
+                var candidateDistance = long.MaxValue;
+                foreach (var anchorId in anchors)
+                {
+                    var distance = Math.Abs((long)candidateId - anchorId);
+                    if (distance < candidateDistance)
+                        candidateDistance = distance;
+                }
+
+                if (candidateDistance < bestDistance)
+                {
+                    bestDistance = candidateDistance;
+                    bestMapId = candidateId;
+                    tied = false;
+                }
+                else if (candidateDistance == bestDistance
+                         && candidateId != bestMapId)
+                {
+                    tied = true;
+                }
+            }
+
+            return tied ? -1 : bestMapId;
+        }
+
+        private static int PickImplicitBossByExplicitMapAffinity(
+            DungeonMapDirectoryIndex index,
+            MazeInfo maze,
+            LstFile maplst,
+            int dungeonId,
+            string expectedGreed)
+        {
+            if (index == null
+                || maze?.MapSpecifications == null
+                || maze.MapSpecifications.Count == 0
+                || maplst == null
+                || !index.ByType.TryGetValue(
+                    MapFileType.Boss,
+                    out var bossPool)
+                || bossPool.Count == 0)
+            {
+                return -1;
+            }
+
+            var anchors = new HashSet<int>();
+            foreach (var specification in maze.MapSpecifications)
+            {
+                AddPositiveMapId(anchors, specification.Index);
+                if (specification.MapCandidates != null)
+                {
+                    foreach (var mapId in specification.MapCandidates)
+                        AddPositiveMapId(anchors, mapId);
+                }
+                if (specification.LayeredMapIds != null)
+                {
+                    foreach (var mapId in specification.LayeredMapIds)
+                        AddPositiveMapId(anchors, mapId);
+                }
+            }
+            if (anchors.Count == 0)
+                return -1;
+
+            var candidateIds = new HashSet<int>();
+            var bestDirectoryPriority = int.MaxValue;
+            foreach (var entry in bossPool)
+            {
+                if (entry.MapId <= 0
+                    || GetMapDungeonOwner(maplst, entry.MapId) != dungeonId
+                    || (!string.IsNullOrEmpty(expectedGreed)
+                        && !string.Equals(
+                            GetMapGreedSignature(maplst, entry.MapId),
+                            expectedGreed,
+                            StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                if (entry.DirectoryPriority < bestDirectoryPriority)
+                {
+                    bestDirectoryPriority = entry.DirectoryPriority;
+                    candidateIds.Clear();
+                }
+                if (entry.DirectoryPriority == bestDirectoryPriority)
+                    candidateIds.Add(entry.MapId);
+            }
+            if (candidateIds.Count == 0)
+                return -1;
+
+            var bestMapId = -1;
+            var bestDistance = long.MaxValue;
+            var tied = false;
+            foreach (var candidateId in candidateIds)
+            {
+                var candidateDistance = long.MaxValue;
+                foreach (var anchorId in anchors)
+                {
+                    var distance = Math.Abs((long)candidateId - anchorId);
+                    if (distance < candidateDistance)
+                        candidateDistance = distance;
+                }
+
+                if (candidateDistance < bestDistance)
+                {
+                    bestDistance = candidateDistance;
+                    bestMapId = candidateId;
+                    tied = false;
+                }
+                else if (candidateDistance == bestDistance
+                         && candidateId != bestMapId)
+                {
+                    tied = true;
+                }
+            }
+
+            return tied ? -1 : bestMapId;
         }
 
         private static void AddPositiveMapId(HashSet<int> mapIds, int mapId)
@@ -1202,8 +1456,7 @@ namespace DfoServer.GameWorld
             var found = false;
             try
             {
-                var mapFilePath = Dungeon.ResolveFilePath(maplst, mapId, "map");
-                var mapFile = MapFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("map", mapFilePath)));
+                var mapFile = DungeonMapCatalog.GetMapFile(mapId);
                 foreach (var monster in mapFile.Monsters)
                 {
                     if (monster.MonsterId.GetValueOrDefault() > 0 && monster.Type == MonsterType.Boss)
@@ -1226,10 +1479,7 @@ namespace DfoServer.GameWorld
         private static HashSet<int> LoadMapMonsterCodes(int mapId)
         {
             var result = new HashSet<int>();
-            var maplst = Dungeon.LoadLstFile(Path.Combine("map", "map.lst"));
-            var mapFilePath = Dungeon.ResolveFilePath(maplst, mapId, "map");
-            var mapFile = MapFile.Parse(
-                PvfArchiveAccessor.ReadText(Path.Combine("map", mapFilePath)));
+            var mapFile = DungeonMapCatalog.GetMapFile(mapId);
 
             AddMonsterCodes(result, mapFile.Monsters);
             AddMonsterCodes(result, mapFile.MonsterConditionMonsters);
@@ -1267,16 +1517,36 @@ namespace DfoServer.GameWorld
                 {
                     try
                     {
-                        var mapFilePath = Dungeon.ResolveFilePath(
-                            maplst,
-                            id,
-                            "map");
-                        return MapFile.Parse(PvfArchiveAccessor.ReadText(
-                            Path.Combine("map", mapFilePath))).DungeonId;
+                        return DungeonMapCatalog
+                            .GetMapFile(id)
+                            .DungeonId;
                     }
                     catch
                     {
                         return -1;
+                    }
+                });
+        }
+
+        private static bool HasDungeonStartArea(LstFile maplst, int mapId)
+        {
+            if (maplst == null || mapId <= 0)
+                return false;
+
+            return MapDungeonStartAreaCache.GetOrAdd(
+                mapId,
+                id =>
+                {
+                    try
+                    {
+                        var startArea = DungeonMapCatalog
+                            .GetMapFile(id)
+                            .DungeonStartArea;
+                        return startArea != null && startArea.Length >= 4;
+                    }
+                    catch
+                    {
+                        return false;
                     }
                 });
         }

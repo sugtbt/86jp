@@ -20,43 +20,62 @@ namespace DfoServer.Game.Dungeon
 
         public (int goldAmount, List<DropInfo> drops) GenerateMonsterDrops(
             int monsterLevel, int monsterType, int monsterCode,
-            int difficulty, int dungeonLevel,
+            int difficulty, int dungeonLevel, int partyMemberCount,
+            int chronicleDropJobGroup,
+            DungeonDropPolicy dropPolicy,
             ref ushort slotCounter,
             IReadOnlyList<MonsterDropTable.DropPoolEntry> dropPool = null)
         {
+            dropPolicy ??= DungeonDropPolicy.Standard;
             var drops = new List<DropInfo>();
-
             var diffBonus = difficulty >= 0 && difficulty < DifficultyGoldBonus.Length
                 ? DifficultyGoldBonus[difficulty] : 1.0f;
 
-            MonsterDropConfig.GetAllDropRates(monsterLevel, monsterType,
-                out var goldRate, out var type1Rate, out var type2Rate,
-                out var type3Rate);
-
-            goldRate = Math.Min((int)(goldRate * diffBonus), DropDenominator);
-            type1Rate = Math.Min((int)(type1Rate * diffBonus), DropDenominator);
-            type2Rate = Math.Min((int)(type2Rate * diffBonus), DropDenominator);
-            type3Rate = Math.Min((int)(type3Rate * diffBonus), DropDenominator);
-
-            
-            
-            var goldBase = ExpTableProvider.GetMonsterGold(monsterLevel, out int variancePct);
-            var goldVariance = variancePct > 0
-                ? (_lcg.Next(2 * variancePct + 1) - variancePct) * goldBase / 100 : 0;
-            var goldAmount = Math.Max(1, (int)((goldBase + goldVariance) * diffBonus));
-
-            if (goldRate > _lcg.Next(DropDenominator))
+            var goldRate = 0;
+            var type1Rate = 0;
+            var type2Rate = 0;
+            var type3Rate = 0;
+            if (dropPolicy.Allows(DungeonMonsterDropSource.Gold)
+                || dropPolicy.Allows(DungeonMonsterDropSource.GenericItems))
             {
-                slotCounter++;
-                drops.Add(DropInfo.CreateGold(slotCounter, goldAmount));
-            }
-            else
-            {
-                goldAmount = 0;
+                MonsterDropConfig.GetAllDropRates(
+                    monsterLevel,
+                    monsterType,
+                    out goldRate,
+                    out type1Rate,
+                    out type2Rate,
+                    out type3Rate);
+
+                goldRate = Math.Min((int)(goldRate * diffBonus), DropDenominator);
+                type1Rate = Math.Min((int)(type1Rate * diffBonus), DropDenominator);
+                type2Rate = Math.Min((int)(type2Rate * diffBonus), DropDenominator);
+                type3Rate = Math.Min((int)(type3Rate * diffBonus), DropDenominator);
             }
 
-            
-            if (type1Rate > _lcg.Next(DropDenominator))
+            var goldAmount = 0;
+            if (dropPolicy.Allows(DungeonMonsterDropSource.Gold))
+            {
+                var goldBase = ExpTableProvider.GetMonsterGold(
+                    monsterLevel,
+                    out var variancePct);
+                var goldVariance = variancePct > 0
+                    ? (_lcg.Next(2 * variancePct + 1) - variancePct)
+                        * goldBase / 100
+                    : 0;
+                var rolledGoldAmount = Math.Max(
+                    1,
+                    (int)((goldBase + goldVariance) * diffBonus));
+
+                if (goldRate > _lcg.Next(DropDenominator))
+                {
+                    goldAmount = rolledGoldAmount;
+                    slotCounter++;
+                    drops.Add(DropInfo.CreateGold(slotCounter, goldAmount));
+                }
+            }
+
+            if (dropPolicy.Allows(DungeonMonsterDropSource.GenericItems)
+                && type1Rate > _lcg.Next(DropDenominator))
             {
                 int rarity = MonsterDropConfig.RollRarity(_lcg);
                 int itemId = MonsterDropConfig.ChooseStackable(_lcg, monsterLevel, rarity);
@@ -67,8 +86,8 @@ namespace DfoServer.Game.Dungeon
                 }
             }
 
-            
-            if (type2Rate > _lcg.Next(DropDenominator))
+            if (dropPolicy.Allows(DungeonMonsterDropSource.GenericItems)
+                && type2Rate > _lcg.Next(DropDenominator))
             {
                 int rarity = MonsterDropConfig.RollRarity(_lcg);
                 int itemId = MonsterDropConfig.ChooseEquipment(_lcg, monsterLevel, rarity);
@@ -79,8 +98,8 @@ namespace DfoServer.Game.Dungeon
                 }
             }
 
-            
-            if (type3Rate > _lcg.Next(DropDenominator))
+            if (dropPolicy.Allows(DungeonMonsterDropSource.GenericItems)
+                && type3Rate > _lcg.Next(DropDenominator))
             {
                 int rarity = MonsterDropConfig.RollRarity(_lcg);
                 int itemId = MonsterDropConfig.ChooseStackable(_lcg, monsterLevel, rarity);
@@ -91,7 +110,9 @@ namespace DfoServer.Game.Dungeon
                 }
             }
 
-            if (dropPool != null && dropPool.Count > 0
+            if ((dropPolicy.Allows(DungeonMonsterDropSource.MonsterTemplateItems)
+                    || dropPolicy.Allows(DungeonMonsterDropSource.AreaMaterials))
+                && dropPool != null && dropPool.Count > 0
                 && MobItemDropRate > _lcg.Next(DropDenominator))
             {
                 int totalWeight = 0;
@@ -115,13 +136,23 @@ namespace DfoServer.Game.Dungeon
                 }
             }
 
-            
-            var independentDrops = IndependentDropSystem.GenerateDrops(
-                monsterCode, difficulty, dungeonLevel, _lcg, ref slotCounter);
-            drops.AddRange(independentDrops);
+            if (dropPolicy.Allows(DungeonMonsterDropSource.Independent))
+            {
+                var independentDrops = IndependentDropSystem.GenerateDrops(
+                    monsterCode, difficulty, dungeonLevel, partyMemberCount,
+                    chronicleDropJobGroup,
+                    _lcg, ref slotCounter);
+                drops.AddRange(independentDrops);
+            }
 
-            var worldDrops = WorldDropSystem.GenerateDrops(monsterLevel, _lcg, ref slotCounter);
-            drops.AddRange(worldDrops);
+            if (dropPolicy.Allows(DungeonMonsterDropSource.World))
+            {
+                var worldDrops = WorldDropSystem.GenerateDrops(
+                    monsterLevel,
+                    _lcg,
+                    ref slotCounter);
+                drops.AddRange(worldDrops);
+            }
 
             return (goldAmount, drops);
         }

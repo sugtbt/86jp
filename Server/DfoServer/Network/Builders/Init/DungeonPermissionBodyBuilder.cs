@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.SelectCharacter;
 
 namespace DfoServer.Network.Builders
@@ -18,14 +19,17 @@ namespace DfoServer.Network.Builders
         internal static byte[] BuildEntries(
             IReadOnlyList<DungeonPermissionEntrySnapshot> permissions)
         {
-            var count = permissions?.Count ?? 0;
+            var persistent = DungeonPermissionProjector.ProjectForClient(
+                permissions);
+
+            var count = persistent.Count;
             var body = new byte[2 + count * 3];
             Buffer.BlockCopy(BitConverter.GetBytes((ushort)count), 0, body, 0, 2);
             for (var i = 0; i < count; i++)
             {
                 var off = 2 + i * 3;
-                Buffer.BlockCopy(BitConverter.GetBytes(permissions[i].DungeonId), 0, body, off, 2);
-                body[off + 2] = permissions[i].ClearState;
+                Buffer.BlockCopy(BitConverter.GetBytes(persistent[i].DungeonId), 0, body, off, 2);
+                body[off + 2] = persistent[i].ClearState;
             }
             return body;
         }

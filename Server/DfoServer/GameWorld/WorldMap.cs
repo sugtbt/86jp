@@ -46,6 +46,139 @@ namespace DfoServer.GameWorld
             return area;
         }
 
+        public static bool IsTaskExclusiveDungeon(int dungeonId)
+        {
+            return IsQuestDungeonAsset(dungeonId);
+        }
+
+        public static bool IsTaskExclusiveDungeonAvailable(
+            int dungeonId,
+            ISet<int> activeQuestIds)
+        {
+            if (!IsTaskExclusiveDungeon(dungeonId))
+                return true;
+            if (activeQuestIds == null || activeQuestIds.Count == 0)
+                return false;
+
+            if (Index.Value.EntriesByDungeonId.TryGetValue(
+                    dungeonId,
+                    out var entries))
+            {
+                foreach (var entry in entries)
+                {
+                    if (entry.InProgressOnly
+                        && entry.HasExplicitQuestId
+                        && entry.QuestId > 0
+                        && activeQuestIds.Contains(entry.QuestId))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            foreach (var questId in GetDungeonQuestConnectionIds(dungeonId))
+            {
+                if (activeQuestIds.Contains(questId))
+                    return true;
+            }
+
+            foreach (var questId in activeQuestIds)
+            {
+                if (QuestData.ReferencesDungeon(questId, dungeonId))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public static IReadOnlyList<int> GetTaskExclusiveQuestIds(int dungeonId)
+        {
+            var result = new List<int>();
+            var seen = new HashSet<int>();
+            if (Index.Value.EntriesByDungeonId.TryGetValue(
+                    dungeonId,
+                    out var entries))
+            {
+                foreach (var entry in entries)
+                {
+                    if (entry.InProgressOnly
+                        && entry.HasExplicitQuestId
+                        && entry.QuestId > 0
+                        && seen.Add(entry.QuestId))
+                    {
+                        result.Add(entry.QuestId);
+                    }
+                }
+            }
+
+            foreach (var questId in GetDungeonQuestConnectionIds(dungeonId))
+            {
+                if (seen.Add(questId))
+                    result.Add(questId);
+            }
+
+            return result;
+        }
+
+        public static bool ShouldPersistDungeonPermission(int dungeonId) =>
+            !IsTaskExclusiveDungeon(dungeonId);
+
+        private static bool IsQuestDungeonAsset(int dungeonId)
+        {
+            if (dungeonId <= 0)
+                return false;
+
+            try
+            {
+                var loaded = Dungeon.LoadDungeonFileWithPath(dungeonId);
+                var path = (loaded.FilePath ?? string.Empty)
+                    .Replace('\\', '/')
+                    .TrimStart('/');
+                return path.StartsWith("quest/", StringComparison.OrdinalIgnoreCase)
+                    || path.StartsWith("dungeon/quest/", StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static IReadOnlyList<int> GetDungeonQuestConnectionIds(
+            int dungeonId)
+        {
+            var result = new List<int>();
+            var seen = new HashSet<int>();
+            try
+            {
+                var dungeon = Dungeon.GetDungeonFile(dungeonId);
+                AddQuestConnectionId(dungeon?.QuestConnection, seen, result);
+                if (dungeon?.Mazes != null)
+                {
+                    foreach (var maze in dungeon.Mazes)
+                        AddQuestConnectionId(maze?.QuestConnection, seen, result);
+                }
+            }
+            catch
+            {
+                // Missing or malformed PVF data cannot grant a task-only entry.
+            }
+
+            return result;
+        }
+
+        private static void AddQuestConnectionId(
+            int[] connection,
+            HashSet<int> seen,
+            List<int> result)
+        {
+            if (connection == null || connection.Length < 2)
+                return;
+
+            var questId = connection[1];
+            if (questId > 0 && seen.Add(questId))
+                result.Add(questId);
+        }
+
         public static bool IsHellDungeon(int dungeonId)
         {
             var area = GetAreaByDungeonId(dungeonId);
@@ -381,10 +514,28 @@ namespace DfoServer.GameWorld
             {
                 Areas = areas;
                 AreaByDungeonId = areaByDungeonId;
+                EntriesByDungeonId = new Dictionary<int, List<WorldMapDungeonEntry>>();
+                foreach (var area in areas)
+                {
+                    foreach (var entry in area.Dungeons)
+                    {
+                        if (entry.DungeonId <= 0)
+                            continue;
+                        if (!EntriesByDungeonId.TryGetValue(
+                                entry.DungeonId,
+                                out var entries))
+                        {
+                            entries = new List<WorldMapDungeonEntry>();
+                            EntriesByDungeonId[entry.DungeonId] = entries;
+                        }
+                        entries.Add(entry);
+                    }
+                }
             }
 
             public List<WorldMapArea> Areas { get; }
             public Dictionary<int, WorldMapArea> AreaByDungeonId { get; }
+            public Dictionary<int, List<WorldMapDungeonEntry>> EntriesByDungeonId { get; }
         }
     }
 }

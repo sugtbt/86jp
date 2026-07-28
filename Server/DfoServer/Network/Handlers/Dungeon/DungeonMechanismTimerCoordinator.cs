@@ -1,7 +1,7 @@
 using DfoServer.Game.Dungeon;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using System;
-using System.Threading;
 
 namespace DfoServer.Network.Handlers.Dungeon
 {
@@ -22,7 +22,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            Cancel(session);
             var seconds = special.GentInfiltrateTimerSeconds;
             if (seconds <= 0)
             {
@@ -33,83 +32,63 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var version = Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-            if (version == 0)
-                version = Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-
             var scheduledSeconds =
                 seconds + GentInfiltrateClientTimerSyncGraceSeconds;
+            var identity = run.CaptureIdentity();
+            var ticket = run.Timers.Begin(
+                DungeonRunTimerKeys.GentInfiltrateTimeout);
             var timerName =
-                $"special-dungeon:gent-infiltrate:{session.Player.CharacterId}:{run.StartedUtc.Ticks}";
+                $"special-dungeon:gent-infiltrate:{session.Player.CharacterId}:" +
+                $"{run.RunId}:{ticket.Generation}";
             var handle = ClockService.Instance.ScheduleOneShotAfterAsync(
                 timerName,
                 TimeSpan.FromSeconds(scheduledSeconds),
-                async _ =>
-                {
-                    if (!IsCurrent(session, run, version))
-                        return;
+                async _ => await OnTimeoutElapsedAsync(
+                    session,
+                    run,
+                    identity,
+                    ticket));
 
-                    await SpecialDungeonNotifier.MarkGentInfiltrateTimeoutAsync(
-                        session,
-                        "timer");
-                });
-
-            StoreHandle(run, version, handle);
+            run.Timers.Attach(ticket, handle);
             FileLogger.Log(
                 $"[SpecialDungeonModule] GENT_INFILTRATE timer scheduled " +
                 $"source={source} cid={session.Player.CharacterId} " +
                 $"dungeon={special.DungeonId} configSeconds={seconds} " +
                 $"scheduledSeconds={scheduledSeconds} " +
                 $"clientSyncGrace={GentInfiltrateClientTimerSyncGraceSeconds} " +
-                $"version={version}");
+                $"generation={ticket.Generation}");
         }
 
         internal static void Cancel(EnhancedClientSession session)
         {
             var run = session?.Player?.CurrentRun;
+            Cancel(run);
+        }
+
+        internal static void Cancel(DungeonRun run)
+        {
             if (run == null)
                 return;
 
-            Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-            var handle = Interlocked.Exchange(
-                ref run.SpecialDungeonTimerHandle,
-                null);
-            handle?.Cancel();
+            run.Timers.Cancel(DungeonRunTimerKeys.GentInfiltrateTimeout);
         }
 
-        private static bool IsCurrent(
+        private static async System.Threading.Tasks.Task OnTimeoutElapsedAsync(
             EnhancedClientSession session,
             DungeonRun run,
-            int version)
-            => session?.Player != null
-                && ReferenceEquals(session.Player.CurrentRun, run)
-                && run.SpecialDungeonTimerVersion == version;
-
-        private static void StoreHandle(
-            DungeonRun run,
-            int version,
-            ClockService.ClockTimerHandle handle)
+            DungeonRunIdentity identity,
+            RunTimerTicket ticket)
         {
-            if (run.SpecialDungeonTimerVersion != version)
-            {
-                handle.Cancel();
+            if (session?.Player == null
+                || !session.Player.IsCurrentDungeonRun(identity)
+                || !run.Matches(identity)
+                || !run.Timers.IsCurrent(ticket))
                 return;
-            }
 
-            var previous = Interlocked.Exchange(
-                ref run.SpecialDungeonTimerHandle,
-                handle);
-            if (previous != null && !ReferenceEquals(previous, handle))
-                previous.Cancel();
-
-            if (run.SpecialDungeonTimerVersion != version)
-            {
-                Interlocked.CompareExchange(
-                    ref run.SpecialDungeonTimerHandle,
-                    null,
-                    handle);
-                handle.Cancel();
-            }
+            await SpecialDungeonNotifier.MarkGentInfiltrateTimeoutAsync(
+                session,
+                run,
+                "timer");
         }
     }
 }

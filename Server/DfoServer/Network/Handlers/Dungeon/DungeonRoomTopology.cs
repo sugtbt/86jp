@@ -135,6 +135,16 @@ namespace DfoServer.Network.Handlers.Dungeon
             return cells;
         }
 
+        internal static int CountConfiguredRooms(MazeInfo maze)
+        {
+            var count = BuildMazeCells(
+                dungeonId: 0,
+                mazeIndex: -1,
+                maze,
+                includePvfCoordinates: false).Count;
+            return Math.Max(1, count);
+        }
+
         private static void AddBossCell(HashSet<DungeonRoomPoint> cells, int[] bossMapPos)
         {
             if (bossMapPos != null && bossMapPos.Length >= 2)
@@ -262,16 +272,30 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 for (var x = 0; x < maze.Width; x++)
                 {
-                    var ch = values[(y * maze.Width + x) * charsPerCell];
-                    if (IsOpenGreedCell(ch))
+                    var valueIndex = (y * maze.Width + x) * charsPerCell;
+                    var first = values[valueIndex];
+                    var second = charsPerCell == 2 ? values[valueIndex + 1] : '\0';
+                    if (IsOpenGreedCell(first, second, charsPerCell))
                         cells.Add(new DungeonRoomPoint(x, y));
                 }
             }
         }
 
-        private static bool IsOpenGreedCell(char ch)
+        private static bool IsOpenGreedCell(char first, char second, int charsPerCell)
         {
-            return ch != '0' && ch != '.' && ch != 'x' && ch != 'X';
+            if (charsPerCell == 2)
+            {
+                if ((first == 'A' && second == 'A')
+                    || (first == '0' && second == '0')
+                    || (first == '.' && second == '.')
+                    || ((first == 'x' || first == 'X')
+                        && (second == 'x' || second == 'X')))
+                {
+                    return false;
+                }
+            }
+
+            return first != '0' && first != '.' && first != 'x' && first != 'X';
         }
 
         internal static DungeonRoomProgress GetCurrentRoomProgress(EnhancedClientSession session)

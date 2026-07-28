@@ -268,6 +268,38 @@ namespace DfoServer.SelfTests
                         && !clone.Armed
                         && !clone.ClearIssued,
                     ref failures);
+
+                var staleRun = new DungeonRun(101, 0)
+                {
+                    RoomKey = new RoomKey(1, 2, 0),
+                    ScriptedFatalEndpoint = clone,
+                };
+                staleRun.RoomStates[staleRun.RoomKey] = new RoomState
+                {
+                    Maze = new Dungeon.MazeSumInfo
+                    {
+                        X = 1,
+                        Y = 2,
+                        Index = 300,
+                    },
+                    KilledSeqIds = new HashSet<ushort>(),
+                };
+                session.Player.CurrentRun = staleRun;
+                DungeonMechanismCoordinator.OnPassiveObjectDestroyed(
+                    session,
+                    triggerPassiveObjectCode);
+                session.Player.CurrentRun = new DungeonRun(102, 0);
+                var staleDeath =
+                    DungeonMechanismCoordinator.OnCharacterDied(
+                        session,
+                        staleRun);
+                Check(
+                    "stale scripted death cannot consume or clear a replacement run",
+                    !staleDeath.SuppressRespawn
+                        && !staleDeath.ClearRequest.ShouldClearDungeon
+                        && staleRun.ScriptedFatalEndpoint.Armed
+                        && !staleRun.ScriptedFatalEndpoint.ClearIssued,
+                    ref failures);
             }
         }
 

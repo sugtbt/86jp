@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using DfoServer.Game.DeathTower;
 using DfoServer.Game.Dungeon;
 using DfoServer.Network;
+using DfoServer.Network.Handlers.Dungeon;
 
 namespace DfoServer.SelfTests
 {
@@ -20,7 +21,7 @@ namespace DfoServer.SelfTests
 
             using (var materialFixture = ProtocolFixture.Create(TowerColorlessCubeItemId))
             {
-                var handler = new DeathTowerHandler();
+                var handler = new DeathTowerCoordinator();
                 var handledPickup = handler.TryHandleGetItem(materialFixture.Session, 51)
                     .GetAwaiter().GetResult();
                 var pickup = materialFixture.ReadPacket();
@@ -40,7 +41,7 @@ namespace DfoServer.SelfTests
 
             using (var fixture = ProtocolFixture.Create())
             {
-                var handler = new DeathTowerHandler();
+                var handler = new DeathTowerCoordinator();
 
                 var handledPickup = handler.TryHandleGetItem(fixture.Session, 51)
                     .GetAwaiter().GetResult();
@@ -135,7 +136,7 @@ namespace DfoServer.SelfTests
 
             using (var routingFixture = ProtocolFixture.Create())
             {
-                var handler = new DeathTowerHandler();
+                var handler = new DeathTowerCoordinator();
                 var petBody = BuildUseBody(3, TowerHastePotionItemId, 1);
                 petBody[2] = 1;
                 var handledPetList = handler.TryHandleUseStackable(

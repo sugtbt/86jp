@@ -30,6 +30,8 @@ namespace DfoServer.Game.Quests
     {
         public byte ErrorCode;
         public ushort QuestId;
+        internal InventoryMutationSet InventoryChanges { get; } =
+            new InventoryMutationSet();
 
         public bool Success => ErrorCode == 0;
 

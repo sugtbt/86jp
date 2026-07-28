@@ -1,4 +1,5 @@
 using DfoServer.Game.Dungeon;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using System;
@@ -17,9 +18,9 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static async Task OnResultPreparingAsync(
             EnhancedClientSession session,
+            DungeonRun run,
             byte[] body)
         {
-            var run = session?.Player?.CurrentRun;
             var special = run?.SpecialDungeon;
             if (run == null
                 || special == null
@@ -45,10 +46,11 @@ namespace DfoServer.Network.Handlers.Dungeon
             var bossSequence = special.SeizeMoneyBossSeq;
             var bossCode = ResolveBossCode(run, bossSequence);
             if (bossCode <= 0
-                || !IndependentDropSystem.TryResolveSingleGuaranteedFixedDrop(
+                || !IndependentDropSystem.TryResolveSingleFixedDropTemplate(
                     bossCode,
                     run.Difficulty,
                     dungeonLevel,
+                    run.EntryPartyMemberCount,
                     out var rewardItemId,
                     out var maxDropCount))
             {
@@ -60,7 +62,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var config = special.Config.SeizeMoney;
+            var config = special.Definition.SeizeMoney;
             var unitValue = Math.Max(1, config.GaugeSubOnDamage);
             var maxUnits = Math.Max(1, config.GaugeMax / unitValue);
             var hitCount = Math.Max(
@@ -100,6 +102,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
             }
 
+            if (!session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
+                return;
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x00,
                 (ushort)NotiPacketType.DIE_MONSTER,

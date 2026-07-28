@@ -22,12 +22,19 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal async Task HandleMoveMap(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
-            // 塔内分流: 在塔中时 MOVE_MAP = 推进下一层(不走普通地图切换)
-            if (await _svc.DeathTower.TryHandleMoveMap(session))
-                return;
-
             var run = session.Player.CurrentRun;
             if (run == null) return;
+            var leaderRunIdentity = run.CaptureIdentity();
+
+            // 塔内分流: 在塔中时 MOVE_MAP = 推进下一层(不走普通地图切换)
+            if (run.Tower != null)
+            {
+                if (await _svc.DeathTower.TryHandleMoveMap(session))
+                    return;
+                if (!session.Player.IsCurrentDungeonRun(leaderRunIdentity))
+                    return;
+            }
+            var leaderPreviousRoomInstanceId = run.CurrentRoomInstanceId;
 
             var req = MoveMapRequest.Parse(body);
 
@@ -37,7 +44,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            if (IsCurrentHellPartyLocked(session))
+            if (IsHellPartyLocked(run))
             {
                 FileLogger.Log($"[DungeonHandler] MOVE_MAP blocked by active hell party: current=({run.RoomKey.X},{run.RoomKey.Y}) next=({req.NextX},{req.NextY})");
                 return;
@@ -63,6 +70,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var mechanismMove =
                 DungeonMechanismCoordinator.ApplyMoveTargetOverride(
                     session,
+                    run,
                     req.NextX,
                     req.NextY,
                     ref moveTarget);
@@ -89,9 +97,19 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             DungeonMechanismCoordinator.ApplyMapOverride(
                 session,
+                run,
                 moveTarget,
                 ref overrideMapId);
-            await SendStartMapAsync(session, moveTarget.X, moveTarget.Y, overrideMapId);
+            var leaderRoomIdentity = await SendStartMapAsync(
+                session,
+                run,
+                moveTarget.X,
+                moveTarget.Y,
+                overrideMapId);
+            if (!leaderRoomIdentity.HasValue
+                || !session.Player.IsCurrentDungeonRoom(
+                    leaderRoomIdentity.Value))
+                return;
             DungeonMechanismCoordinator.OnMoveMapCompleted(
                 session,
                 mechanismMove,
@@ -103,7 +121,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 moveTarget.X,
                 moveTarget.Y,
                 overrideMapId,
-                mechanismMove);
+                mechanismMove,
+                leaderRunIdentity,
+                leaderRoomIdentity.Value,
+                leaderPreviousRoomInstanceId);
         }
 
         // 队长换图时把同队【在副本里】的成员也移到同一房间(服务端驱动, 队员副本=队长迷宫拷贝)。⚠️待真机验证。
@@ -112,7 +133,10 @@ namespace DfoServer.Network.Handlers.Dungeon
             int nextX,
             int nextY,
             int overrideMapId,
-            DungeonMechanismCoordinator.MoveMapContext mechanismMove)
+            DungeonMechanismCoordinator.MoveMapContext mechanismMove,
+            DungeonRunIdentity leaderRunIdentity,
+            DungeonRoomIdentity leaderRoomIdentity,
+            long leaderPreviousRoomInstanceId)
         {
             var pm = _svc.PartyManager;
             var sessions = _svc.Sessions;
@@ -125,14 +149,39 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 if (m.UserId == leaderUid) continue;
                 sessions.TryGet(m.CharacterId, out var bs);
-                if (bs?.Player?.CurrentRun == null || bs.TcpClient == null || !bs.TcpClient.Connected) continue;
+                var memberRun = bs?.Player?.CurrentRun;
+                if (memberRun == null
+                    || bs.TcpClient == null
+                    || !bs.TcpClient.Connected
+                    || memberRun.PartyDungeonInstanceId != leaderRunIdentity.PartyDungeonInstanceId
+                    || memberRun.CurrentRoomInstanceId != leaderPreviousRoomInstanceId
+                    || memberRun.RunState != DungeonRunState.Active)
+                {
+                    continue;
+                }
                 try
                 {
-                    bs.Player.CurrentRun.LayeredMapIndex = leader.Player.CurrentRun.LayeredMapIndex;
+                    if (!leader.Player.IsCurrentDungeonRoom(leaderRoomIdentity))
+                        return;
+                    var leaderRun = leader.Player.CurrentRun;
+                    if (leaderRun == null)
+                        return;
+                    memberRun.LayeredMapIndex = leaderRun.LayeredMapIndex;
                     DungeonMechanismCoordinator.CopyMoveStateForParty(
-                        leader.Player.CurrentRun,
-                        bs.Player.CurrentRun);
-                    await SendStartMapAsync(bs, nextX, nextY, overrideMapId);
+                        leaderRun,
+                        memberRun);
+                    var memberRoomIdentity = await SendStartMapAsync(
+                        bs,
+                        memberRun,
+                        nextX,
+                        nextY,
+                        overrideMapId);
+                    if (!leader.Player.IsCurrentDungeonRoom(leaderRoomIdentity))
+                        return;
+                    if (!memberRoomIdentity.HasValue
+                        || !bs.Player.IsCurrentDungeonRoom(
+                            memberRoomIdentity.Value))
+                        continue;
                     DungeonMechanismCoordinator.OnMoveMapCompleted(
                         bs,
                         mechanismMove,
@@ -146,10 +195,32 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
         }
 
-        internal async Task SendStartMapAsync(EnhancedClientSession session, int nextX, int nextY, int overrideMapId)
+        internal Task<DungeonRoomIdentity?> SendStartMapAsync(
+            EnhancedClientSession session,
+            int nextX,
+            int nextY,
+            int overrideMapId)
+            => SendStartMapAsync(
+                session,
+                session?.Player?.CurrentRun,
+                nextX,
+                nextY,
+                overrideMapId);
+
+        internal async Task<DungeonRoomIdentity?> SendStartMapAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            int nextX,
+            int nextY,
+            int overrideMapId)
         {
-            var run = session.Player.CurrentRun;
-            if (run == null) return;
+            if (session?.Player == null
+                || run == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
+            {
+                return null;
+            }
+            var runIdentity = run.CaptureIdentity();
 
             var effectiveOverrideMapId =
                 DungeonMechanismCoordinator.ResolveStartMapOverride(
@@ -178,7 +249,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             var roomKey = new RoomKey(maze.X, maze.Y, effectiveOverrideMapId);
-            CacheQuestConnectedStartMapId(session, maze);
 
             byte[] startMapBody;
             List<KeyValuePair<int, int>> hellPartyMonsterInfoAfterStartMap = null;
@@ -204,6 +274,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 run.RoomLcg = cached.Lcg;
                 run.Seed = cached.Seed;
                 run.RoomKey = roomKey;
+                if (cached.InstanceRoom != null)
+                    run.SetCurrentRoom(cached.InstanceRoom);
                 DungeonMechanismCoordinator.RestoreRoomState(run, cached);
 
                 startMapBody = DungeonNotificationBuilder.BuildStartMapRevisit(cached.Maze, cached.Seed);
@@ -216,13 +288,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
             else
             {
-                var startSequence = run.MonsterCount;
-                run.RoomStartSequence = (ushort)(startSequence + 1);
-                // TODO：真实服务端房间切换时序号会出现跳号，当前仍按 firstMonsterSequence+index+1 近似。
-                var seed = (uint)(ServerRandom.Next() & ~0x40000);
-                run.Seed = seed;
-                var lcg = new DnfLcg(seed);
-                run.RoomLcg = lcg;
                 var killedSet = new HashSet<ushort>();
                 run.RoomKilledSeqIds = killedSet;
 
@@ -233,22 +298,62 @@ namespace DfoServer.Network.Handlers.Dungeon
                     && maze.X == hellRoomInfo.X
                     && maze.Y == hellRoomInfo.Y;
 
-                var startMapMaze = isHellPartyRoom
-                    ? BuildHellPartyStartMapMaze(session, maze, hellRoomInfo)
-                    : maze;
+                var instanceRoom = run.Instance.GetOrCreateRoom(
+                    roomKey,
+                    roomInstanceId =>
+                    {
+                        var template = isHellPartyRoom
+                            ? BuildHellPartyStartMapMaze(
+                                session,
+                                run,
+                                maze,
+                                hellRoomInfo)
+                            : maze;
+                        if (!isHellPartyRoom)
+                        {
+                            var removedNamedMonsters = NamedMonsterRoomFilter.Apply(
+                                run.Instance,
+                                DungeonData.GetDungeonFile(run.DungeonId),
+                                ref template);
+                            if (removedNamedMonsters > 0)
+                            {
+                                FileLogger.Log(
+                                    $"[DungeonHandler] NAMED_MONSTER_MAP_FILTER: " +
+                                    $"dungeon={run.DungeonId} room=({template.X},{template.Y}) " +
+                                    $"map={template.Index} removed={removedNamedMonsters}");
+                            }
+                            ApplyChampionPromotion(run, template.Monsters);
+                            DungeonMechanismCoordinator.AppendStartMapActors(
+                                session,
+                                run,
+                                template);
+                        }
 
-                if (!isHellPartyRoom)
-                {
-                    ApplyChampionPromotion(session, startMapMaze.Monsters);
-                    DungeonMechanismCoordinator.AppendStartMapActors(
-                        session,
-                        startMapMaze);
-                }
+                        var roomSeed = (uint)(ServerRandom.Next() & ~0x40000);
+                        // 旧服 ConsistMap 对每个新房使用 get_rand_int(60000)
+                        // 作为 actor 运行序号起点。随机起点也避免未死亡机制 actor
+                        // 在快速退本重进时与客户端残留 identity 冲突。
+                        var firstActorSequenceId = (ushort)ServerRandom.Next(1, 60001);
+                        return new DungeonInstanceRoom(
+                            roomInstanceId,
+                            roomKey,
+                            template,
+                            roomSeed,
+                            firstActorSequenceId);
+                    },
+                    out var instanceRoomCreated);
+                var startMapMaze = instanceRoom.Maze;
+                var seed = instanceRoom.Seed;
+                run.RoomStartSequence = instanceRoom.FirstActorSequenceId;
+                run.Seed = seed;
+                var lcg = new DnfLcg(seed);
+                run.RoomLcg = lcg;
 
                 run.RoomMonsters = startMapMaze.Monsters;
 
                 var roomState = new RoomState
                 {
+                    InstanceRoom = instanceRoom,
                     Maze = startMapMaze,
                     FirstSeqId = run.RoomStartSequence,
                     MonsterCount = (ushort)CountServerTrackedMonsters(startMapMaze),
@@ -256,10 +361,27 @@ namespace DfoServer.Network.Handlers.Dungeon
                     Seed = seed,
                     Lcg = lcg,
                 };
+                roomState.TryActivate();
                 run.RoomStates[roomKey] = roomState;
+                run.SetCurrentRoom(instanceRoom);
+                DungeonEncounterApplicationService.Apply(
+                    run,
+                    new DungeonEncounterDirective(
+                        DungeonEventEnvelope.Create(
+                            run,
+                            session.Player.CharacterId,
+                            "start_map encounter"),
+                        DungeonEncounterDirectiveKind.Start));
                 DungeonMechanismCoordinator.OnRoomStateCreated(
                     session,
+                    run,
                     roomState);
+                FileLogger.Log(
+                    $"[DungeonHandler] ROOM_INSTANCE: instance={run.PartyDungeonInstanceId} " +
+                    $"room={instanceRoom.RoomInstanceId} created={instanceRoomCreated} " +
+                    $"key=({roomKey.X},{roomKey.Y},{roomKey.OverrideMapId}) seed={seed} " +
+                    $"firstActorSeq={run.RoomStartSequence} " +
+                    $"actors={FormatStartMapActorSummary(startMapMaze, run.RoomStartSequence)}");
 
                 byte layeredFlag = (byte)(effectiveOverrideMapId > 0 ? 1 : 0);
 
@@ -291,11 +413,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                         run.Drops[e.GlobalSeq] = e.ToDropInfo();
                 }
 
-                var ridableForRoom = GetRidableEntriesForRoom(session, maze.X, maze.Y);
+                var ridableForRoom = GetRidableEntriesForRoom(
+                    run,
+                    maze.X,
+                    maze.Y);
                 var hellPartyMapMode = run.HellMode ? run.HellPartyMode : (byte)0;
                 var startMapFogFlag = run.HellMode ? (byte)1 : (byte)0;
 
-                startMapBody = DungeonNotificationBuilder.BuildStartMap(startMapMaze, startSequence, (int)seed,
+                startMapBody = DungeonNotificationBuilder.BuildStartMap(startMapMaze, run.RoomStartSequence, (int)seed,
                     layeredRoomFlag: layeredFlag,
                     hellPartyMode: hellPartyMapMode,
                     hellPartyFogFlag: startMapFogFlag,
@@ -310,7 +435,15 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
             } // end lock(run.SyncRoot)
 
+            CacheResolvedStartMapId(run, sentMapX, sentMapY, sentMapId);
+
+            var roomIdentity = run.CaptureRoomIdentity();
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x001D, startMapBody));
+            if (!session.Player.IsCurrentDungeonRun(runIdentity)
+                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+            {
+                return null;
+            }
             if (TowerOfDespairApcInfoBuilder.TryBuild(
                 run.DungeonId,
                 session.Player,
@@ -330,6 +463,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"dungeon={run.DungeonId} layers=0,{towerCurrentApcInfoBody[0]} " +
                     $"job={session.Player.Job} grow={session.Player.GrowType}");
             }
+            if (!session.Player.IsCurrentDungeonRun(runIdentity)
+                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+            {
+                return null;
+            }
             if (isFirstRunStartMap)
             {
                 FileLogger.Log(
@@ -339,25 +477,73 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"override={effectiveOverrideMapId} selectedStart=({run.MazeStartX},{run.MazeStartY}) " +
                         $"selectedStartMap={run.MazeStartMapId} actors={sentActorCount} tracked={sentTrackedCount}");
             }
-            await DungeonMechanismCoordinator.OnStartMapSentAsync(session);
+            await DungeonMechanismCoordinator.OnStartMapSentAsync(
+                session,
+                roomIdentity);
+            if (!session.Player.IsCurrentDungeonRun(runIdentity)
+                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+            {
+                return null;
+            }
 
             if (hellPartyMonsterInfoAfterStartMap != null && hellPartyMonsterInfoAfterStartMap.Count > 0)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x02A6,
                     DungeonNotificationBuilder.BuildHellPartyMonsterInfo(hellPartyMonsterInfoAfterStartMap)));
+                if (!session.Player.IsCurrentDungeonRoom(roomIdentity))
+                    return null;
                 FileLogger.Log($"[DungeonHandler] HELLPARTY monster info sent after hell START_MAP: entries={hellPartyMonsterInfoAfterStartMap.Count} actorLevels={string.Join(",", hellPartyMonsterInfoAfterStartMap.Select(x => $"{x.Key}:{x.Value}"))}");
             }
+
+            return roomIdentity;
         }
 
-        private static void CacheQuestConnectedStartMapId(EnhancedClientSession session, DungeonData.MazeSumInfo maze)
+        private static string FormatStartMapActorSummary(
+            DungeonData.MazeSumInfo maze,
+            ushort firstSequenceId)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null || !run.MazeQuestConnected)
-                return;
-            if (maze.X != run.MazeStartX || maze.Y != run.MazeStartY || maze.Index <= 0)
-                return;
+            var actors = maze.Monsters;
+            if (actors == null || actors.Count == 0)
+                return "[]";
 
-            run.MazeStartMapId = maze.Index;
+            const int maxEntries = 8;
+            var count = Math.Min(actors.Count, maxEntries);
+            var entries = new string[count];
+            var normalIndex = 0;
+            var apcIndex = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var actor = actors[i];
+                var isApc = actor.Type >= 5;
+                var packetIndex = actor.PacketIndex
+                    ?? (isApc ? apcIndex++ : normalIndex++);
+                entries[i] =
+                    $"{firstSequenceId + i}:{actor.Code}/t{actor.Type}/o{actor.TemplateOrder}" +
+                    $"/i{packetIndex}/f{actor.Flag0},{actor.Flag1}/x{actor.ExtraState}";
+            }
+
+            var suffix = actors.Count > maxEntries
+                ? $",...+{actors.Count - maxEntries}"
+                : string.Empty;
+            return $"[{string.Join(",", entries)}{suffix}]";
+        }
+
+        private static void CacheResolvedStartMapId(
+            DungeonRun run,
+            int mapX,
+            int mapY,
+            int mapId)
+        {
+            if (run == null)
+                return;
+            if (mapX != run.MazeStartX
+                || mapY != run.MazeStartY
+                || mapId <= 0)
+            {
+                return;
+            }
+
+            run.MazeStartMapId = mapId;
         }
 
         private static List<KeyValuePair<int, int>> BuildHellPartyMonsterInfoEntries(DungeonData.HellPartyRoomInfo hellRoomInfo)
@@ -387,13 +573,13 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private static DungeonData.MazeSumInfo BuildHellPartyStartMapMaze(
             EnhancedClientSession session,
+            DungeonRun run,
             DungeonData.MazeSumInfo maze,
             DungeonData.HellPartyRoomInfo hellRoomInfo)
         {
             if (hellRoomInfo == null || hellRoomInfo.NormalMapId <= 0)
                 return maze;
 
-            var run = session.Player.CurrentRun;
             if (run == null)
                 return maze;
 
@@ -409,7 +595,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 var monsters = new List<DungeonData.MonsterSumInfo>(
                     normalMaze.Monsters ?? new List<DungeonData.MonsterSumInfo>());
-                ApplyChampionPromotion(session, monsters);
+                ApplyChampionPromotion(run, monsters);
                 var normalCount = monsters.Count;
                 var hiddenCount = AppendHellPartyTemplateRows(monsters, hellRoomInfo);
 
@@ -430,12 +616,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             return maze;
         }
 
-        private static void ApplyChampionPromotion(EnhancedClientSession session, List<DungeonData.MonsterSumInfo> monsters)
+        private static void ApplyChampionPromotion(
+            DungeonRun run,
+            List<DungeonData.MonsterSumInfo> monsters)
         {
             if (monsters == null || monsters.Count == 0)
                 return;
 
-            var run = session.Player.CurrentRun;
             if (run == null)
                 return;
 
@@ -528,9 +715,17 @@ namespace DfoServer.Network.Handlers.Dungeon
         }
 
         internal static bool IsCurrentHellPartyLocked(EnhancedClientSession session)
+            => IsHellPartyLocked(session?.Player?.CurrentRun);
+
+        private static bool IsHellPartyLocked(DungeonRun run)
         {
-            if (!TryGetCurrentRoomState(session, out var roomState) || !roomState.IsHellPartyRoom)
+            if (run == null
+                || !run.RoomStates.TryGetValue(run.RoomKey, out var roomState)
+                || roomState == null
+                || !roomState.IsHellPartyRoom)
+            {
                 return false;
+            }
 
             return roomState.HellPartyPhase == HellPartyPhase.Started && !roomState.IsCleared;
         }
@@ -598,9 +793,11 @@ namespace DfoServer.Network.Handlers.Dungeon
         }
 
         private static List<RidableObjectSpawnEntry> GetRidableEntriesForRoom(
-            EnhancedClientSession session, int roomX, int roomY)
+            DungeonRun run,
+            int roomX,
+            int roomY)
         {
-            var all = session.Player.CurrentRun?.RidableObjects;
+            var all = run?.RidableObjects;
             if (all == null || all.Count == 0) return null;
             var result = new List<RidableObjectSpawnEntry>();
             foreach (var r in all)

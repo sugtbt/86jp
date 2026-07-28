@@ -15,7 +15,7 @@ namespace DfoServer.Game.Dungeon
 
         public ClearConditionState(List<ClearConditionEntry> conditions)
         {
-            _conditions = conditions ?? new List<ClearConditionEntry>();
+            _conditions = SnapshotConditions(conditions);
             _counters = new int[_conditions.Count];
             int total = 0;
             foreach (var c in _conditions)
@@ -98,5 +98,28 @@ namespace DfoServer.Game.Dungeon
         }
 
         public bool HasConditions => TotalRequired > 0;
+
+        private static List<ClearConditionEntry> SnapshotConditions(
+            IReadOnlyList<ClearConditionEntry> conditions)
+        {
+            var snapshot = new List<ClearConditionEntry>(conditions?.Count ?? 0);
+            if (conditions == null)
+                return snapshot;
+
+            foreach (var condition in conditions)
+            {
+                if (condition == null)
+                    continue;
+                snapshot.Add(new ClearConditionEntry
+                {
+                    Type = condition.Type,
+                    TargetId = condition.TargetId,
+                    Count = condition.Count,
+                    GroupId = condition.GroupId,
+                    GroupRequired = condition.GroupRequired,
+                });
+            }
+            return snapshot;
+        }
     }
 }

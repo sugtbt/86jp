@@ -9,12 +9,21 @@ namespace DfoServer.Game.Dungeon
     {
         private static readonly object LockObj = new object();
         private static Dictionary<long, List<(int Id, int Weight)>> _pool;
+        private static Dictionary<long, List<(int Id, int Weight)>> _normalPool;
+        private static Dictionary<long, List<(int Id, int Weight)>> _avatarPool;
         private static bool _loaded;
 
         internal static Dictionary<long, List<(int Id, int Weight)>> GetPool()
         {
             EnsureLoaded();
             return _pool;
+        }
+
+        internal static Dictionary<long, List<(int Id, int Weight)>>
+            GetClearRewardPool(bool avatar)
+        {
+            EnsureLoaded();
+            return avatar ? _avatarPool : _normalPool;
         }
 
         internal static void WarmUp()
@@ -36,6 +45,8 @@ namespace DfoServer.Game.Dungeon
         private static Dictionary<long, List<(int Id, int Weight)>> LoadEquipmentPool()
         {
             var pool = new Dictionary<long, List<(int Id, int Weight)>>();
+            _normalPool = new Dictionary<long, List<(int Id, int Weight)>>();
+            _avatarPool = new Dictionary<long, List<(int Id, int Weight)>>();
             try
             {
                 var equipmentListText = GameWorld.PvfArchiveAccessor.ReadText("equipment/equipment.lst");
@@ -57,7 +68,13 @@ namespace DfoServer.Game.Dungeon
                     try
                     {
                         var equipment = EquipmentFile.Parse(GameWorld.PvfArchiveAccessor.ReadText(Path.Combine("equipment", entry.FilePath)));
-                        if (TryAddEquipment(pool, entry.Id, equipment))
+                        if (TryAddEquipment(
+                                pool,
+                                _normalPool,
+                                _avatarPool,
+                                entry.Id,
+                                entry.FilePath,
+                                equipment))
                             added++;
                     }
                     catch
@@ -66,7 +83,10 @@ namespace DfoServer.Game.Dungeon
                     }
                 }
 
-                FileLogger.Log($"[EquipmentDropPoolProvider] equipment pool from .equ: items={added} errors={errors} buckets={pool.Count}");
+                FileLogger.Log(
+                    $"[EquipmentDropPoolProvider] equipment pool from .equ: " +
+                    $"items={added} errors={errors} buckets={pool.Count} " +
+                    $"normalBuckets={_normalPool.Count} avatarBuckets={_avatarPool.Count}");
             }
             catch (Exception ex)
             {
@@ -78,7 +98,10 @@ namespace DfoServer.Game.Dungeon
 
         private static bool TryAddEquipment(
             Dictionary<long, List<(int Id, int Weight)>> pool,
+            Dictionary<long, List<(int Id, int Weight)>> normalPool,
+            Dictionary<long, List<(int Id, int Weight)>> avatarPool,
             int itemId,
+            string filePath,
             EquipmentFile equipment)
         {
             if (itemId <= 0 || equipment == null)
@@ -92,13 +115,42 @@ namespace DfoServer.Game.Dungeon
                 return false;
 
             var key = (long)grade * 10 + rarity;
+            AddToPool(pool, key, itemId, creationRate);
+            var categoryPool = IsAvatar(filePath, equipment)
+                ? avatarPool
+                : normalPool;
+            AddToPool(categoryPool, key, itemId, creationRate);
+            return true;
+        }
+
+        private static void AddToPool(
+            Dictionary<long, List<(int Id, int Weight)>> pool,
+            long key,
+            int itemId,
+            int weight)
+        {
             if (!pool.TryGetValue(key, out var list))
             {
                 list = new List<(int Id, int Weight)>();
                 pool[key] = list;
             }
-            list.Add((itemId, creationRate));
-            return true;
+            list.Add((itemId, weight));
+        }
+
+        private static bool IsAvatar(string filePath, EquipmentFile equipment)
+        {
+            var normalizedPath = "/" + (filePath ?? string.Empty)
+                .Replace('\\', '/')
+                .Trim('/');
+            return normalizedPath.IndexOf(
+                       "/avatar/",
+                       StringComparison.OrdinalIgnoreCase) >= 0
+                || normalizedPath.IndexOf(
+                       "/at_avatar/",
+                       StringComparison.OrdinalIgnoreCase) >= 0
+                || (equipment.EquipmentType?.IndexOf(
+                        "avatar",
+                        StringComparison.OrdinalIgnoreCase) ?? -1) >= 0;
         }
     }
 }

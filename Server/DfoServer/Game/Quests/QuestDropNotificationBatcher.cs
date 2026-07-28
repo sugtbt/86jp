@@ -17,7 +17,6 @@ namespace DfoServer.Game.Quests
             public EnhancedClientSession Session;
             public int CharacterId;
             public readonly HashSet<short> Slots = new HashSet<short>();
-            public bool RefreshQuests;
             public int Version;
             public ClockService.ClockTimerHandle Timer;
         }
@@ -27,21 +26,16 @@ namespace DfoServer.Game.Quests
             public EnhancedClientSession Session;
             public int CharacterId;
             public short[] Slots;
-            public bool RefreshQuests;
         }
 
         private readonly object _sync = new object();
         private readonly Dictionary<Guid, PendingRefresh> _pending =
             new Dictionary<Guid, PendingRefresh>();
-        private readonly Func<EnhancedClientSession, Task> _sendQuestRefresh;
         private readonly Func<EnhancedClientSession, IReadOnlyCollection<short>, Task>
             _sendInventoryRefresh;
 
         internal QuestDropNotificationBatcher(InventoryRefreshSender inventoryRefresh)
             : this(
-                session => session?.GameSession?.QuestManager != null
-                    ? session.GameSession.QuestManager.SendActiveQuestListAsync()
-                    : Task.CompletedTask,
                 (session, slots) => inventoryRefresh.SendUpdateItemList(
                     session,
                     InventoryListType.Main,
@@ -52,19 +46,15 @@ namespace DfoServer.Game.Quests
         }
 
         internal QuestDropNotificationBatcher(
-            Func<EnhancedClientSession, Task> sendQuestRefresh,
             Func<EnhancedClientSession, IReadOnlyCollection<short>, Task>
                 sendInventoryRefresh)
         {
-            _sendQuestRefresh = sendQuestRefresh
-                ?? throw new ArgumentNullException(nameof(sendQuestRefresh));
             _sendInventoryRefresh = sendInventoryRefresh
                 ?? throw new ArgumentNullException(nameof(sendInventoryRefresh));
         }
 
         internal void Queue(
             EnhancedClientSession session,
-            bool refreshQuests,
             IEnumerable<short> slots)
         {
             if (session?.Player == null || session.Player.CharacterId <= 0)
@@ -84,7 +74,6 @@ namespace DfoServer.Game.Quests
                     _pending[session.SessionId] = pending;
                 }
 
-                pending.RefreshQuests |= refreshQuests;
                 if (slots != null)
                 {
                     foreach (var slot in slots)
@@ -154,19 +143,6 @@ namespace DfoServer.Game.Quests
                 return;
             }
 
-            if (snapshot.RefreshQuests)
-            {
-                try
-                {
-                    await _sendQuestRefresh(session);
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log(
-                        $"[GameProtocol] QUEST_DROP quest refresh failed: {ex.Message}");
-                }
-            }
-
             if (snapshot.Slots.Length > 0)
             {
                 try
@@ -179,11 +155,6 @@ namespace DfoServer.Game.Quests
                         $"[GameProtocol] QUEST_DROP inventory refresh failed: {ex.Message}");
                 }
             }
-
-            FileLogger.Log(
-                $"[GameProtocol] QUEST_DROP refresh flushed: " +
-                $"cid={snapshot.CharacterId} quests={snapshot.RefreshQuests} " +
-                $"slots={string.Join(",", snapshot.Slots)}");
         }
 
         private static RefreshSnapshot CreateSnapshot(PendingRefresh pending)
@@ -192,7 +163,6 @@ namespace DfoServer.Game.Quests
                 Session = pending.Session,
                 CharacterId = pending.CharacterId,
                 Slots = new List<short>(pending.Slots).ToArray(),
-                RefreshQuests = pending.RefreshQuests,
             };
 
         private static int NextVersion(int version)

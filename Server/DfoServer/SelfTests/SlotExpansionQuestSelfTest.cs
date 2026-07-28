@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using DfoServer.Game.Characters;
@@ -41,10 +42,43 @@ namespace DfoServer.SelfTests
 
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
+            var sessionId = Guid.NewGuid();
+            var inventory = new InventoryService(CharacterId, AccountId);
+            InventoryContext.Register(sessionId, inventory);
 
             var failures = 0;
 
+            var supportReward = GameWorld.QuestData.ResolveReward(SupportSlotQuestId);
+            Check("support slot reward definition resolves explicitly",
+                supportReward.IsValid
+                    && supportReward.Reward.ChainType == GameWorld.QuestData.ChainTypeSlotExpansion
+                    && supportReward.Reward.GrowNumber == 21,
+                ref failures);
+            if (!supportReward.IsValid)
+                Console.WriteLine($"[DIAG] support reward error: {supportReward.Error}");
+
+            Check("slot-expansion fixture contains both quests' seeking materials",
+                SeedSeekingMaterials(
+                    inventory,
+                    SupportSlotQuestId,
+                    MagicStoneQuestId),
+                ref failures);
+            QuestService.SaveActiveQuests(
+                connStr,
+                CharacterId,
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = SupportSlotQuestId,
+                        TriggerValue = 0,
+                    },
+                });
+
             var supportAck = questService.HandleFinishQuest(CharacterId, BuildFinishBody(SupportSlotQuestId));
+            if (!IsSuccessAck(supportAck))
+                Console.WriteLine($"[DIAG] support finish error=0x{supportAck?.ErrorCode ?? 0xFF:X2}");
             Check("support quest success", IsSuccessAck(supportAck), ref failures);
             Check("support quest chainType is slot expansion",
                 TryReadChain(supportAck, out var supportChainType, out var supportSlotId)
@@ -53,7 +87,22 @@ namespace DfoServer.SelfTests
                 ref failures);
             Check("support slot flag persisted", LoadExEquipSlotStat(dbPath) == 0x01, ref failures);
 
+            QuestService.SaveActiveQuests(
+                connStr,
+                CharacterId,
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = MagicStoneQuestId,
+                        TriggerValue = 0,
+                    },
+                });
+
             var magicAck = questService.HandleFinishQuest(CharacterId, BuildFinishBody(MagicStoneQuestId));
+            if (!IsSuccessAck(magicAck))
+                Console.WriteLine($"[DIAG] magic finish error=0x{magicAck?.ErrorCode ?? 0xFF:X2}");
             Check("magic stone quest success", IsSuccessAck(magicAck), ref failures);
             Check("magic stone quest chainType is slot expansion",
                 TryReadChain(magicAck, out var magicChainType, out var magicSlotId)
@@ -62,8 +111,41 @@ namespace DfoServer.SelfTests
                 ref failures);
             Check("support + magic stone flags persisted", LoadExEquipSlotStat(dbPath) == 0x03, ref failures);
 
+            InventoryContext.Unregister(sessionId, CharacterId);
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static bool SeedSeekingMaterials(
+            InventoryService inventory,
+            params ushort[] questIds)
+        {
+            var totals = new Dictionary<int, int>();
+            foreach (var questId in questIds)
+            {
+                foreach (var item in GameWorld.QuestData.GetSeekingConsumeItems(questId))
+                {
+                    if (item.ItemId <= 0 || item.Count <= 0)
+                        continue;
+                    totals.TryGetValue(item.ItemId, out var current);
+                    totals[item.ItemId] = checked(current + item.Count);
+                }
+            }
+
+            foreach (var requirement in totals)
+            {
+                if (!InventoryRewardGrantService.TryCreateAndInsert(
+                        inventory,
+                        requirement.Key,
+                        ItemCreateReason.QuestReward,
+                        requirement.Value,
+                        out _))
+                {
+                    return false;
+                }
+            }
+
+            return totals.Count > 0;
         }
 
         private static byte[] BuildFinishBody(ushort questId)

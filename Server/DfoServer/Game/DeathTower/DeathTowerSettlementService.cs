@@ -4,7 +4,6 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Progression;
-using DfoServer.Network;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.DeathTower
@@ -37,6 +36,29 @@ namespace DfoServer.Game.DeathTower
         public IReadOnlyList<short> ChangedMainSlots { get; set; } = Array.Empty<short>();
         public IReadOnlyList<DeathTowerRewardItem> Items { get; set; } = Array.Empty<DeathTowerRewardItem>();
         internal ExperienceGrantResult ExperienceGrant { get; set; }
+    }
+
+    internal readonly struct DeathTowerSettlementContext
+    {
+        public DeathTowerSettlementContext(
+            int characterId,
+            int accountId,
+            byte level,
+            uint exp)
+        {
+            if (characterId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(characterId));
+
+            CharacterId = characterId;
+            AccountId = accountId;
+            Level = level;
+            Exp = exp;
+        }
+
+        public int CharacterId { get; }
+        public int AccountId { get; }
+        public byte Level { get; }
+        public uint Exp { get; }
     }
 
     internal delegate ExperienceGrantResult DeathTowerExperienceGrantInTransaction(
@@ -84,16 +106,23 @@ namespace DfoServer.Game.DeathTower
                     normalizeMaxLevelExp: rawGain > 0));
         }
 
-        public DeathTowerSettlementResult Grant(
-            EnhancedClientSession session,
-            DeathTowerSession tower)
+        internal DeathTowerSettlementResult Grant(
+            DeathTowerSettlementContext context,
+            DeathTowerSession tower,
+            InventoryLease lease)
         {
-            if (session?.Player == null) throw new ArgumentNullException(nameof(session));
             if (tower == null) throw new ArgumentNullException(nameof(tower));
+            if (lease == null) throw new ArgumentNullException(nameof(lease));
+            if (lease.CharacterId != context.CharacterId)
+            {
+                throw new InvalidOperationException(
+                    $"Death tower settlement inventory character mismatch: " +
+                    $"context={context.CharacterId} lease={lease.CharacterId}.");
+            }
 
             var rewardConfig = DeathTowerRewardConfig.Load();
             var clearedFloorCount = Math.Max(1, tower.CurrentStage + 1);
-            var previousLevel = session.Player.Level;
+            var previousLevel = context.Level;
             var expGained = CalculateExp(previousLevel, rewardConfig.GetExpWeight(clearedFloorCount));
             var goldGained = CalculateGold(previousLevel, rewardConfig.GoldWeight);
             var lcg = tower.StageLcg ?? new DnfLcg(tower.StageSeed);
@@ -104,11 +133,9 @@ namespace DfoServer.Game.DeathTower
             var items = new List<DeathTowerRewardItem>(rewardRollCount);
             var changedMainSlots = new List<short>(rewardRollCount);
             var changedMainSlotSet = new HashSet<short>();
-            var characterId = session.Player.CharacterId;
-            var accountId = session.Account?.AccountId ?? 1;
+            var characterId = context.CharacterId;
+            var accountId = context.AccountId;
             var updatedGold = 0;
-            if (!TryGetOwnedInventory(session, out var lease))
-                throw new InvalidOperationException($"Death tower settlement requires online inventory for character {characterId}.");
 
             ExperienceGrantResult expProgress;
             using (var connection = new SqliteConnection(_connectionString))
@@ -122,7 +149,7 @@ namespace DfoServer.Game.DeathTower
                         characterId,
                         accountId,
                         previousLevel,
-                        session.Player.Exp,
+                        context.Exp,
                         expGained);
                     var shouldPersistCharacter = expProgress.LeveledUp
                         || expProgress.NormalExpGain > 0
@@ -130,7 +157,7 @@ namespace DfoServer.Game.DeathTower
                     if (shouldPersistCharacter && !expProgress.Persisted)
                     {
                         throw new InvalidOperationException(
-                            $"Death tower settlement progress write failed for character {session.Player.CharacterId}.");
+                            $"Death tower settlement progress write failed for character {characterId}.");
                     }
 
                     transaction.Commit();
@@ -176,9 +203,6 @@ namespace DfoServer.Game.DeathTower
                 }
             }
 
-            session.Player.Exp = expProgress.NewExp;
-            session.Player.Level = expProgress.NewLevel;
-
             AccountExperienceProgressSummary accountProgress = null;
             if (expProgress.HonorExpGain > 0 && accountId > 0)
             {
@@ -192,7 +216,7 @@ namespace DfoServer.Game.DeathTower
                 }
                 catch (Exception ex)
                 {
-                    FileLogger.Log($"[DeathTower] committed account progress summary failed: account={accountId} cid={session.Player.CharacterId}: {ex.Message}");
+                    FileLogger.Log($"[DeathTower] committed account progress summary failed: account={accountId} cid={characterId}: {ex.Message}");
                 }
                 if (accountProgress != null)
                 {
@@ -242,15 +266,6 @@ namespace DfoServer.Game.DeathTower
             if (value <= 0)
                 return 0;
             return value >= int.MaxValue ? int.MaxValue : (int)value;
-        }
-
-        private static bool TryGetOwnedInventory(EnhancedClientSession session, out InventoryLease lease)
-        {
-            lease = null;
-            var characterId = session?.Player?.CharacterId ?? 0;
-            return characterId > 0
-                && InventoryContext.TryGetLease(characterId, out lease)
-                && lease.IsOwnedBy(session.SessionId);
         }
 
         private static void AddChangedMainSlots(

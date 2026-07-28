@@ -1,5 +1,6 @@
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Quests;
+using DfoServer.GameWorld;
 using DfoServer.Network;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers.Dungeon;
@@ -20,8 +21,10 @@ namespace DfoServer.SelfTests
             var failures = 0;
 
             TestPacketBodies(ref failures);
+            TestDungeonCommandParser(ref failures);
             TestBossDieCheckParser(ref failures);
             TestTimeCrack(ref failures);
+            TestTypedSpecialDungeonEffects(ref failures);
             TestGentInfiltrate(ref failures);
             TestSeizeMoney(ref failures);
             TestClearMapGroups(ref failures);
@@ -62,6 +65,76 @@ namespace DfoServer.SelfTests
                     0x44, 0x33, 0x22, 0x11,
                     0x03,
                     0x66, 0x55),
+                ref failures);
+        }
+
+        private static void TestDungeonCommandParser(ref int failures)
+        {
+            var summonBody = new byte[19];
+            Buffer.BlockCopy(BitConverter.GetBytes((ushort)7), 0, summonBody, 0, 2);
+            Buffer.BlockCopy(BitConverter.GetBytes(69264), 0, summonBody, 2, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(12345), 0, summonBody, 6, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(17120), 0, summonBody, 10, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes((ushort)11), 0, summonBody, 14, 2);
+            Buffer.BlockCopy(BitConverter.GetBytes((ushort)22), 0, summonBody, 16, 2);
+            summonBody[18] = 1;
+
+            var parsedSummon = DungeonCommandParser.TryParse(
+                (ushort)CmdPacketType.SUMMON_MONSTER,
+                summonBody,
+                out var rawSummon,
+                out _);
+            var summon = rawSummon as SummonMonsterDungeonCommand;
+            Check(
+                "typed dungeon command parser decodes SUMMON_MONSTER once",
+                parsedSummon
+                    && summon != null
+                    && summon.ConditionalType == 7
+                    && summon.MonsterCode == 69264
+                    && summon.StateId == 12345
+                    && summon.MapId == 17120
+                    && summon.ConditionalParam0 == 11
+                    && summon.ConditionalParam1 == 22
+                    && summon.MatchCount == 1,
+                ref failures);
+            Check(
+                "typed dungeon command parser rejects truncated SUMMON_MONSTER",
+                !DungeonCommandParser.TryParse(
+                    (ushort)CmdPacketType.SUMMON_MONSTER,
+                    new byte[18],
+                    out _,
+                    out _),
+                ref failures);
+
+            var parsedResult = DungeonCommandParser.TryParse(
+                (ushort)CmdPacketType.SEA_CHASE_MINI_GAME_RESULT,
+                BitConverter.GetBytes(1),
+                out var rawResult,
+                out _);
+            Check(
+                "typed dungeon command parser decodes SeaChase int32 result",
+                parsedResult
+                    && rawResult is SeaChaseResultDungeonCommand result
+                    && result.Result == 1,
+                ref failures);
+            Check(
+                "typed dungeon command parser rejects truncated SeaChase result",
+                !DungeonCommandParser.TryParse(
+                    (ushort)CmdPacketType.SEA_CHASE_MINI_GAME_RESULT,
+                    new byte[3],
+                    out _,
+                    out _),
+                ref failures);
+
+            Check(
+                "typed dungeon command parser preserves empty NPC item-drop command",
+                DungeonCommandParser.TryParse(
+                    (ushort)CmdPacketType.EVENT_NPC_DROP_ITEM_,
+                    Array.Empty<byte>(),
+                    out var rawNpcDrop,
+                    out _)
+                && rawNpcDrop is NpcItemDropDungeonCommand npcDrop
+                && !npcDrop.HasUnexpectedPayload,
                 ref failures);
         }
 
@@ -121,20 +194,20 @@ namespace DfoServer.SelfTests
 
         private static void TestTimeCrack(ref int failures)
         {
-            var config = new SpecialDungeonModuleConfig();
-            config.TimeCrack.SandGaugeMax = 100;
-            config.TimeCrack.SandGaugeGainOnKill = 10;
-            config.TimeCrack.SandGaugeGainOnChampion = 30;
-            config.TimeCrack.InvincibleMonsterCodes.Add(9000);
-            config.TimeCrack.BuffWeights.Add(
+            var definition = new SpecialDungeonDefinitionBuilder
+            {
+                TimeCrackSandGaugeMax = 100,
+                TimeCrackSandGaugeGainOnKill = 10,
+                TimeCrackSandGaugeGainOnChampion = 30,
+            };
+            definition.TimeCrackInvincibleMonsterCodes.Add(9000);
+            definition.TimeCrackBuffWeights.Add(
                 new TimeCrackBuffWeight(101, 1));
-            config.TimeCrack.BuffWeights.Add(
+            definition.TimeCrackBuffWeights.Add(
                 new TimeCrackBuffWeight(202, 100));
 
             var special = new SpecialDungeonRuntime(
-                1000,
-                SpecialDungeonKind.TimeCrack,
-                config);
+                definition.Build(1000, SpecialDungeonKind.TimeCrack));
 
             var advanced = special.TryAddTimeCrackGauge(
                 monsterCode: 100,
@@ -207,11 +280,12 @@ namespace DfoServer.SelfTests
                 "1004 0 1";
 
             var withinTime = new SpecialDungeonRuntime(
-                2000,
-                SpecialDungeonKind.GentInfiltrate,
-                new SpecialDungeonModuleConfig());
+                new SpecialDungeonDefinitionBuilder().Build(
+                    2000,
+                    SpecialDungeonKind.GentInfiltrate));
             withinTime.ConfigureGentInfiltrateBossEntrance(
-                condition,
+                SpecialDungeonDefinitionCatalog
+                    .ParseGentInfiltrateTowerRequirements(condition),
                 timerSeconds: 180);
 
             var completed = false;
@@ -235,11 +309,12 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             var timedOut = new SpecialDungeonRuntime(
-                2000,
-                SpecialDungeonKind.GentInfiltrate,
-                new SpecialDungeonModuleConfig());
+                new SpecialDungeonDefinitionBuilder().Build(
+                    2000,
+                    SpecialDungeonKind.GentInfiltrate));
             timedOut.ConfigureGentInfiltrateBossEntrance(
-                condition,
+                SpecialDungeonDefinitionCatalog
+                    .ParseGentInfiltrateTowerRequirements(condition),
                 timerSeconds: 180);
             timedOut.TryCompleteGentInfiltrateByTimer(out _, out _);
 
@@ -264,16 +339,84 @@ namespace DfoServer.SelfTests
                 ref failures);
         }
 
+        private static void TestTypedSpecialDungeonEffects(ref int failures)
+        {
+            var timeCrackBuilder = new SpecialDungeonDefinitionBuilder
+            {
+                TimeCrackSandGaugeMax = 30,
+                TimeCrackSandGaugeGainOnKill = 10,
+                TimeCrackSandGaugeGainOnChampion = 30,
+            };
+            timeCrackBuilder.TimeCrackBuffWeights.Add(
+                new TimeCrackBuffWeight(301, 1));
+            var timeCrackRun = new DungeonRun(1000, 0);
+            timeCrackRun.Mechanisms.SpecialDungeon =
+                new SpecialDungeonRuntime(
+                    timeCrackBuilder.Build(
+                        1000,
+                        SpecialDungeonKind.TimeCrack));
+            timeCrackRun.Combat.RoomLcg = new DnfLcg(1);
+
+            var application =
+                new SpecialDungeonMechanismApplicationService();
+            var effects = application.ApplyMonsterKilled(
+                timeCrackRun,
+                monsterCode: 100,
+                monsterType: 1);
+            Check(
+                "TimeCrack transition emits ordered typed effects",
+                effects.Count == 4
+                    && effects[0].Kind
+                        == SpecialDungeonEffectKind.GaugeChanged
+                    && effects[0].Value == 30
+                    && effects[1].Kind
+                        == SpecialDungeonEffectKind.BuffAddedAndActivated
+                    && effects[1].BuffIds.Count == 1
+                    && effects[1].BuffIds[0] == 301
+                    && effects[2].Kind
+                        == SpecialDungeonEffectKind.ResetTimeCrackGauge
+                    && effects[3].Kind
+                        == SpecialDungeonEffectKind.GaugeChanged
+                    && effects[3].Value == 0,
+                ref failures);
+
+            var seaBuilder = new SpecialDungeonDefinitionBuilder();
+            seaBuilder.SeaChaseSuccessBuffIds.Add(401);
+            var seaRun = new DungeonRun(1001, 0);
+            seaRun.Mechanisms.SpecialDungeon = new SpecialDungeonRuntime(
+                seaBuilder.Build(1001, SpecialDungeonKind.SeaChase));
+            var command = new SeaChaseResultDungeonCommand(
+                (ushort)CmdPacketType.SEA_CHASE_MINI_GAME_RESULT,
+                result: 1);
+            effects = application.ApplySeaChaseResult(seaRun, command);
+            var replayEffects = application.ApplySeaChaseResult(
+                seaRun,
+                command);
+            Check(
+                "SeaChase first result emits ACK, buff and post-send record only once",
+                effects.Count == 3
+                    && effects[0].Kind
+                        == SpecialDungeonEffectKind.CommandSuccessAck
+                    && effects[1].Kind
+                        == SpecialDungeonEffectKind.BuffAddedAndActivated
+                    && effects[2].Kind
+                        == SpecialDungeonEffectKind.RecordSeaChaseBuffs
+                    && replayEffects.Count == 1
+                    && replayEffects[0].Kind
+                        == SpecialDungeonEffectKind.CommandSuccessAck,
+                ref failures);
+        }
+
         private static void TestSeizeMoney(ref int failures)
         {
-            var config = new SpecialDungeonModuleConfig();
-            config.SeizeMoney.GaugeMax = 1000;
-            config.SeizeMoney.GaugeSubOnDamage = 100;
+            var definition = new SpecialDungeonDefinitionBuilder
+            {
+                SeizeMoneyGaugeMax = 1000,
+                SeizeMoneyGaugeSubOnDamage = 100,
+            };
 
             var special = new SpecialDungeonRuntime(
-                3000,
-                SpecialDungeonKind.SeizeMoney,
-                config);
+                definition.Build(3000, SpecialDungeonKind.SeizeMoney));
             var reserved = special.TryReserveSeizeMoneyClearReward(
                 remainingGoldUnits: 5,
                 maxDropCount: 4,
@@ -308,16 +451,11 @@ namespace DfoServer.SelfTests
                 return;
             }
 
-            var gent =
-                SpecialDungeonModuleConfig.CreateRuntime(2005);
-            var sea =
-                SpecialDungeonModuleConfig.CreateRuntime(2006);
-            var timeCrack =
-                SpecialDungeonModuleConfig.CreateRuntime(2007);
-            var sealForest =
-                SpecialDungeonModuleConfig.CreateRuntime(2009);
-            var seizeMoney =
-                SpecialDungeonModuleConfig.CreateRuntime(2011);
+            var gent = CreateSpecialDungeonRuntime(2005);
+            var sea = CreateSpecialDungeonRuntime(2006);
+            var timeCrack = CreateSpecialDungeonRuntime(2007);
+            var sealForest = CreateSpecialDungeonRuntime(2009);
+            var seizeMoney = CreateSpecialDungeonRuntime(2011);
 
             Check(
                 "PVF identifies all stateful part-one special dungeon kinds",
@@ -331,11 +469,11 @@ namespace DfoServer.SelfTests
             Check(
                 "PVF loads core ETC settings for part-one dungeons",
                 gent?.GentInfiltrateTimerSeconds == 300
-                    && sea?.Config.SeaChase.SuccessBuffIds.Count > 0
-                    && timeCrack?.Config.TimeCrack.BuffWeights.Count > 0
-                    && timeCrack.Config.TimeCrack.SandGaugeGainOnChampion == 30
-                    && sealForest?.Config.SealForest.BuffsByMonsterCode.Count > 0
-                    && seizeMoney?.Config.SeizeMoney.GaugeMax > 0,
+                    && sea?.Definition.SeaChase.SuccessBuffIds.Count > 0
+                    && timeCrack?.Definition.TimeCrack.BuffWeights.Count > 0
+                    && timeCrack.Definition.TimeCrack.SandGaugeGainOnChampion == 30
+                    && sealForest?.Definition.SealForest.BuffsByMonsterCode.Count > 0
+                    && seizeMoney?.Definition.SeizeMoney.GaugeMax > 0,
                 ref failures);
 
             var meltdownMaze = GameWorld.Dungeon.GetDungeonMaze(2010, 0);
@@ -388,10 +526,11 @@ namespace DfoServer.SelfTests
 
             Check(
                 "SeizeMoney reward resolves from the Boss independent drop",
-                IndependentDropSystem.TryResolveSingleGuaranteedFixedDrop(
+                IndependentDropSystem.TryResolveSingleFixedDropTemplate(
                     monsterCode: 56631,
                     difficulty: 0,
                     dungeonLevel: 75,
+                    partyMemberCount: 1,
                     out var seizeMoneyItemId,
                     out var seizeMoneyMaxCount)
                     && seizeMoneyItemId == 10089565
@@ -941,6 +1080,14 @@ namespace DfoServer.SelfTests
                 && run.SelectedBossMapId == 8212,
                 ref failures);
         }
+
+        private static SpecialDungeonRuntime CreateSpecialDungeonRuntime(
+            int dungeonId)
+            => SpecialDungeonDefinitionCatalog.TryGet(
+                dungeonId,
+                out var definition)
+                ? new SpecialDungeonRuntime(definition)
+                : null;
 
         private static bool BytesEqual(byte[] actual, params byte[] expected)
         {

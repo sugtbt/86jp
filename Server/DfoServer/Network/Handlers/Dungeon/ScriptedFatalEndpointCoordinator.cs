@@ -88,10 +88,23 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static void OnPassiveObjectDestroyed(
             EnhancedClientSession session,
             int objectCode)
+            => OnPassiveObjectDestroyed(
+                session,
+                session?.Player?.CurrentRun,
+                objectCode);
+
+        internal static void OnPassiveObjectDestroyed(
+            EnhancedClientSession session,
+            DungeonRun run,
+            int objectCode)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null || objectCode <= 0)
+            if (session?.Player == null
+                || run == null
+                || objectCode <= 0
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
+            {
                 return;
+            }
 
             bool armed;
             int mapId;
@@ -120,10 +133,23 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static void OnMonsterKilled(
             EnhancedClientSession session,
             int monsterCode)
+            => OnMonsterKilled(
+                session,
+                session?.Player?.CurrentRun,
+                monsterCode);
+
+        internal static void OnMonsterKilled(
+            EnhancedClientSession session,
+            DungeonRun run,
+            int monsterCode)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null || monsterCode <= 0)
+            if (session?.Player == null
+                || run == null
+                || monsterCode <= 0
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
+            {
                 return;
+            }
 
             bool armed;
             int mapId;
@@ -151,10 +177,20 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static ScriptedFatalDeathResult OnCharacterDied(
             EnhancedClientSession session)
+            => OnCharacterDied(
+                session,
+                session?.Player?.CurrentRun);
+
+        internal static ScriptedFatalDeathResult OnCharacterDied(
+            EnhancedClientSession session,
+            DungeonRun run)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null)
+            if (session?.Player == null
+                || run == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
+            {
                 return default;
+            }
 
             bool handled;
             bool shouldClear;

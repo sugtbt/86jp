@@ -4,6 +4,7 @@ using DfoServer.Game.Quests;
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Parsers.Dungeon;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -20,13 +21,17 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static async Task HandleCommandAsync(
             EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body,
-            DropService drops)
+            NpcItemDropDungeonCommand command,
+            DropService drops,
+            DungeonEventEnvelope sourceEvent)
         {
             try
             {
-                await TryGenerateDropAsync(session, body, drops);
+                await TryGenerateDropAsync(
+                    session,
+                    command,
+                    drops,
+                    sourceEvent);
             }
             catch (Exception ex)
             {
@@ -40,26 +45,33 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01,
-                    header.type,
+                    command?.WireType
+                        ?? (ushort)CmdPacketType.EVENT_NPC_DROP_ITEM_,
                     CommonPacketBodyBuilder.BuildSuccessAck()));
             }
         }
 
         private static async Task TryGenerateDropAsync(
             EnhancedClientSession session,
-            byte[] body,
-            DropService drops)
+            NpcItemDropDungeonCommand command,
+            DropService drops,
+            DungeonEventEnvelope sourceEvent)
         {
             var run = session?.Player?.CurrentRun;
-            if (run == null || drops == null)
+            if (run == null
+                || command == null
+                || drops == null
+                || !IsCurrentEvent(session, sourceEvent))
+                return;
+            if (!run.RewardPolicy.AllowsQuestDrops)
                 return;
 
-            if (body != null && body.Length != 0)
+            if (command.HasUnexpectedPayload)
             {
                 FileLogger.Log(
                     $"[DungeonMechanism] NPC item drop ignored non-empty command: " +
                     $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                    $"body={BitConverter.ToString(body)}");
+                    $"body={BitConverter.ToString(command.Payload)}");
                 return;
             }
 
@@ -82,6 +94,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 run.DungeonId,
                 run.Difficulty,
                 session.Player.Job);
+            if (!IsCurrentEvent(session, sourceEvent))
+                return;
             if (matches.Count != 1)
             {
                 FileLogger.Log(
@@ -122,6 +136,21 @@ namespace DfoServer.Network.Handlers.Dungeon
                 match.QuestId,
                 scene.ObjectCode,
                 scene.ActionPath);
+        }
+
+        private static bool IsCurrentEvent(
+            EnhancedClientSession session,
+            DungeonEventEnvelope sourceEvent)
+        {
+            if (session?.Player == null || sourceEvent == null)
+                return false;
+            if (!session.Player.IsCurrentDungeonRun(sourceEvent.RunIdentity))
+                return false;
+
+            var run = session.Player.CurrentRun;
+            return !sourceEvent.RoomInstanceId.HasValue
+                || (run != null
+                    && run.CurrentRoomInstanceId == sourceEvent.RoomInstanceId.Value);
         }
 
         internal static List<QuestMatch> ResolveQuestMatches(

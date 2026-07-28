@@ -1,11 +1,11 @@
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Quests;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using PvfLib;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.RegularExpressions;
 using DungeonData = DfoServer.GameWorld.Dungeon;
 
 namespace DfoServer.Network.Handlers.Dungeon
@@ -14,14 +14,21 @@ namespace DfoServer.Network.Handlers.Dungeon
     {
         internal static void InitializeRuntime(
             EnhancedClientSession session,
-            int dungeonId,
+            DungeonRun run,
             string source)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null)
+            if (run == null
+                || session?.Player == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
                 return;
 
-            run.SpecialDungeon = SpecialDungeonModuleConfig.CreateRuntime(dungeonId);
+            var dungeonId = run.DungeonId;
+            run.SpecialDungeon =
+                SpecialDungeonDefinitionCatalog.TryGet(
+                    dungeonId,
+                    out var definition)
+                    ? new SpecialDungeonRuntime(definition)
+                    : null;
             var special = run.SpecialDungeon;
             if (special == null)
                 return;
@@ -63,10 +70,10 @@ namespace DfoServer.Network.Handlers.Dungeon
             run.ConditionalBossCode = 0;
             run.SpecialMinimapIconGroups = null;
 
-            var targetCodes = ParseConditionMonsterCodes(
+            var targetCodes = DungeonConditionDefinitionParser.ParseMonsterCodes(
                 dungeonFile.BossRoomEntranceCondition,
                 "[hunt monster]");
-            var summonCodes = ParseConditionMonsterCodes(
+            var summonCodes = DungeonConditionDefinitionParser.ParseMonsterCodes(
                 dungeonFile.BossRoomEntranceCondition,
                 "[summon monster]");
             if (targetCodes.Count > 0 && summonCodes.Count > 0)
@@ -89,12 +96,11 @@ namespace DfoServer.Network.Handlers.Dungeon
             var special = run.SpecialDungeon;
             if (special?.Kind == SpecialDungeonKind.GentInfiltrate)
             {
-                special.Config.TimerSecondsByDungeonId.TryGetValue(
-                    run.DungeonId,
-                    out var timerSeconds);
                 special.ConfigureGentInfiltrateBossEntrance(
-                    dungeonFile.BossRoomEntranceCondition,
-                    timerSeconds);
+                    SpecialDungeonDefinitionCatalog
+                        .ParseGentInfiltrateTowerRequirements(
+                            dungeonFile.BossRoomEntranceCondition),
+                    special.Definition.TimerSeconds);
                 run.SpecialMinimapIconGroups = BuildGentTowerIconGroups(
                     run.DungeonId,
                     run.MazeIndex,
@@ -207,9 +213,19 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static void AppendStartMapActors(
             EnhancedClientSession session,
             DungeonData.MazeSumInfo maze)
+            => AppendStartMapActors(
+                session,
+                session?.Player?.CurrentRun,
+                maze);
+
+        internal static void AppendStartMapActors(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonData.MazeSumInfo maze)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null
+            if (session?.Player == null
+                || run == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity())
                 || !run.HasBossEntranceConditionalSummon
                 || maze.Monsters == null)
             {
@@ -224,10 +240,22 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             DungeonRoomPoint moveTarget,
             ref int overrideMapId)
+            => TryApplyGentWarpOverride(
+                session,
+                session?.Player?.CurrentRun,
+                moveTarget,
+                ref overrideMapId);
+
+        internal static bool TryApplyGentWarpOverride(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonRoomPoint moveTarget,
+            ref int overrideMapId)
         {
-            var run = session?.Player?.CurrentRun;
             var special = run?.SpecialDungeon;
-            if (run == null
+            if (session?.Player == null
+                || run == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity())
                 || special == null
                 || special.Kind != SpecialDungeonKind.GentInfiltrate
                 || !special.GentInfiltrateConditionComplete)
@@ -483,7 +511,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             int mazeIndex,
             MazeInfo maze,
             int[] bossPos,
-            ICollection<int> monsterCodes)
+            IReadOnlyCollection<int> monsterCodes)
         {
             var targets = new List<BossEntranceConditionTargetState>();
             if (maze?.MapSpecifications == null
@@ -506,7 +534,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                         dungeonId,
                         spec.X,
                         spec.Y,
-                        monsterCodes).Count > 0)
+                        monsterCodes.ToList()).Count > 0)
                 {
                     candidates.Add(((byte)spec.X, (byte)spec.Y, spec.Index));
                 }
@@ -640,47 +668,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                     Completed = item.Completed,
                 });
             }
-            return result;
-        }
-
-        private static List<int> ParseConditionMonsterCodes(
-            string condition,
-            string tag)
-        {
-            var result = new List<int>();
-            var tokens = Tokenize(condition);
-            for (var i = 0; i < tokens.Count; i++)
-            {
-                if (!string.Equals(tokens[i], tag, StringComparison.OrdinalIgnoreCase)
-                    || i + 1 >= tokens.Count
-                    || !int.TryParse(tokens[i + 1], out var count)
-                    || count <= 0)
-                {
-                    continue;
-                }
-
-                var pos = i + 2;
-                for (var n = 0; n < count && pos < tokens.Count; n++, pos += 3)
-                {
-                    if (int.TryParse(tokens[pos], out var monsterCode)
-                        && monsterCode > 0)
-                    {
-                        result.Add(monsterCode);
-                    }
-                }
-                break;
-            }
-            return result;
-        }
-
-        private static List<string> Tokenize(string value)
-        {
-            var result = new List<string>();
-            if (string.IsNullOrWhiteSpace(value))
-                return result;
-
-            foreach (Match match in Regex.Matches(value, "`([^`]*)`|\\S+"))
-                result.Add(match.Groups[1].Success ? match.Groups[1].Value : match.Value);
             return result;
         }
 

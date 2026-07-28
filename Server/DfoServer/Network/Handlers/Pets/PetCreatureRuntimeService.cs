@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -50,22 +51,33 @@ namespace DfoServer.Network.Handlers.Pets
 
         internal static Task BeginTownAsync(EnhancedClientSession session, string source)
         {
-            if (!HasCharacter(session))
+            if (!HasCharacter(session) || session.Player.CurrentRun != null)
                 return Task.CompletedTask;
 
+            var townGeneration = session.Player.CurrentDungeonRunGeneration;
             ClearDungeonAnchor(session);
-            return BeginTownCoreAsync(session, source, DateTime.UtcNow);
+            return BeginTownCoreAsync(
+                session,
+                source,
+                DateTime.UtcNow,
+                () => CanApplyTownState(session, townGeneration));
         }
 
-        internal static void BeginDungeon(EnhancedClientSession session, int dungeonId, string source)
+        internal static void BeginDungeon(
+            EnhancedClientSession session,
+            DungeonRunIdentity runIdentity,
+            string source)
         {
-            if (!HasCharacter(session))
+            if (!HasCharacter(session)
+                || !session.Player.IsCurrentDungeonRun(runIdentity))
                 return;
 
+            var dungeonId = session.Player.CurrentRun.DungeonId;
             var now = DateTime.UtcNow;
             PersistTownRecovery(session, source, now, continueTiming: false);
             session.Player.PetCreatureSatietyDungeonStartUtc = now;
-            session.Player.PetCreatureSatietyDungeonId = (short)Math.Max(0, Math.Min(short.MaxValue, dungeonId));
+            session.Player.PetCreatureSatietyDungeonId =
+                (short)Math.Max(0, Math.Min(short.MaxValue, (int)dungeonId));
             session.Player.PetCreatureSatietyTownStartUtc = DateTime.MinValue;
             session.Player.PetCreatureLastDeathCreatureKey = 0;
 
@@ -87,16 +99,28 @@ namespace DfoServer.Network.Handlers.Pets
             }
         }
 
-        internal static async Task EndDungeonToTownAsync(EnhancedClientSession session, string source)
+        internal static async Task EndDungeonToTownAsync(
+            EnhancedClientSession session,
+            DungeonRunIdentity endingRunIdentity,
+            string source)
         {
-            if (!HasCharacter(session))
+            if (!HasCharacter(session)
+                || !CanCompleteEndedRun(session, endingRunIdentity))
                 return;
 
             var now = DateTime.UtcNow;
             await CheckDungeonDeathAsync(session, $"{source}:before-town", now);
+            if (!CanCompleteEndedRun(session, endingRunIdentity))
+                return;
             PersistDungeonElapsed(session, source, now, continueTiming: false);
+            if (!CanCompleteEndedRun(session, endingRunIdentity))
+                return;
             CancelDeathCheck(session);
-            await BeginTownCoreAsync(session, source, now);
+            await BeginTownCoreAsync(
+                session,
+                source,
+                now,
+                () => CanCompleteEndedRun(session, endingRunIdentity));
         }
 
         internal static void EndCharacterSession(EnhancedClientSession session, string source)
@@ -213,6 +237,10 @@ namespace DfoServer.Network.Handlers.Pets
                 return;
 
             roomState.PetExperienceGranted = true;
+            var run = session?.Player?.CurrentRun;
+            if (run == null || !run.RewardPolicy.AllowsPetExperience)
+                return;
+
             await SendPetCreatureClearExperienceAsync(session, consumedFatigue);
         }
 
@@ -327,15 +355,24 @@ namespace DfoServer.Network.Handlers.Pets
 
             try
             {
-                if (session.Player.CurrentRun != null)
+                var run = session.Player.CurrentRun;
+                if (run != null)
                 {
+                    var runIdentity = run.CaptureIdentity();
                     var died = await CheckDungeonDeathAsync(session, "clock", utcNow);
-                    if (!died)
+                    if (!died && session.Player.IsCurrentDungeonRun(runIdentity))
                         PersistDungeonElapsed(session, "clock", utcNow, continueTiming: true);
                     return;
                 }
 
-                await BeginTownCoreAsync(session, "clock", utcNow);
+                var townGeneration = session.Player.CurrentDungeonRunGeneration;
+                await BeginTownCoreAsync(
+                    session,
+                    "clock",
+                    utcNow,
+                    () => CanApplyTownState(session, townGeneration));
+                if (!CanApplyTownState(session, townGeneration))
+                    return;
                 PersistTownRecovery(session, "clock", utcNow, continueTiming: true);
             }
             catch (Exception ex)
@@ -349,11 +386,13 @@ namespace DfoServer.Network.Handlers.Pets
             string source,
             DateTime now)
         {
-            if (!HasCharacter(session) || session.Player.CurrentRun == null)
+            var run = session?.Player?.CurrentRun;
+            if (!HasCharacter(session) || run == null)
             {
                 CancelDeathCheck(session);
                 return;
             }
+            var runIdentity = run.CaptureIdentity();
 
             PetCreatureSatietyUpdate current;
             try
@@ -383,7 +422,12 @@ namespace DfoServer.Network.Handlers.Pets
             if (current.Before <= 0)
             {
                 var immediateVersion = AdvanceDeathTimerVersion(session);
-                ScheduleDeathCheck(session, now, immediateVersion, $"{source}:zero");
+                ScheduleDeathCheck(
+                    session,
+                    now,
+                    immediateVersion,
+                    runIdentity,
+                    $"{source}:zero");
                 FileLogger.Log($"[{ProtocolName}] PetCreatureDeathTimer: schedule immediate source={source} cid={session.Player.CharacterId} key={current.CreatureKey} satiety={current.Before} version={immediateVersion}");
                 return;
             }
@@ -394,14 +438,15 @@ namespace DfoServer.Network.Handlers.Pets
                 : (current.Before - 1) * 60.0 / Math.Max(0.01, multiplier);
             var dueUtc = now.AddSeconds(delaySeconds);
             var version = AdvanceDeathTimerVersion(session);
-            ScheduleDeathCheck(session, dueUtc, version, source);
-            FileLogger.Log($"[{ProtocolName}] PetCreatureDeathTimer: schedule source={source} cid={session.Player.CharacterId} dungeon={session.Player.CurrentRun.DungeonId} key={current.CreatureKey} satiety={current.Before} foodRate={current.FoodConsumeRatePercent}% multiplier={multiplier:0.###} dueIn={delaySeconds:0.0}s version={version}");
+            ScheduleDeathCheck(session, dueUtc, version, runIdentity, source);
+            FileLogger.Log($"[{ProtocolName}] PetCreatureDeathTimer: schedule source={source} cid={session.Player.CharacterId} dungeon={run.DungeonId} key={current.CreatureKey} satiety={current.Before} foodRate={current.FoodConsumeRatePercent}% multiplier={multiplier:0.###} dueIn={delaySeconds:0.0}s version={version}");
         }
 
         private static void ScheduleDeathCheck(
             EnhancedClientSession session,
             DateTime dueUtc,
             int version,
+            DungeonRunIdentity runIdentity,
             string source)
         {
             var name = BuildDeathTimerName(session);
@@ -411,8 +456,12 @@ namespace DfoServer.Network.Handlers.Pets
                 {
                     try
                     {
-                        if (!HasCharacter(session) || session.Player.CurrentRun == null)
+                        if (!HasCharacter(session)
+                            || !session.Player.IsCurrentDungeonRun(runIdentity))
+                        {
+                            FileLogger.Log($"[{ProtocolName}] PetCreatureDeathTimer: skip stale run source={source} cid={session?.Player?.CharacterId ?? 0} run={runIdentity.RunId} generation={runIdentity.RunGeneration}");
                             return;
+                        }
 
                         if (session.Player.PetCreatureDeathTimerVersion != version)
                         {
@@ -421,7 +470,8 @@ namespace DfoServer.Network.Handlers.Pets
                         }
 
                         var died = await CheckDungeonDeathAsync(session, $"{source}:timer", utcNow);
-                        if (!died)
+                        if (!died
+                            && session.Player.IsCurrentDungeonRun(runIdentity))
                             ScheduleDungeonDeathCheck(session, $"{source}:timer-reschedule", utcNow);
                     }
                     catch (Exception ex)
@@ -459,9 +509,25 @@ namespace DfoServer.Network.Handlers.Pets
         private static string BuildDeathTimerName(EnhancedClientSession session)
             => DeathTimerNamePrefix + session.SessionId.ToString("N");
 
-        private static async Task BeginTownCoreAsync(EnhancedClientSession session, string source, DateTime now)
+        private static async Task BeginTownCoreAsync(
+            EnhancedClientSession session,
+            string source,
+            DateTime now,
+            Func<bool> continuationIsCurrent = null)
         {
-            await TryRevivePetCreatureOnTownReturnAsync(session, source);
+            if (continuationIsCurrent != null && !continuationIsCurrent())
+            {
+                return;
+            }
+
+            await TryRevivePetCreatureOnTownReturnAsync(
+                session,
+                source,
+                continuationIsCurrent);
+            if (continuationIsCurrent != null && !continuationIsCurrent())
+            {
+                return;
+            }
             if (session.Player.PetCreatureSatietyTownStartUtc == DateTime.MinValue)
             {
                 session.Player.PetCreatureSatietyTownStartUtc = now;
@@ -594,8 +660,14 @@ namespace DfoServer.Network.Handlers.Pets
 
         private static async Task TryRevivePetCreatureOnTownReturnAsync(
             EnhancedClientSession session,
-            string source)
+            string source,
+            Func<bool> continuationIsCurrent = null)
         {
+            if (continuationIsCurrent != null && !continuationIsCurrent())
+            {
+                return;
+            }
+
             PetCreatureRevivalUpdate update;
             try
             {
@@ -623,6 +695,10 @@ namespace DfoServer.Network.Handlers.Pets
             var revival = new GamePacketWriter();
             revival.WriteUInt16(session.Player.UserId);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x006B, revival.ToArray()));
+            if (continuationIsCurrent != null && !continuationIsCurrent())
+            {
+                return;
+            }
             SetSessionCreatureAliveState(session, update.After > 0 ? (byte)1 : (byte)0);
             session.Player.PetCreatureLastDeathCreatureKey = 0;
 
@@ -741,6 +817,28 @@ namespace DfoServer.Network.Handlers.Pets
             session.Player.PetCreatureSatietyDungeonStartUtc = DateTime.MinValue;
             session.Player.PetCreatureSatietyDungeonId = 0;
             session.Player.PetCreatureLastDeathCreatureKey = 0;
+        }
+
+        internal static bool CanCompleteEndedRun(
+            EnhancedClientSession session,
+            DungeonRunIdentity endingRunIdentity)
+        {
+            var player = session?.Player;
+            return endingRunIdentity.IsValid
+                && player != null
+                && player.CurrentRun == null
+                && player.CurrentDungeonRunGeneration
+                    == endingRunIdentity.RunGeneration;
+        }
+
+        private static bool CanApplyTownState(
+            EnhancedClientSession session,
+            long expectedGeneration)
+        {
+            var player = session?.Player;
+            return player != null
+                && player.CurrentRun == null
+                && player.CurrentDungeonRunGeneration == expectedGeneration;
         }
 
         private static DateTime CalculateNextTownRecoveryAnchor(

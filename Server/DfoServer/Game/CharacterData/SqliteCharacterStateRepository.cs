@@ -176,6 +176,22 @@ namespace DfoServer.Game.CharacterData
                     }
                 }
 
+                snapshot.DailyChallengeRewardClaimFlags = new byte[6];
+                using (var cmd = new SqliteCommand(
+                    "SELECT group_index FROM character_daily_challenge_claims WHERE character_id = @cid ORDER BY group_index", conn))
+                {
+                    cmd.Parameters.AddWithValue("@cid", characterId);
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            var groupIndex = reader.GetInt32(0);
+                            if (groupIndex >= 0 && groupIndex < snapshot.DailyChallengeRewardClaimFlags.Length)
+                                snapshot.DailyChallengeRewardClaimFlags[groupIndex] = 1;
+                        }
+                    }
+                }
+
                 snapshot.RacingDungeonTailIds.Clear();
                 using (var cmd = new SqliteCommand(
                     "SELECT id_value FROM character_daily_challenge_tail_ids WHERE character_id = @cid ORDER BY sort_order", conn))
@@ -192,45 +208,96 @@ namespace DfoServer.Game.CharacterData
 
         public bool UpsertDungeonPermission(int characterId, int dungeonId, byte newClearState)
         {
+            if (dungeonId <= 0
+                || dungeonId > ushort.MaxValue
+                || newClearState == 0)
+                return false;
+
+            ApplyDungeonPermissionBatch(
+                characterId,
+                new[]
+                {
+                    new DungeonPermissionEntrySnapshot
+                    {
+                        DungeonId = (ushort)dungeonId,
+                        ClearState = newClearState,
+                    },
+                },
+                out var changes);
+            return changes.Count > 0;
+        }
+
+        internal List<DungeonPermissionEntrySnapshot>
+            ApplyDungeonPermissionBatch(
+                int characterId,
+                IReadOnlyCollection<DungeonPermissionEntrySnapshot> updates,
+                out List<DungeonPermissionEntrySnapshot> changes)
+        {
+            if (characterId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(characterId));
+            if (updates == null)
+                throw new ArgumentNullException(nameof(updates));
+
+            var normalized = new List<DungeonPermissionEntrySnapshot>();
+            var indexes = new Dictionary<ushort, int>();
+            foreach (var update in updates)
+            {
+                if (update == null
+                    || update.DungeonId == 0
+                    || update.ClearState == 0)
+                {
+                    throw new ArgumentException(
+                        "Dungeon permission updates require non-zero dungeon and state values.",
+                        nameof(updates));
+                }
+
+                if (indexes.TryGetValue(update.DungeonId, out var index))
+                {
+                    if (normalized[index].ClearState < update.ClearState)
+                        normalized[index].ClearState = update.ClearState;
+                    continue;
+                }
+
+                indexes[update.DungeonId] = normalized.Count;
+                normalized.Add(new DungeonPermissionEntrySnapshot
+                {
+                    DungeonId = update.DungeonId,
+                    ClearState = update.ClearState,
+                });
+            }
+
+            changes = new List<DungeonPermissionEntrySnapshot>();
             using (var conn = new SqliteConnection(_connectionString))
             {
                 conn.Open();
-                int currentState = 0;
-                using (var cmd = new SqliteCommand(
-                    "SELECT clear_state FROM character_dungeon_permissions WHERE character_id = @cid AND dungeon_id = @did", conn))
+                using (var tx = conn.BeginTransaction(deferred: false))
                 {
-                    cmd.Parameters.AddWithValue("@cid", characterId);
-                    cmd.Parameters.AddWithValue("@did", dungeonId);
-                    var existing = cmd.ExecuteScalar();
-                    if (existing != null && existing != DBNull.Value)
-                        currentState = Convert.ToInt32(existing);
-                }
-                if (currentState >= newClearState) return false;
+                    foreach (var update in normalized)
+                    {
+                        if (!UpsertDungeonPermission(
+                                conn,
+                                tx,
+                                characterId,
+                                update.DungeonId,
+                                update.ClearState))
+                        {
+                            continue;
+                        }
 
-                if (currentState > 0)
-                {
-                    using (var cmd = new SqliteCommand(
-                        "UPDATE character_dungeon_permissions SET clear_state = @cs WHERE character_id = @cid AND dungeon_id = @did", conn))
-                    {
-                        cmd.Parameters.AddWithValue("@cid", characterId);
-                        cmd.Parameters.AddWithValue("@did", dungeonId);
-                        cmd.Parameters.AddWithValue("@cs", (int)newClearState);
-                        cmd.ExecuteNonQuery();
+                        changes.Add(new DungeonPermissionEntrySnapshot
+                        {
+                            DungeonId = update.DungeonId,
+                            ClearState = update.ClearState,
+                        });
                     }
+
+                    var snapshot = LoadDungeonPermissions(
+                        conn,
+                        tx,
+                        characterId);
+                    tx.Commit();
+                    return snapshot;
                 }
-                else
-                {
-                    using (var cmd = new SqliteCommand(@"
-INSERT INTO character_dungeon_permissions (character_id, sort_order, dungeon_id, clear_state)
-VALUES (@cid, (SELECT COALESCE(MAX(sort_order),0)+1 FROM character_dungeon_permissions WHERE character_id=@cid), @did, @cs)", conn))
-                    {
-                        cmd.Parameters.AddWithValue("@cid", characterId);
-                        cmd.Parameters.AddWithValue("@did", dungeonId);
-                        cmd.Parameters.AddWithValue("@cs", (int)newClearState);
-                        cmd.ExecuteNonQuery();
-                    }
-                }
-                return true;
             }
         }
 
@@ -244,24 +311,109 @@ VALUES (@cid, (SELECT COALESCE(MAX(sort_order),0)+1 FROM character_dungeon_permi
             using (var conn = new SqliteConnection(_connectionString))
             {
                 conn.Open();
-                using (var cmd = new SqliteCommand(
-                    @"SELECT dungeon_id, clear_state
-                      FROM character_dungeon_permissions
-                      WHERE character_id = @cid
-                      ORDER BY sort_order",
-                    conn))
+                return LoadDungeonPermissions(
+                    conn,
+                    transaction: null,
+                    characterId);
+            }
+        }
+
+        private static bool UpsertDungeonPermission(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int dungeonId,
+            byte newClearState)
+        {
+            var currentState = 0;
+            var existingRows = 0;
+            using (var command = new SqliteCommand(@"
+SELECT COUNT(*), COALESCE(MAX(clear_state), 0)
+FROM character_dungeon_permissions
+WHERE character_id = @cid AND dungeon_id = @did;",
+                connection,
+                transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@did", dungeonId);
+                using (var reader = command.ExecuteReader())
                 {
-                    cmd.Parameters.AddWithValue("@cid", characterId);
-                    using (var reader = cmd.ExecuteReader())
+                    if (reader.Read())
                     {
-                        while (reader.Read())
+                        existingRows = reader.GetInt32(0);
+                        currentState = reader.GetInt32(1);
+                    }
+                }
+            }
+
+            if (currentState >= newClearState)
+                return false;
+
+            if (existingRows > 0)
+            {
+                using (var command = new SqliteCommand(@"
+UPDATE character_dungeon_permissions
+SET clear_state = @state
+WHERE character_id = @cid AND dungeon_id = @did;",
+                    connection,
+                    transaction))
+                {
+                    command.Parameters.AddWithValue("@state", (int)newClearState);
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.Parameters.AddWithValue("@did", dungeonId);
+                    command.ExecuteNonQuery();
+                }
+            }
+            else
+            {
+                using (var command = new SqliteCommand(@"
+INSERT INTO character_dungeon_permissions
+    (character_id, sort_order, dungeon_id, clear_state)
+VALUES
+    (@cid,
+     (SELECT COALESCE(MAX(sort_order), 0) + 1
+      FROM character_dungeon_permissions
+      WHERE character_id = @cid),
+     @did,
+     @state);",
+                    connection,
+                    transaction))
+                {
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.Parameters.AddWithValue("@did", dungeonId);
+                    command.Parameters.AddWithValue("@state", (int)newClearState);
+                    command.ExecuteNonQuery();
+                }
+            }
+
+            return true;
+        }
+
+        private static List<DungeonPermissionEntrySnapshot>
+            LoadDungeonPermissions(
+                SqliteConnection connection,
+                SqliteTransaction transaction,
+                int characterId)
+        {
+            var result = new List<DungeonPermissionEntrySnapshot>();
+            using (var command = new SqliteCommand(@"
+SELECT dungeon_id, clear_state
+FROM character_dungeon_permissions
+WHERE character_id = @cid
+ORDER BY sort_order;",
+                connection,
+                transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        result.Add(new DungeonPermissionEntrySnapshot
                         {
-                            result.Add(new DungeonPermissionEntrySnapshot
-                            {
-                                DungeonId = (ushort)reader.GetInt32(0),
-                                ClearState = (byte)reader.GetInt32(1),
-                            });
-                        }
+                            DungeonId = (ushort)reader.GetInt32(0),
+                            ClearState = (byte)reader.GetInt32(1),
+                        });
                     }
                 }
             }

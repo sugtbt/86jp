@@ -380,6 +380,12 @@ CREATE TABLE accounts (
 CREATE TABLE characters (
     character_id INTEGER PRIMARY KEY
 );
+CREATE TABLE character_active_quests (
+    character_id INTEGER NOT NULL,
+    slot INTEGER NOT NULL,
+    quest_id INTEGER NOT NULL,
+    trigger_value INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE mailbox_messages (
     message_id INTEGER PRIMARY KEY AUTOINCREMENT,
     sender_character_id INTEGER NOT NULL,
@@ -436,7 +442,7 @@ PRAGMA user_version=40;";
                         Scalar(connection, "SELECT COUNT(*) FROM mailbox_messages;") == 1
                         && Scalar(connection, "SELECT COUNT(*) FROM mailbox_recipients;") == 1
                         && Scalar(connection, "SELECT COUNT(*) FROM mailbox_attachments;") == 1
-                        && Scalar(connection, "PRAGMA user_version;") == 42
+                        && Scalar(connection, "PRAGMA user_version;") == 47
                         && Scalar(connection, "SELECT COUNT(*) FROM pragma_foreign_key_check;") == 0);
                 }
             }

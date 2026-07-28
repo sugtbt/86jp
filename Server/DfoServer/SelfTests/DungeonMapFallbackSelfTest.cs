@@ -127,8 +127,26 @@ namespace DfoServer.SelfTests
                     multilineGreedMaze.Greed == "II00\nAACC"
                     && greedCells.Contains(new DungeonRoomPoint(0, 0))
                     && !greedCells.Contains(new DungeonRoomPoint(1, 0))
-                    && greedCells.Contains(new DungeonRoomPoint(0, 1))
+                    && !greedCells.Contains(new DungeonRoomPoint(0, 1))
                     && greedCells.Contains(new DungeonRoomPoint(1, 1)),
+                    ref failures);
+
+                var linearGreedDungeon = DungeonFile.Parse(
+                    "[maze info]\n" +
+                    "[size]\n1 3\n" +
+                    "[greed]\n`II\nCC\nEE`\n");
+                Check("ordinary two-character linear maze keeps every configured room",
+                    DungeonRoomTopology.CountConfiguredRooms(
+                        linearGreedDungeon.Mazes[0]) == 3,
+                    ref failures);
+
+                var gblGoddessTempleMaze = DungeonData.GetDungeonMaze(163, 0);
+                Check("GBL Goddess Temple excludes AA cells from clear reward room count",
+                    gblGoddessTempleMaze != null
+                    && gblGoddessTempleMaze.Width == 6
+                    && gblGoddessTempleMaze.Height == 7
+                    && DungeonRoomTopology.CountConfiguredRooms(
+                        gblGoddessTempleMaze) == 23,
                     ref failures);
 
                 var eventMazeDungeon = DungeonFile.Parse(
@@ -199,6 +217,8 @@ namespace DfoServer.SelfTests
             TestTimeGateQuestMazeSelection(ref failures);
             TestPersonalSkillQuestMazeSelection(ref failures);
             TestAntwerpAndTrainMazeSelection(ref failures);
+            TestResolvedRoomTemplateIsolation(ref failures);
+            TestNamedMonsterRoomFilter(ref failures);
 
             var compactQuestMapEntries = new List<LstEntry>
             {
@@ -1820,6 +1840,25 @@ namespace DfoServer.SelfTests
                     && trainDifficultyDiagnostic.Contains("selectedMaze="),
                     ref failures);
 
+                var supplyCutStartMaps = ResolveRepeatedStartMapIds(
+                    dungeonId: 84,
+                    mazeIndex: 0,
+                    bossPos: null);
+                Check(
+                    "Supply Cut omitted start cell resolves its unique dungeon-start-area MAP",
+                    supplyCutStartMaps.SetEquals(new[] { 21352 }),
+                    ref failures);
+
+                var pursuitStartMaps = ResolveRepeatedStartMapIds(
+                    dungeonId: 85,
+                    mazeIndex: 0,
+                    bossPos: null);
+                Check(
+                    "Pursuit keeps only its three explicit PVF start variants",
+                    pursuitStartMaps.IsSubsetOf(new[] { 21415, 21416, 21417 })
+                    && pursuitStartMaps.Count > 0,
+                    ref failures);
+
                 var pirateOrdinaryMazes = new HashSet<int>();
                 var pirateSelectionsValid = true;
                 for (var attempt = 0; attempt < 128; attempt++)
@@ -1863,6 +1902,24 @@ namespace DfoServer.SelfTests
                     })
                     && leftStart.Index == 15189
                     && rightStart.Index == 15195,
+                    ref failures);
+
+                var hazeLeftBossMaps = ResolveRepeatedRoomMapIds(
+                    dungeonId: 92,
+                    mazeIndex: 0,
+                    x: 0,
+                    y: 0,
+                    bossPos: new[] { 0, 0 });
+                var hazeRightBossMaps = ResolveRepeatedRoomMapIds(
+                    dungeonId: 92,
+                    mazeIndex: 0,
+                    x: 4,
+                    y: 0,
+                    bossPos: new[] { 4, 0 });
+                Check(
+                    "Haze ordinary maze keeps its base Boss resource at either randomized endpoint",
+                    hazeLeftBossMaps.SetEquals(new[] { 15183 })
+                    && hazeRightBossMaps.SetEquals(new[] { 15183 }),
                     ref failures);
 
                 var southGateTaskMaze = DungeonData.SelectDungeonMaze(
@@ -1913,6 +1970,28 @@ namespace DfoServer.SelfTests
             }
 
             return result;
+        }
+
+        private static HashSet<int> ResolveRepeatedRoomMapIds(
+            int dungeonId,
+            int mazeIndex,
+            int x,
+            int y,
+            int[] bossPos)
+        {
+            var mapIds = new HashSet<int>();
+            for (var attempt = 0; attempt < 64; attempt++)
+            {
+                var room = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId,
+                    x,
+                    y,
+                    mazeIndex,
+                    bossPos: bossPos);
+                mapIds.Add(room.Index);
+            }
+
+            return mapIds;
         }
 
         private static void TestDriftCaveMazeSelection(ref int failures)
@@ -2038,6 +2117,205 @@ namespace DfoServer.SelfTests
                 failures++;
             }
         }
+
+        private static void TestNamedMonsterRoomFilter(ref int failures)
+        {
+            try
+            {
+                var parsed = DungeonFile.Parse(
+                    "[named monster]\n100 200\n" +
+                    "[named monster map pos]\n1 2 3 4 5\n");
+                Check(
+                    "named monster map positions parse ordered coordinate pairs and ignore an incomplete tail",
+                    parsed.NamedMonsterMapPositions.Count == 2
+                    && parsed.NamedMonsterMapPositions[0].X == 1
+                    && parsed.NamedMonsterMapPositions[0].Y == 2
+                    && parsed.NamedMonsterMapPositions[1].X == 3
+                    && parsed.NamedMonsterMapPositions[1].Y == 4,
+                    ref failures);
+
+                var gentDungeon = DungeonData.GetDungeonFile(89);
+                Check(
+                    "Gent Defence named monster map positions preserve special-object indexes 2, 5 and 8",
+                    gentDungeon.NamedMonsterMapPositions.Count == 9
+                    && IsPosition(gentDungeon.NamedMonsterMapPositions[2], 4, 0)
+                    && IsPosition(gentDungeon.NamedMonsterMapPositions[5], 2, 1)
+                    && IsPosition(gentDungeon.NamedMonsterMapPositions[8], 4, 2),
+                    ref failures);
+
+                var instance = new DungeonInstance(89, 2);
+                var unfiltered = LoadGentBossRoom();
+                var removed = NamedMonsterRoomFilter.Apply(
+                    instance,
+                    gentDungeon,
+                    ref unfiltered);
+                Check(
+                    "Gent Defence keeps all Boss-wave named monsters before mapped rooms are cleared",
+                    removed == 0
+                    && CountSourceActor(unfiltered, 59013, 2) == 1
+                    && CountSourceActor(unfiltered, 59015, 5) == 1
+                    && CountSourceActor(unfiltered, 59014, 8) == 1,
+                    ref failures);
+
+                MarkInstanceRoomCleared(instance, 4, 0);
+                var oneCleared = LoadGentBossRoom();
+                oneCleared.Monsters.Add(new DungeonData.MonsterSumInfo
+                {
+                    Code = 59013,
+                    Flag0 = 0,
+                    SourceSpecialPassiveObjectIndex = 2,
+                });
+                removed = NamedMonsterRoomFilter.Apply(
+                    instance,
+                    gentDungeon,
+                    ref oneCleared);
+                Check(
+                    "Gent Defence removes only the named monster mapped to the cleared room",
+                    removed == 1
+                    && CountSourceActor(oneCleared, 59013, 2) == 1
+                    && CountSourceHiddenActor(oneCleared, 59013, 2) == 0
+                    && CountSourceActor(oneCleared, 59015, 5) == 1
+                    && CountSourceActor(oneCleared, 59014, 8) == 1
+                    && CountSourceActor(oneCleared, 61494, 2) == 1,
+                    ref failures);
+
+                MarkInstanceRoomCleared(instance, 2, 1);
+                MarkInstanceRoomCleared(instance, 4, 2);
+                var allCleared = LoadGentBossRoom();
+                removed = NamedMonsterRoomFilter.Apply(
+                    instance,
+                    gentDungeon,
+                    ref allCleared);
+                Check(
+                    "Gent Defence shared instance suppresses all three cleared named monsters without deleting wave escorts",
+                    removed == 3
+                    && CountSourceActor(allCleared, 59013, 2) == 0
+                    && CountSourceActor(allCleared, 59015, 5) == 0
+                    && CountSourceActor(allCleared, 59014, 8) == 0
+                    && CountSourceActor(allCleared, 61494, 2) == 1
+                    && CountSourceActor(allCleared, 61494, 5) == 1
+                    && CountSourceActor(allCleared, 61494, 8) == 1,
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] Gent Defence named monster room filter: {ex.Message}");
+                failures++;
+            }
+        }
+
+        private static DungeonData.MazeSumInfo LoadGentBossRoom()
+            => DungeonData.GetDungeonMapMonsterSummaryInformation(
+                dungeonId: 89,
+                x: 0,
+                y: 1,
+                mazeIndex: 0,
+                bossPos: new[] { 0, 1 });
+
+        private static void TestResolvedRoomTemplateIsolation(
+            ref int failures)
+        {
+            try
+            {
+                var first = LoadGentBossRoom();
+                var actorCount = first.Monsters?.Count ?? 0;
+                var specialObjectCount = first.SpecialPassiveObjects?.Count ?? 0;
+                var firstSpecialObjectCode = specialObjectCount > 0
+                    ? first.SpecialPassiveObjects[0].ObjectCode
+                    : 0;
+
+                first.Monsters?.Clear();
+                if (specialObjectCount > 0)
+                    first.SpecialPassiveObjects[0].ObjectCode = -1;
+
+                var second = LoadGentBossRoom();
+                Check(
+                    "resolved room actor mutations do not leak into cached templates",
+                    actorCount > 0
+                    && second.Monsters?.Count == actorCount,
+                    ref failures);
+                Check(
+                    "resolved room passive-object mutations do not leak into cached definitions",
+                    specialObjectCount == 0
+                    || (second.SpecialPassiveObjects?.Count == specialObjectCount
+                        && second.SpecialPassiveObjects[0].ObjectCode
+                            == firstSpecialObjectCode),
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[FAIL] resolved room template isolation: {ex.Message}");
+                failures++;
+            }
+        }
+
+        private static void MarkInstanceRoomCleared(
+            DungeonInstance instance,
+            int x,
+            int y)
+        {
+            var key = new RoomKey(x, y, 0);
+            var room = instance.GetOrCreateRoom(
+                key,
+                roomId => new DungeonInstanceRoom(
+                    roomId,
+                    key,
+                    new DungeonData.MazeSumInfo
+                    {
+                        X = x,
+                        Y = y,
+                        Index = 1,
+                        Monsters = new List<DungeonData.MonsterSumInfo>(),
+                    },
+                    seed: 1),
+                out _);
+            room.TryActivate();
+            room.TryClear();
+        }
+
+        private static int CountSourceActor(
+            DungeonData.MazeSumInfo maze,
+            int code,
+            int sourceObjectIndex)
+        {
+            var count = 0;
+            foreach (var actor in maze.Monsters)
+            {
+                if (actor.Code == code
+                    && actor.SourceSpecialPassiveObjectIndex == sourceObjectIndex)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static int CountSourceHiddenActor(
+            DungeonData.MazeSumInfo maze,
+            int code,
+            int sourceObjectIndex)
+        {
+            var count = 0;
+            foreach (var actor in maze.Monsters)
+            {
+                if (actor.Code == code
+                    && actor.Flag0 == 1
+                    && actor.SourceSpecialPassiveObjectIndex == sourceObjectIndex)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static bool IsPosition(
+            NamedMonsterMapPosition position,
+            int x,
+            int y)
+            => position != null && position.X == x && position.Y == y;
 
         private static void CheckSuitableLevelEligibility(ref int failures)
         {

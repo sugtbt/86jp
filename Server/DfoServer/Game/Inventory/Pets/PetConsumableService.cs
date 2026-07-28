@@ -1,4 +1,6 @@
 using System;
+using System.Globalization;
+using PvfLib;
 
 namespace DfoServer.Game.Inventory
 {
@@ -84,21 +86,20 @@ namespace DfoServer.Game.Inventory
             if (stackable == null)
                 return 0;
 
-            var actionType = stackable.ActionTypeName ?? string.Empty;
-            if (actionType.IndexOf("feed", StringComparison.OrdinalIgnoreCase) < 0
-                && actionType.IndexOf("creature", StringComparison.OrdinalIgnoreCase) < 0)
+            var stackableType = StackableItemProvider.NormalizeType(stackable.StackableType);
+            if (!stackableType.Equals("[feed]", StringComparison.OrdinalIgnoreCase))
                 return 0;
 
-            if (stackable.ActionTypeParams == null || stackable.ActionTypeParams.Count == 0)
+            var values = ScriptValueTokenizer.Tokenize(stackable.IntData);
+            if (values.Count < 3
+                || !int.TryParse(
+                    values[2],
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var delta))
                 return 0;
 
-            foreach (var value in stackable.ActionTypeParams)
-            {
-                if (value > 0)
-                    return value;
-            }
-
-            return 0;
+            return delta > 0 ? delta : 0;
         }
 
         private static int ClampSatiety(int value)

@@ -2,6 +2,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Currency;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.ItemUpgrade;
@@ -23,6 +24,7 @@ namespace DfoServer.Game.SelectCharacter
         private readonly KnightShieldDeckRepository _knightShieldDeckRepository;
         private readonly SqliteUserInfoBlobRepository _userInfoBlobRepository;
         private readonly ICharacterStateRepository _initFlagsRepository;
+        private readonly Quests.QuestNotifySelectionRepository _questNotifySelectionRepository;
         private readonly ICharacterRepository _characterRepository;
         private readonly AccountSettingsRepository _accountSettingsRepository;
         private readonly CharacterTitleBookRepository _titleBookRepository;
@@ -31,6 +33,8 @@ namespace DfoServer.Game.SelectCharacter
         private readonly TitleBookMutationService _titleBookMutationService;
         private readonly HonorLevelSyncService _honorLevel;
         private readonly CharacterGoldLimitRepository _goldLimitRepository;
+        private readonly DungeonDifficultyPermissionService
+            _dungeonDifficultyPermissions;
         private readonly string _connectionString;
         private readonly string _databasePath;
         private readonly string _schemaFilePath;
@@ -61,12 +65,17 @@ namespace DfoServer.Game.SelectCharacter
             _knightShieldDeckRepository = KnightShieldDeckRepository.FromConnectionString(_connectionString);
             _userInfoBlobRepository = new SqliteUserInfoBlobRepository(databasePath, schemaFilePath);
             _initFlagsRepository = new SqliteCharacterStateRepository(databasePath, schemaFilePath);
+            _questNotifySelectionRepository = new Quests.QuestNotifySelectionRepository(_connectionString);
             _characterRepository = characterRepository;
             _accountSettingsRepository = new AccountSettingsRepository(databasePath, schemaFilePath);
             _titleBookRepository = new CharacterTitleBookRepository(_connectionString);
             _titleBookMutationService = new TitleBookMutationService(_connectionString);
             _honorLevel = new HonorLevelSyncService(_characterRepository);
             _goldLimitRepository = new CharacterGoldLimitRepository(databasePath, schemaFilePath);
+            _dungeonDifficultyPermissions =
+                new DungeonDifficultyPermissionService(
+                    databasePath,
+                    schemaFilePath);
         }
 
         public int GetSeedCharacterId()
@@ -155,6 +164,14 @@ namespace DfoServer.Game.SelectCharacter
             initSnapshot.CreatureItemList = LoadCreatureItemListSnapshot(characterId);
 
             _initFlagsRepository.LoadAll(characterId, initSnapshot);
+            var loginPermissions = _dungeonDifficultyPermissions
+                .BuildLoginPermissions(
+                    accountId,
+                    initSnapshot.DungeonPermissions);
+            initSnapshot.DungeonPermissions.Clear();
+            initSnapshot.DungeonPermissions.AddRange(loginPermissions);
+            initSnapshot.QuestNotifyIds.AddRange(
+                _questNotifySelectionRepository.Load(characterId));
             initSnapshot.TitleBookCategories.Clear();
             if (InventoryContext.TryGetLease(characterId, out var lease))
             {
