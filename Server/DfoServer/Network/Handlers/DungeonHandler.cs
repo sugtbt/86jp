@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Mercenary;
 using DfoServer.Game.Quests;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Network.Builders;
@@ -29,7 +30,8 @@ namespace DfoServer.Network.Handlers
             Game.Party.PartyManager partyManager = null,
             Game.Session.ISessionDirectory sessionDirectory = null,
             Game.Quests.QuestDropService questDropService = null,
-            Game.Accounts.AccountExperienceProgressService accountExperience = null)
+            Game.Accounts.AccountExperienceProgressService accountExperience = null,
+            IMercenaryRestrictionService mercenaryRestrictions = null)
         {
             _services = new DungeonSharedServices(
                 reviveCoinService,
@@ -41,7 +43,8 @@ namespace DfoServer.Network.Handlers
                 partyManager,
                 sessionDirectory,
                 questDropService,
-                accountExperience);
+                accountExperience,
+                mercenaryRestrictions);
             _map = new DungeonMapHandler(_services);
             _entry = new DungeonEntryHandler(_services, _map);
             _settlement = new DungeonSettlementHandler(_services, _entry);

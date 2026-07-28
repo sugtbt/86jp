@@ -374,6 +374,9 @@ namespace DfoServer.SelfTests
                     {
                         command.CommandText = @"
 PRAGMA foreign_keys=ON;
+CREATE TABLE accounts (
+    account_id INTEGER PRIMARY KEY
+);
 CREATE TABLE characters (
     character_id INTEGER PRIMARY KEY
 );
@@ -410,6 +413,7 @@ CREATE TABLE mailbox_attachments (
     message_id INTEGER NOT NULL,
     FOREIGN KEY (message_id) REFERENCES mailbox_messages(message_id) ON DELETE CASCADE
 );
+INSERT INTO accounts(account_id) VALUES (1), (2);
 INSERT INTO characters(character_id) VALUES (1), (2);
 INSERT INTO mailbox_messages(
     message_id, sender_character_id, sender_name,
@@ -432,7 +436,7 @@ PRAGMA user_version=40;";
                         Scalar(connection, "SELECT COUNT(*) FROM mailbox_messages;") == 1
                         && Scalar(connection, "SELECT COUNT(*) FROM mailbox_recipients;") == 1
                         && Scalar(connection, "SELECT COUNT(*) FROM mailbox_attachments;") == 1
-                        && Scalar(connection, "PRAGMA user_version;") == 41
+                        && Scalar(connection, "PRAGMA user_version;") == 42
                         && Scalar(connection, "SELECT COUNT(*) FROM pragma_foreign_key_check;") == 0);
                 }
             }

@@ -337,13 +337,14 @@ VALUES (@cid);";
                 conn.Open();
                 using (var cmd = conn.CreateCommand())
                 {
+                    cmd.CommandText = File.ReadAllText(ServerPaths.SchemaFilePath);
+                    cmd.ExecuteNonQuery();
                     cmd.CommandText = @"
-CREATE TABLE character_subtype0_fields (
-    character_id INTEGER PRIMARY KEY,
-    mood_value INTEGER NOT NULL,
-    emotion_index INTEGER NOT NULL,
-    action_byte INTEGER NOT NULL
-);
+INSERT INTO accounts(account_id, m_id, password_hash)
+VALUES (8201, 'character-option-migration', '');
+INSERT INTO characters(character_id, account_id, name)
+VALUES (8201001, 8201, 'mood-migration-a'),
+       (8201002, 8201, 'mood-migration-b');
 INSERT INTO character_subtype0_fields (character_id, mood_value, emotion_index, action_byte)
 VALUES (8201001, 9, 3, 3),
        (8201002, 7, 9, 2);
