@@ -462,8 +462,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                     && session.GameSession?.QuestManager != null
                     && pickup.PickedUpItemId > 0)
                 {
-                    await session.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(
-                        new[] { pickup.PickedUpItemId });
+                    session.GameSession.QuestManager
+                        .RecalibrateItemSeekingQuestProgressWithoutNotification(
+                            new[] { pickup.PickedUpItemId });
                 }
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] GET_ITEM: item pickup srcSlot={req.SrcSlot} templateId={pickup.PickedUpItemId} invSlot={pickup.InventorySlot}");
             }

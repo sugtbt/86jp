@@ -381,7 +381,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     (ushort)pickup.DestinationSlot,
                     7)));
             await SendInventoryUpdates(session, tower, pickup.ChangedSlots);
-            await SyncTowerQuestProgress(session, tower, pickup.ItemId);
+            RecalibrateTowerQuestProgress(session, tower, pickup.ItemId);
             FileLogger.Log($"[DeathTower] GET_ITEM: cid={session.Player.CharacterId} sceneSlot={sceneSlot} item={pickup.ItemId} towerSlot={pickup.DestinationSlot}");
             return true;
         }
@@ -428,7 +428,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     instanceValue,
                     expectedItemId)));
             await SendInventoryUpdates(session, tower, mutation.ChangedSlots);
-            await SyncTowerQuestProgress(session, tower, mutation.ItemId);
+            RecalibrateTowerQuestProgress(session, tower, mutation.ItemId);
             FileLogger.Log($"[DeathTower] USE_STACKABLE: cid={session.Player.CharacterId} slot={slot} item={expectedItemId} remaining={mutation.RemainingCount}");
             return true;
         }
@@ -564,15 +564,15 @@ namespace DfoServer.Network.Handlers.Dungeon
                 && (ItemSlotBoundService.IsMainQuickSlot(slot)
                     || tower.InventoryItems.ContainsKey(slot));
 
-        private static Task SyncTowerQuestProgress(
+        private static void RecalibrateTowerQuestProgress(
             EnhancedClientSession session,
             DeathTowerSession tower,
             int itemId)
         {
             var questManager = session?.GameSession?.QuestManager;
             if (questManager == null || itemId <= 0)
-                return Task.CompletedTask;
-            return questManager.SyncItemSeekingQuestProgressAsync(
+                return;
+            questManager.RecalibrateItemSeekingQuestProgressWithoutNotification(
                 new[] { itemId },
                 tower.GetItemCountsSnapshot());
         }

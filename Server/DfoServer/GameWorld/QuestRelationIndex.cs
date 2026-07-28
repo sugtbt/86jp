@@ -8,6 +8,8 @@ namespace DfoServer.GameWorld
     {
         private static readonly Lazy<Dictionary<int, int>> QuestionAnswerCounts =
             new Lazy<Dictionary<int, int>>(BuildQuestionAnswerCounts);
+        private static readonly Lazy<Dictionary<int, int[]>> SuccessorQuestIds =
+            new Lazy<Dictionary<int, int[]>>(BuildSuccessorQuestIds);
 
         internal static List<int> GetPreRequiredQuests(int questId)
         {
@@ -201,41 +203,21 @@ namespace DfoServer.GameWorld
                 return new List<QuestRewardItem>();
 
             var carryForward = new Dictionary<int, int>();
-            foreach (var nextQuestId in QuestCatalog.OrderedIds)
+            foreach (var eventItem in eventItems)
             {
-                if (nextQuestId == questId)
+                if (eventItem.ItemId <= 0 || eventItem.Count <= 0)
+                    continue;
+                if (!HasDownstreamSeekingConsumer(
+                        questId,
+                        eventItem.ItemId))
                     continue;
 
-                var nextQuest = QuestCatalog.Get(nextQuestId);
-                if (nextQuest == null
-                    || !QuestData.ParseIntList(nextQuest.PreRequiredQuest)
-                        .Contains(questId))
+                if (!carryForward.TryGetValue(
+                        eventItem.ItemId,
+                        out var currentCount)
+                    || currentCount < eventItem.Count)
                 {
-                    continue;
-                }
-
-                var nextSeekItems = QuestTargetIndex.GetSeekingConsumeItems(
-                    nextQuestId);
-                if (nextSeekItems.Count == 0)
-                    continue;
-
-                var nextEventItems = QuestData.GetEventItems(nextQuestId);
-                foreach (var eventItem in eventItems)
-                {
-                    if (eventItem.ItemId <= 0 || eventItem.Count <= 0)
-                        continue;
-                    if (!ContainsItem(nextSeekItems, eventItem.ItemId))
-                        continue;
-                    if (ContainsItem(nextEventItems, eventItem.ItemId))
-                        continue;
-
-                    if (!carryForward.TryGetValue(
-                            eventItem.ItemId,
-                            out var currentCount)
-                        || currentCount < eventItem.Count)
-                    {
-                        carryForward[eventItem.ItemId] = eventItem.Count;
-                    }
+                    carryForward[eventItem.ItemId] = eventItem.Count;
                 }
             }
 
@@ -248,6 +230,90 @@ namespace DfoServer.GameWorld
                     Count = pair.Value,
                 });
             }
+            return result;
+        }
+
+        private static bool HasDownstreamSeekingConsumer(
+            int questId,
+            int itemId)
+        {
+            if (questId <= 0 || itemId <= 0)
+                return false;
+
+            var pending = new Queue<int>();
+            var visited = new HashSet<int> { questId };
+            EnqueueSuccessors(questId, pending);
+            while (pending.Count > 0)
+            {
+                var nextQuestId = pending.Dequeue();
+                if (!visited.Add(nextQuestId))
+                    continue;
+
+                if (ContainsItem(
+                        QuestData.GetEventItems(nextQuestId),
+                        itemId))
+                {
+                    continue;
+                }
+                if (ContainsItem(
+                        QuestTargetIndex.GetSeekingConsumeItems(nextQuestId),
+                        itemId))
+                {
+                    return true;
+                }
+
+                EnqueueSuccessors(nextQuestId, pending);
+            }
+            return false;
+        }
+
+        private static void EnqueueSuccessors(
+            int questId,
+            Queue<int> pending)
+        {
+            if (!SuccessorQuestIds.Value.TryGetValue(
+                    questId,
+                    out var successors))
+            {
+                return;
+            }
+
+            foreach (var successor in successors)
+                pending.Enqueue(successor);
+        }
+
+        private static Dictionary<int, int[]> BuildSuccessorQuestIds()
+        {
+            var mutable = new Dictionary<int, List<int>>();
+            foreach (var nextQuestId in QuestCatalog.OrderedIds)
+            {
+                var nextQuest = QuestCatalog.Get(nextQuestId);
+                if (nextQuest == null)
+                    continue;
+
+                foreach (var prerequisiteId in QuestData.ParseIntList(
+                    nextQuest.PreRequiredQuest))
+                {
+                    if (prerequisiteId <= 0
+                        || prerequisiteId == nextQuestId)
+                    {
+                        continue;
+                    }
+                    if (!mutable.TryGetValue(
+                            prerequisiteId,
+                            out var successors))
+                    {
+                        successors = new List<int>();
+                        mutable[prerequisiteId] = successors;
+                    }
+                    if (!successors.Contains(nextQuestId))
+                        successors.Add(nextQuestId);
+                }
+            }
+
+            var result = new Dictionary<int, int[]>(mutable.Count);
+            foreach (var pair in mutable)
+                result[pair.Key] = pair.Value.ToArray();
             return result;
         }
 

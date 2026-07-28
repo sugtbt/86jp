@@ -318,10 +318,13 @@ namespace DfoServer.Game.Quests
                 temporaryHeldCounts);
         }
 
-        public void RecalibrateItemSeekingQuestProgressWithoutNotification(
-            ICollection<int> itemFilter)
+        public bool RecalibrateItemSeekingQuestProgressWithoutNotification(
+            ICollection<int> itemFilter,
+            IReadOnlyDictionary<int, int> temporaryHeldCounts = null)
         {
-            SyncItemSeekingQuestProgressWithoutNotification(itemFilter);
+            return SyncItemSeekingQuestProgressWithoutNotification(
+                itemFilter,
+                temporaryHeldCounts);
         }
 
         public async Task SyncClearMapQuestProgressAsync(
