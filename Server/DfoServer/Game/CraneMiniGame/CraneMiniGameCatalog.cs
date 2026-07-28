@@ -17,10 +17,6 @@ namespace DfoServer.Game.CraneMiniGame
 
     internal sealed class CraneMiniGameCatalog
     {
-        private const int SmartCraneCoinItemId = 2660547;
-        private const int SmartCraneExchangeMaterialItemId = 3333;
-        private const int SmartCraneExchangeMaterialCount = 3;
-
         private static readonly Regex FieldRegex = new Regex(
             @"^\s*\[(?<name>[^\]]+)\]\s*(?<value>.*)$",
             RegexOptions.Compiled);
@@ -54,13 +50,7 @@ namespace DfoServer.Game.CraneMiniGame
                         continue;
                     }
 
-                    var exchangeValues = Regex.Matches(rawLine, @"-?\d+");
-                    if (TryInt(exchangeValues, 0, out var exchangeItemId)
-                        && TryInt(exchangeValues, 1, out var exchangeCount))
-                    {
-                        catalog.ExchangeMaterialItemId = exchangeItemId;
-                        catalog.ExchangeMaterialCount = exchangeCount;
-                    }
+                    ParseExchangeMaterialPairs(rawLine, catalog);
                     continue;
                 }
                 string name;
@@ -158,15 +148,6 @@ namespace DfoServer.Game.CraneMiniGame
             materialCount = 0;
             if (itemTemplateId != MaterialItemId)
                 return false;
-
-            // The client uses the final row of craneMinigameItem.etc for this
-            // coin. PvfLib currently exposes only the first row of that field.
-            if (itemTemplateId == SmartCraneCoinItemId)
-            {
-                materialItemId = SmartCraneExchangeMaterialItemId;
-                materialCount = SmartCraneExchangeMaterialCount;
-                return true;
-            }
 
             materialItemId = ExchangeMaterialItemId;
             materialCount = ExchangeMaterialCount;
