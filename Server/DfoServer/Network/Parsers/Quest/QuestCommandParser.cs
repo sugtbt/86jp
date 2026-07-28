@@ -5,6 +5,14 @@ namespace DfoServer.Network.Parsers.Quest
 {
     internal static class QuestCommandParser
     {
+        internal static bool TryParseImageCommunicationUse(
+            byte[] body,
+            out ImageCommunicationUseCommand command)
+        {
+            command = default;
+            return body == null || body.Length == 0;
+        }
+
         internal static bool TryParseAccept(
             byte[] body,
             out QuestAcceptCommand command)

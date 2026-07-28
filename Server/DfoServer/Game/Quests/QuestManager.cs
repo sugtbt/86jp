@@ -24,6 +24,8 @@ namespace DfoServer.Game.Quests
         private readonly string _connStr;
         private readonly QuestService _service;
         private readonly DailyChallengeService _dailyChallengeService;
+        private readonly ImageCommunicationApplicationService
+            _imageCommunicationService;
         private readonly QuestNotifySelectionService _notifySelectionService;
         private readonly QuestNotificationProjector _notifications;
         private readonly TimeSpan _huntMonsterEchoGrace;
@@ -55,6 +57,8 @@ namespace DfoServer.Game.Quests
             _clock = clock ?? throw new ArgumentNullException(nameof(clock));
             _service = new QuestService(connStr);
             _dailyChallengeService = new DailyChallengeService(connStr);
+            _imageCommunicationService =
+                new ImageCommunicationApplicationService(connStr);
             _notifySelectionService = new QuestNotifySelectionService(connStr);
             var databasePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connStr).DataSource;
             var characterRepository = new SqliteCharacterRepository(
@@ -109,6 +113,40 @@ namespace DfoServer.Game.Quests
                 ? _service.HandleAcceptQuest(cid, command, _sender.AccountId)
                 : QuestAcceptResult.Fail(23);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildAccept(result));
+        }
+
+        public async Task HandleImageCommunicationEquipmentUseAsync(
+            ushort wireType,
+            byte[] body)
+        {
+            ImageCommunicationUseResult result;
+            if (!QuestCommandParser.TryParseImageCommunicationUse(
+                    body,
+                    out var command))
+            {
+                result = new ImageCommunicationUseResult
+                {
+                    Status = ImageCommunicationUseStatus.NoMatchingActiveQuest,
+                };
+            }
+            else
+            {
+                result = _imageCommunicationService.Apply(
+                    _sender.CharacterId,
+                    command);
+            }
+
+            await _sender.SendCmdAckAsync(
+                wireType,
+                ImageCommunicationAckBuilder.Build(result.NpcIndex));
+
+            if (!result.Success)
+            {
+                FileLogger.Log(
+                    $"[ImageCommunication] use rejected "
+                    + $"cid={_sender.CharacterId} status={result.Status} "
+                    + $"bodyLen={body?.Length ?? 0}");
+            }
         }
 
         public async Task HandleGiveupQuestAsync(

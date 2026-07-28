@@ -542,6 +542,17 @@ namespace DfoServer.Network
 
         private void RegisterQuestHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
+            d[(ushort)CmdPacketType.IMAGE_COMMUNICATION_EQUIPMENT_USE] =
+                async (s, h, b) =>
+                {
+                    if (s.GameSession != null)
+                    {
+                        await s.GameSession.QuestManager
+                            .HandleImageCommunicationEquipmentUseAsync(
+                                h.type,
+                                b);
+                    }
+                };
             d[0x001F] = async (s, h, b) => //31
             {
                 if (s.GameSession != null)
