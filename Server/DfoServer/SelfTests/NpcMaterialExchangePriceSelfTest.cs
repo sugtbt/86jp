@@ -50,7 +50,6 @@ namespace DfoServer.SelfTests
                 ItemMetadataResolver.ResolveBuyGold(stackable.Price, stackable.AddPrice) == 40000);
 
             VerifyMaterialExchangeAckCount();
-            VerifyMaterialExchangeCanUseFreedCostSlot();
             VerifyNeedMaterialIsNotUseCost();
             VerifyGoldPurchaseAckCount();
 
@@ -136,45 +135,6 @@ namespace DfoServer.SelfTests
                 && result.RemainingStackCount == buyCount);
             Check("gold-purchase online stack still accumulates",
                 inventory.CountMainItem(itemId) == existingTargetCount + buyCount);
-        }
-
-        private static void VerifyMaterialExchangeCanUseFreedCostSlot()
-        {
-            const int characterId = 947021;
-            const int accountId = 947020;
-            const int craneLabelItemId = 2660547;
-            const short costMaterialSlot = 121;
-
-            var metadata = ItemMetadataResolver.Resolve(craneLabelItemId);
-            Check("crane label is material-exchange fixture",
-                metadata.IsMaterialExchange
-                && metadata.NeedMaterialId == 3170
-                && metadata.NeedMaterialCount == 1);
-
-            var inventory = new InventoryService(characterId, accountId);
-            inventory.SetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart, 1_000_000);
-            for (short slot = 121; slot <= 176; slot++)
-            {
-                var itemId = slot == costMaterialSlot
-                    ? metadata.NeedMaterialId
-                    : 9_470_000 + slot;
-                var core = ItemCore.Create(ItemCore.KindMaterial, itemId);
-                core.Count = 1;
-                inventory.AttachItem(InventoryListType.Main, slot, core);
-            }
-
-            var ok = InventoryShopRuntimeService.TryBuyNpcItem(
-                inventory,
-                craneLabelItemId,
-                1,
-                out var result);
-
-            Check("material-exchange purchase may use the slot freed by cost material",
-                ok
-                && result != null
-                && result.ItemTemplateId == craneLabelItemId
-                && inventory.CountMainItem(craneLabelItemId) == 1
-                && inventory.CountMainItem(metadata.NeedMaterialId) == 0);
         }
 
         private static void VerifyNeedMaterialIsNotUseCost()

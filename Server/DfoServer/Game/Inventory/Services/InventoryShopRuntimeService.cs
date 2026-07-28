@@ -23,13 +23,7 @@ namespace DfoServer.Game.Inventory
                 ? checked(metadata.NeedMaterialCount * effectiveCount)
                 : 0;
 
-            if (!CanGrantAfterCosts(
-                    inventory,
-                    itemTemplateId,
-                    effectiveCount,
-                    totalGoldCost,
-                    metadata.NeedMaterialId,
-                    totalMaterialCost))
+            if (!CanGrant(inventory, itemTemplateId, effectiveCount))
                 return false;
 
             if (!TrySpendCosts(
@@ -98,13 +92,7 @@ namespace DfoServer.Game.Inventory
             if (goldCost < 0)
                 return false;
 
-            if (!CanGrantAfterCosts(
-                    inventory,
-                    itemTemplateId,
-                    effectiveCount,
-                    goldCost,
-                    usesItemCurrency ? requiredItemId : 0,
-                    usesItemCurrency ? requiredItemCount : 0))
+            if (!CanGrant(inventory, itemTemplateId, effectiveCount))
                 return false;
 
             if (!TrySpendCosts(
@@ -320,37 +308,13 @@ namespace DfoServer.Game.Inventory
             return effectiveCount > 0;
         }
 
-        private static bool CanGrantAfterCosts(
-            InventoryService inventory,
-            int itemTemplateId,
-            int count,
-            int goldCost,
-            int materialItemId,
-            int materialCount)
+        private static bool CanGrant(InventoryService inventory, int itemTemplateId, int count)
         {
-            if (inventory == null || goldCost < 0 || materialCount < 0)
-                return false;
-
-            var planningInventory = InventorySpecialConsumableService.CreatePlanningInventory(inventory);
-            if (goldCost > 0
-                && (!planningInventory.TryConsumeMainItem(0, goldCost, out var gold)
-                    || !gold.Success))
-                return false;
-
-            if (materialItemId > 0 || materialCount > 0)
-            {
-                if (materialItemId <= 0 || materialCount <= 0)
-                    return false;
-                if (!planningInventory.TryConsumeMainItem(materialItemId, materialCount, out var material)
-                    || !material.Success)
-                    return false;
-            }
-
             var requests = new[]
             {
                 InventoryRewardGrantRequest.Create(itemTemplateId, count, ItemCreateReason.NpcShopPurchase)
             };
-            return InventoryRewardGrantService.TryPlanBatch(planningInventory, requests, out var plan)
+            return InventoryRewardGrantService.TryPlanBatch(inventory, requests, out var plan)
                 && plan != null
                 && plan.Success;
         }
