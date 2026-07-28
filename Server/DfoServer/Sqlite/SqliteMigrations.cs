@@ -576,7 +576,72 @@ CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
 
             (40, "mailbox persistence on ItemCore inventory", MigrateMailboxItemCore),
             (41, "mailbox sender snapshot survives character deletion", MigrateMailboxSenderSnapshot),
+            (42, "mercenary expedition assignments and reward outbox", MigrateMercenaryExpedition),
         };
+
+        private static void MigrateMercenaryExpedition(SqliteConnection connection)
+        {
+            ExecuteBatch(connection, @"
+CREATE TABLE IF NOT EXISTS account_mercenary_assignments (
+    assignment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    character_id INTEGER NOT NULL UNIQUE,
+    character_level INTEGER NOT NULL,
+    start_time INTEGER NOT NULL,
+    finish_time INTEGER NOT NULL,
+    area_index INTEGER NOT NULL,
+    period_index INTEGER NOT NULL,
+    avatar_bonus_tier INTEGER NOT NULL DEFAULT 0,
+    status INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_mercenary_assignments_account
+    ON account_mercenary_assignments(account_id, character_id);
+
+CREATE TABLE IF NOT EXISTS mercenary_reward_outbox (
+    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER NOT NULL UNIQUE,
+    mailbox_message_id INTEGER,
+    account_id INTEGER NOT NULL,
+    character_id INTEGER NOT NULL,
+    area_index INTEGER NOT NULL,
+    period_index INTEGER NOT NULL,
+    completed_hours INTEGER NOT NULL DEFAULT 0,
+    is_early_return INTEGER NOT NULL DEFAULT 0,
+    return_purpose INTEGER NOT NULL DEFAULT 0,
+    base_gold INTEGER NOT NULL DEFAULT 0,
+    bonus_gold INTEGER NOT NULL DEFAULT 0,
+    item_template_id INTEGER NOT NULL DEFAULT 0,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    mail_title_key TEXT NOT NULL,
+    mail_message_key TEXT NOT NULL,
+    critical_multiplier_milli INTEGER NOT NULL DEFAULT 1000,
+    delivery_status TEXT NOT NULL DEFAULT 'pending',
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    last_delivery_error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TEXT,
+    FOREIGN KEY (mailbox_message_id) REFERENCES mailbox_messages(message_id) ON DELETE SET NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_mercenary_outbox_delivery
+    ON mercenary_reward_outbox(delivery_status, outbox_id);
+
+CREATE TABLE IF NOT EXISTS mercenary_reward_items (
+    outbox_id INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL,
+    item_template_id INTEGER NOT NULL CHECK(item_template_id > 0),
+    item_count INTEGER NOT NULL CHECK(item_count > 0),
+    PRIMARY KEY (outbox_id, ordinal),
+    FOREIGN KEY (outbox_id) REFERENCES mercenary_reward_outbox(outbox_id) ON DELETE CASCADE
+);
+");
+        }
 
         private static void MigrateMailboxItemCore(SqliteConnection connection)
         {

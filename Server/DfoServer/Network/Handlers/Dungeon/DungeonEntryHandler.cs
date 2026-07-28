@@ -18,6 +18,8 @@ namespace DfoServer.Network.Handlers.Dungeon
     internal sealed class DungeonEntryHandler
     {
         private const int GorgeousChallengeGoldCost = 190000;
+        internal const ushort StartGameResponseType = 0x000F;
+        internal const byte MercenaryContentErrorCode = 0xEB;
 
         private readonly DungeonSharedServices _svc;
         private readonly DungeonMapHandler _mapHandler;
@@ -31,6 +33,19 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal async Task HandleEnterSelectDungeon(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ENTER_SELECT_DUNGEON: cid={session.Player.CharacterId} uid={session.Player.UserId} town={session.Player.CurTownId} area={session.Player.CurAreaId}");
+            if (_svc.MercenaryRestrictions != null
+                && !_svc.MercenaryRestrictions.CanEnterContent(session.Player.CharacterId))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] ENTER_SELECT_DUNGEON: " +
+                    $"MERCENARY_CONTENT_BLOCKED cid={session.Player.CharacterId}");
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    StartGameResponseType,
+                    BuildMercenaryContentErrorBody()));
+                return;
+            }
+
             try
             {
                 session.Player.UserState = 0x01;
@@ -205,6 +220,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             // ★组队副本联机: 队长进本时把整队队员也驱动进【同一实例】。⚠️待真机验证(见 DFO_PARTY_DUNGEON_COOP)。
             await TryFanOutDungeonEntryToPartyAsync(session, header, req, bossPos, (byte)selection.Index);
         }
+
+        internal static byte[] BuildMercenaryContentErrorBody()
+            => CommonPacketBodyBuilder.BuildCmdError(MercenaryContentErrorCode);
 
         internal async Task EnterLinkedDungeonAsync(
             EnhancedClientSession session,

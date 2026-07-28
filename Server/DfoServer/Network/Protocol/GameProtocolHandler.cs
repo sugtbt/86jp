@@ -5,6 +5,7 @@ using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Lottery;
 using DfoServer.Game.Mailbox;
+using DfoServer.Game.Mercenary;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -40,6 +41,7 @@ namespace DfoServer.Network
         private readonly InventoryRefreshSender _inventoryRefreshSender;
         private readonly PetCreatureHandler _petCreatureHandler;
         private readonly MercenaryHandler _mercenaryHandler;
+        private readonly MercenaryExpeditionHandler _mercenaryExpeditionHandler;
         private readonly GrowthCapsuleHandler _growthCapsuleHandler;
         private readonly GoldLimitHandler _goldLimitHandler;
         private readonly CraneMiniGameHandler _craneMiniGameHandler;
@@ -90,7 +92,14 @@ namespace DfoServer.Network
             _selectCharacterDataSource = sqliteSelectCharacterDataSource;
             _sessionDirectory = sessionDirectory;
             _loginHandler = new LoginHandler(accountRepository, characterRepository);
-            _characterSelectHandler = new CharacterSelectHandler(sqliteSelectCharacterDataSource, characterRepository, getUserInfoTemplate, sessionDirectory);
+            var mercenaryRepository = new MercenaryRepository(databasePath, schemaFilePath);
+            var mercenaryRestrictions = new MercenaryRestrictionService(mercenaryRepository);
+            _characterSelectHandler = new CharacterSelectHandler(
+                sqliteSelectCharacterDataSource,
+                characterRepository,
+                getUserInfoTemplate,
+                sessionDirectory,
+                mercenaryRestrictions);
             _inventoryRefreshSender = new InventoryRefreshSender(sqliteSelectCharacterDataSource, characterRepository);
             var knightShieldRepository = new KnightShieldDeckRepository(databasePath, schemaFilePath);
             var knightShieldService = new KnightShieldService(knightShieldRepository);
@@ -107,7 +116,8 @@ namespace DfoServer.Network
                 characterRepository,
                 _inventoryRefreshSender,
                 experienceItemNotifications,
-                broadcastGamePacket);
+                broadcastGamePacket,
+                mercenaryRestrictions);
             var lotteryDoubleRewardPolicy = new LotteryDoubleRewardPolicy(
                 dailyResetService,
                 connectionString);
@@ -138,7 +148,8 @@ namespace DfoServer.Network
                 connectionString,
                 _inventoryRefreshSender,
                 _partyManager,
-                sessionDirectory);
+                sessionDirectory,
+                mercenaryRestrictions: mercenaryRestrictions);
             _secretShopHandler = new SecretShopHandler(_inventoryRefreshSender);
             _staminaHandler = new StaminaHandler(_inventoryRefreshSender);
             _settingsHandler = new SettingsHandler(sessionDirectory);
@@ -148,6 +159,13 @@ namespace DfoServer.Network
             _rentalHandler = new RentalHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             var mailboxRepository = new MailboxRepository(databasePath, schemaFilePath);
             var mailboxService = new MailboxService(mailboxRepository);
+            var mercenaryService = new MercenaryService(
+                mercenaryRepository,
+                characterRepository,
+                new MercenaryAvatarBonusTierProvider(databasePath, schemaFilePath),
+                mailDelivery: new MailboxMercenaryMailDelivery(mailboxService));
+            mercenaryService.RegisterDeliveryClock(ClockService.Instance);
+            _mercenaryExpeditionHandler = new MercenaryExpeditionHandler(mercenaryService);
             _mailboxHandler = new MailboxHandler(
                 characterRepository,
                 mailboxService,
@@ -524,6 +542,9 @@ namespace DfoServer.Network
 
         private void RegisterMercenaryHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
+            d[MercenaryExpeditionHandler.ReturnCommand] = _mercenaryExpeditionHandler.HandleReturn;
+            d[MercenaryExpeditionHandler.InfoCommand] = _mercenaryExpeditionHandler.HandleInfo;
+            d[MercenaryExpeditionHandler.CompetitionCommand] = _mercenaryExpeditionHandler.HandleCompetition;
             d[0x01E5] = _mercenaryHandler.HandleMercenaryRequest;                  //485 支援兵技能列表
             d[0x01E8] = _mercenaryHandler.HandleMercenaryRequest;                  //488 支援兵选择
         }
