@@ -60,7 +60,10 @@ namespace DfoServer.Game.Mailbox
             {
                 var core = ItemCore.FromBytes(itemCoreData);
                 if (core != null && core.ItemId > 0)
+                {
+                    RestoreLegacyExpireTime(core, itemId, expireTime);
                     return core;
+                }
             }
 
             if (itemId <= 0)
@@ -128,6 +131,17 @@ namespace DfoServer.Game.Mailbox
                 default:
                     return ItemCore.KindConsumable;
             }
+        }
+
+        private static void RestoreLegacyExpireTime(ItemCore core, int itemId, int expireTime)
+        {
+            if (core == null || expireTime <= 0 || core.ExpireTime > 0)
+                return;
+
+            if (itemId > 0 && core.ItemId != itemId)
+                return;
+
+            core.ExpireTime = expireTime;
         }
 
         private static byte ClampByte(int value)
