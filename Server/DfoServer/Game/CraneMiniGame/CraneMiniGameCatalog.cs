@@ -17,6 +17,10 @@ namespace DfoServer.Game.CraneMiniGame
 
     internal sealed class CraneMiniGameCatalog
     {
+        private const int SmartCraneCoinItemId = 2660547;
+        private const int SmartCraneExchangeMaterialItemId = 3333;
+        private const int SmartCraneExchangeMaterialCount = 3;
+
         private static readonly Regex FieldRegex = new Regex(
             @"^\s*\[(?<name>[^\]]+)\]\s*(?<value>.*)$",
             RegexOptions.Compiled);
@@ -24,6 +28,8 @@ namespace DfoServer.Game.CraneMiniGame
         public int ViewCount { get; private set; }
         public int MaterialItemId { get; private set; }
         public int MaterialCount { get; private set; }
+        public int ExchangeMaterialItemId { get; private set; }
+        public int ExchangeMaterialCount { get; private set; }
         public IReadOnlyList<CraneMiniGameItem> Items { get; private set; }
 
         internal static CraneMiniGameCatalog Load()
@@ -35,16 +41,40 @@ namespace DfoServer.Game.CraneMiniGame
             CraneMiniGameItem current = null;
             var catalog = new CraneMiniGameCatalog();
             string pendingField = null;
+            var readingNeedMaterial = false;
 
             foreach (var rawLine in (text ?? string.Empty).Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var match = FieldRegex.Match(rawLine);
+                if (readingNeedMaterial)
+                {
+                    if (match.Success && match.Groups["name"].Value.Trim().Equals("/need material", StringComparison.OrdinalIgnoreCase))
+                    {
+                        readingNeedMaterial = false;
+                        continue;
+                    }
+
+                    var exchangeValues = Regex.Matches(rawLine, @"-?\d+");
+                    if (TryInt(exchangeValues, 0, out var exchangeItemId)
+                        && TryInt(exchangeValues, 1, out var exchangeCount))
+                    {
+                        catalog.ExchangeMaterialItemId = exchangeItemId;
+                        catalog.ExchangeMaterialCount = exchangeCount;
+                    }
+                    continue;
+                }
                 string name;
                 string valueText;
                 if (match.Success)
                 {
                     name = match.Groups["name"].Value.Trim().ToLowerInvariant();
                     valueText = match.Groups["value"].Value;
+                    if (name == "need material")
+                    {
+                        ParseExchangeMaterialPairs(valueText, catalog);
+                        readingNeedMaterial = true;
+                        continue;
+                    }
                     if (name.StartsWith("/", StringComparison.Ordinal))
                     {
                         pendingField = null;
@@ -120,6 +150,44 @@ namespace DfoServer.Game.CraneMiniGame
             }
 
             return catalog;
+        }
+
+        internal bool TryResolveCoinExchange(int itemTemplateId, out int materialItemId, out int materialCount)
+        {
+            materialItemId = 0;
+            materialCount = 0;
+            if (itemTemplateId != MaterialItemId)
+                return false;
+
+            // The client uses the final row of craneMinigameItem.etc for this
+            // coin. PvfLib currently exposes only the first row of that field.
+            if (itemTemplateId == SmartCraneCoinItemId)
+            {
+                materialItemId = SmartCraneExchangeMaterialItemId;
+                materialCount = SmartCraneExchangeMaterialCount;
+                return true;
+            }
+
+            materialItemId = ExchangeMaterialItemId;
+            materialCount = ExchangeMaterialCount;
+            return materialItemId > 0 && materialCount > 0;
+        }
+
+        private static void ParseExchangeMaterialPairs(string text, CraneMiniGameCatalog catalog)
+        {
+            if (catalog == null || string.IsNullOrWhiteSpace(text))
+                return;
+
+            var values = Regex.Matches(text, @"-?\d+");
+            for (var index = 0; index + 1 < values.Count; index += 2)
+            {
+                if (TryInt(values, index, out var itemId)
+                    && TryInt(values, index + 1, out var count))
+                {
+                    catalog.ExchangeMaterialItemId = itemId;
+                    catalog.ExchangeMaterialCount = count;
+                }
+            }
         }
 
         private static bool TryInt(MatchCollection values, int index, out int value)

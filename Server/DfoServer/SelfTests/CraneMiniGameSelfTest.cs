@@ -19,6 +19,11 @@ namespace DfoServer.SelfTests
 
             Check("parse view count", catalog.ViewCount == 6, ref failures);
             Check("parse material", catalog.MaterialItemId == MaterialItemId && catalog.MaterialCount == 1, ref failures);
+            Check("parse crane coin exchange from final need-material row",
+                catalog.TryResolveCoinExchange(MaterialItemId, out var exchangeItemId, out var exchangeCount)
+                && exchangeItemId == 3333
+                && exchangeCount == 3
+                && !catalog.TryResolveCoinExchange(MaterialItemId + 1, out _, out _), ref failures);
             Check("parse item fields", catalog.Items.Count == 7
                 && catalog.Items[0].CatalogIndex == 0
                 && catalog.Items[0].ItemId == 10000001
@@ -84,6 +89,36 @@ namespace DfoServer.SelfTests
             var noMaterialInventory = new InventoryService(990487, 990486);
             Check("missing material rejects without state", !service.TryStart(noMaterialInventory, 140, out var rejected)
                 && rejected == null, ref failures);
+
+            var exchangeInventory = new InventoryService(990488, 990486);
+            exchangeInventory.SetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart, 1_000_000);
+            var seededExchangeMaterial = InventoryRewardGrantService.TryCreateAndInsert(
+                exchangeInventory,
+                3333,
+                ItemCreateReason.NpcShopPurchase,
+                3,
+                out var seededExchangeGrant);
+            var realCatalog = CraneMiniGameCatalog.Load();
+            var resolvedRealExchange = realCatalog.TryResolveCoinExchange(
+                MaterialItemId,
+                out var realExchangeItemId,
+                out var realExchangeCount);
+            var exchangeOk = InventoryShopRuntimeService.TryBuyNpcItem(
+                exchangeInventory,
+                MaterialItemId,
+                1,
+                out var exchangeResult);
+            Check("NPC exchange uses crane script material instead of coin item need-material",
+                seededExchangeMaterial
+                && resolvedRealExchange
+                && realExchangeItemId == 3333
+                && realExchangeCount == 3
+                && exchangeOk
+                && exchangeResult != null
+                && exchangeResult.CostItemTemplateId == 3333
+                && exchangeResult.CostItemNewStackCount == 0
+                && exchangeInventory.CountMainItem(3333) == 0
+                && exchangeInventory.CountMainItem(MaterialItemId) == 1, ref failures);
             Check("malformed request failure shape", CraneMiniGameStartAckBuilder.BuildFailure().SequenceEqual(new byte[] { 0, 4 }), ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
@@ -97,7 +132,7 @@ namespace DfoServer.SelfTests
             {
                 text += $"[item]\n{10000000 + i}\n[cnt]\n2\n[viewRatio]\n{(i == 1 ? "43.96" : "10")}\n[pickRatio]\n90\n";
             }
-            return text + $"[material]\n{MaterialItemId}\t1\n[need material]\n3332\t5\n[/need material]\n";
+            return text + $"[material]\n{MaterialItemId}\t1\n[need material]\n3332\t5\n3341\t10\n3333\t3\n[/need material]\n";
         }
 
         private static void Check(string label, bool ok, ref int failures)

@@ -1,5 +1,6 @@
 using DfoServer.Game.CraneMiniGame;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Mailbox;
 using DfoServer.Network.Builders;
 using System;
 using System.Linq;
@@ -9,6 +10,8 @@ namespace DfoServer.Network.Handlers
 {
     internal sealed class CraneMiniGameHandler
     {
+        private const string OverflowMailTitle = "智能娃娃机(1期)";
+        private const string OverflowMailText = "智能娃娃机的奖励将以邮件形式发送给您。";
         private readonly CraneMiniGameStartService _startService;
         private readonly CraneMiniGameSessionCoordinator _sessions;
         private readonly InventoryRefreshSender _refresh;
@@ -89,6 +92,7 @@ namespace DfoServer.Network.Handlers
 
             var won = CraneMiniGamePickupService.RollSuccess(item);
             InventoryRewardGrantResult grant = null;
+            var deliveredByMail = false;
             if (!won)
             {
                 await SendPickupFailure(session);
@@ -102,8 +106,13 @@ namespace DfoServer.Network.Handlers
             {
                 var hasLease = InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
                     && lease.IsOwnedBy(session.SessionId);
-                if (!hasLease
-                    || !InventoryRewardGrantService.TryCreateAndInsert(
+                if (!hasLease)
+                {
+                    await SendPickupFailure(session);
+                    return;
+                }
+
+                if (!InventoryRewardGrantService.TryCreateAndInsert(
                         lease,
                         item.ItemId,
                         ItemCreateReason.Unknown,
@@ -112,12 +121,38 @@ namespace DfoServer.Network.Handlers
                     || grant == null
                     || !grant.Success)
                 {
-                    FileLogger.Log(
-                        $"[GameProtocol] CRANE_PICKUP grant failed: cid={session.Player.CharacterId} " +
-                        $"displaySlot={displaySlot} item={item.ItemId} count={item.Count} " +
-                        $"error={grant?.Error}");
-                    await SendPickupFailure(session);
-                    return;
+                    if (grant?.Error == InventoryRewardGrantError.InsertPlanFailed)
+                    {
+                        var rewards = new[]
+                        {
+                            InventoryRewardGrantRequest.Create(
+                                item.ItemId,
+                                item.Count,
+                                ItemCreateReason.Unknown),
+                        };
+                        deliveredByMail = MailboxInventoryOverflowRewardSink.Instance.TryDeliver(
+                            lease.Inventory,
+                            rewards,
+                            OverflowMailTitle,
+                            OverflowMailText,
+                            out _);
+                    }
+
+                    if (deliveredByMail)
+                    {
+                        FileLogger.Log(
+                            $"[GameProtocol] CRANE_PICKUP mailed: cid={session.Player.CharacterId} " +
+                            $"displaySlot={displaySlot} item={item.ItemId} count={item.Count}");
+                    }
+                    else
+                    {
+                        FileLogger.Log(
+                            $"[GameProtocol] CRANE_PICKUP grant failed: cid={session.Player.CharacterId} " +
+                            $"displaySlot={displaySlot} item={item.ItemId} count={item.Count} " +
+                            $"error={grant?.Error}");
+                        await SendPickupFailure(session);
+                        return;
+                    }
                 }
             }
 
@@ -125,7 +160,16 @@ namespace DfoServer.Network.Handlers
                 0x01,
                 (ushort)CmdPacketType.CRANE_PICKUP,
                 CraneMiniGamePickupAckBuilder.BuildSuccess(item)));
-            if (grant.Kind == InventoryRewardGrantKind.InventoryItem && grant.SlotIndex >= 0)
+            if (deliveredByMail)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketType.MAILBOX_ALARM,
+                    MailboxHandler.BuildMailboxAlarmNotification(1)));
+            }
+            if (!deliveredByMail
+                && grant.Kind == InventoryRewardGrantKind.InventoryItem
+                && grant.SlotIndex >= 0)
                 await _refresh.SendUpdateItemList(session, grant.ListType, grant.SlotIndex);
 
             FileLogger.Log(

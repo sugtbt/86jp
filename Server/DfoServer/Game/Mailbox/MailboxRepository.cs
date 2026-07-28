@@ -223,6 +223,7 @@ SELECT
     m.message_id,
     m.sender_character_id,
     m.sender_name,
+    m.title,
     m.body,
     CASE WHEN r.received_gold_flag = 0 THEN m.gold ELSE 0 END AS gold,
     CASE
@@ -253,20 +254,21 @@ ORDER BY s.mailbox_group ASC, datetime(m.created_at) DESC, m.message_id DESC;";
                         {
                             while (reader.Read())
                             {
-                                var read = reader.GetInt32(7) != 0;
-                                var saved = reader.GetInt32(8) != 0;
+                                var read = reader.GetInt32(8) != 0;
+                                var saved = reader.GetInt32(9) != 0;
                                 entries.Add(new MailboxListEntry
                                 {
                                     MessageId = reader.GetInt64(0),
                                     SenderCharacterId = reader.GetInt32(1),
                                     SenderName = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                                    Body = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
-                                    Gold = reader.GetInt32(4),
-                                    RemainSeconds = reader.GetInt32(5),
-                                    CreatedAtUnixSeconds = reader.GetInt32(6),
+                                    Title = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                                    Body = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                                    Gold = reader.GetInt32(5),
+                                    RemainSeconds = reader.GetInt32(6),
+                                    CreatedAtUnixSeconds = reader.GetInt32(7),
                                     LetterStat = saved ? 3 : (read ? 2 : 1),
-                                    MailType = reader.GetInt32(9),
-                                    SourceProtocol = reader.GetInt32(10)
+                                    MailType = reader.GetInt32(10),
+                                    SourceProtocol = reader.GetInt32(11)
                                 });
                                 if (!saved)
                                     loadedInboxCount++;
@@ -2212,6 +2214,11 @@ LIMIT 1;";
             AppendHashField(builder, request.MailType.ToString());
             AppendHashField(builder, request.SourceProtocol.ToString());
             AppendHashField(builder, request.Text);
+            if (!string.IsNullOrWhiteSpace(request.Title)
+                && !string.Equals(request.Title, request.Text, StringComparison.Ordinal))
+            {
+                AppendHashField(builder, request.Title);
+            }
             // Preserve hashes produced before the explicit lifetime fields existed.
             // Only finite/custom system mail extends the payload identity.
             if (request.Unlimited.HasValue || request.ExpireAtUtc.HasValue)
@@ -2268,6 +2275,7 @@ LIMIT 1;";
                 SenderName = template.SenderName,
                 SenderLevel = template.SenderLevel,
                 Gold = template.Gold,
+                Title = template.Title,
                 Text = template.Text,
                 MailType = template.MailType,
                 SourceProtocol = template.SourceProtocol,
@@ -2293,6 +2301,7 @@ LIMIT 1;";
                 ReceiverName = recipient.Name,
                 ReceiverLevel = recipient.Level,
                 Gold = template.Gold,
+                Title = template.Title,
                 Text = template.Text,
                 MailType = template.MailType,
                 SourceProtocol = template.SourceProtocol,
@@ -2344,7 +2353,9 @@ SELECT last_insert_rowid();";
                 command.Parameters.AddWithValue("@receiverCid", request.ReceiverCharacterId);
                 command.Parameters.AddWithValue("@receiverAid", request.ReceiverAccountId);
                 command.Parameters.AddWithValue("@receiverName", request.ReceiverName ?? string.Empty);
-                command.Parameters.AddWithValue("@title", request.Text ?? string.Empty);
+                command.Parameters.AddWithValue("@title", string.IsNullOrWhiteSpace(request.Title)
+                    ? request.Text ?? string.Empty
+                    : request.Title);
                 command.Parameters.AddWithValue("@body", request.Text ?? string.Empty);
                 command.Parameters.AddWithValue("@gold", request.Gold);
                 command.Parameters.AddWithValue("@feeGold", feeGold);

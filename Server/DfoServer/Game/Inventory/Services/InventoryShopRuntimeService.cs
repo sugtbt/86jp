@@ -1,5 +1,6 @@
 using System;
 using DfoServer.Game.Currency;
+using DfoServer.Game.CraneMiniGame;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 
@@ -7,6 +8,9 @@ namespace DfoServer.Game.Inventory
 {
     internal static class InventoryShopRuntimeService
     {
+        private static readonly Lazy<CraneMiniGameCatalog> CraneCatalog =
+            new Lazy<CraneMiniGameCatalog>(CraneMiniGameCatalog.Load);
+
         internal static bool TryBuyNpcItem(
             InventoryService inventory,
             int itemTemplateId,
@@ -19,8 +23,19 @@ namespace DfoServer.Game.Inventory
 
             var totalGoldCost = checked(metadata.BuyGold * effectiveCount);
             var totalCeraCost = checked(metadata.BuyCoin * effectiveCount);
-            var totalMaterialCost = metadata.IsMaterialExchange
-                ? checked(metadata.NeedMaterialCount * effectiveCount)
+            var materialItemId = metadata.NeedMaterialId;
+            var materialCount = metadata.NeedMaterialCount;
+            if (CraneCatalog.Value.TryResolveCoinExchange(
+                    itemTemplateId,
+                    out var craneMaterialItemId,
+                    out var craneMaterialCount))
+            {
+                materialItemId = craneMaterialItemId;
+                materialCount = craneMaterialCount;
+            }
+            var usesMaterialExchange = materialItemId > 0 && materialCount > 0;
+            var totalMaterialCost = usesMaterialExchange
+                ? checked(materialCount * effectiveCount)
                 : 0;
 
             if (!CanGrant(inventory, itemTemplateId, effectiveCount))
@@ -30,7 +45,7 @@ namespace DfoServer.Game.Inventory
                     inventory,
                     totalGoldCost,
                     totalCeraCost,
-                    metadata.NeedMaterialId,
+                    materialItemId,
                     totalMaterialCost,
                     out var updatedGold,
                     out var updatedSp,
@@ -58,9 +73,9 @@ namespace DfoServer.Game.Inventory
                 result.InstanceValue = effectiveCount;
             }
 
-            if (metadata.IsMaterialExchange)
+            if (usesMaterialExchange)
             {
-                result.CostItemTemplateId = metadata.NeedMaterialId;
+                result.CostItemTemplateId = materialItemId;
                 result.CostItemNewStackCount = costItemRemaining;
                 result.CostItemSlotIndex = costItemSlot;
             }

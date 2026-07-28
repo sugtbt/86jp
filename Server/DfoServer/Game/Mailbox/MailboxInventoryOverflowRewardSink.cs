@@ -25,6 +25,14 @@ namespace DfoServer.Game.Mailbox
             InventoryService inventory,
             IReadOnlyList<InventoryRewardGrantRequest> rewards,
             out InventoryOverflowDeliveryResult result)
+            => TryDeliver(inventory, rewards, null, null, out result);
+
+        internal bool TryDeliver(
+            InventoryService inventory,
+            IReadOnlyList<InventoryRewardGrantRequest> rewards,
+            string title,
+            string text,
+            out InventoryOverflowDeliveryResult result)
         {
             result = new InventoryOverflowDeliveryResult();
             if (inventory == null || rewards == null)
@@ -38,7 +46,7 @@ namespace DfoServer.Game.Mailbox
             if (attachments.Count == 0)
                 return true;
 
-            var mails = BuildMailRequests(inventory, attachments);
+            var mails = BuildMailRequests(inventory, attachments, title, text);
             var send = _mailboxService.SendSystemMails(mails);
             if (!send.Success)
             {
@@ -202,7 +210,9 @@ namespace DfoServer.Game.Mailbox
 
         private static IReadOnlyList<MailboxSendRequest> BuildMailRequests(
             InventoryService inventory,
-            IReadOnlyList<MailboxSendAttachmentRequest> attachments)
+            IReadOnlyList<MailboxSendAttachmentRequest> attachments,
+            string title,
+            string text)
         {
             var mails = new List<MailboxSendRequest>();
             var chunkIndex = 0;
@@ -222,7 +232,8 @@ namespace DfoServer.Game.Mailbox
                     ReceiverAccountId = inventory.AccountId,
                     ReceiverName = string.Empty,
                     Gold = 0,
-                    Text = "Inventory overflow reward",
+                    Title = string.IsNullOrWhiteSpace(title) ? "Inventory overflow reward" : title,
+                    Text = string.IsNullOrWhiteSpace(text) ? "Inventory overflow reward" : text,
                     MailType = 1,
                     SourceProtocol = 0,
                     Unlimited = true,

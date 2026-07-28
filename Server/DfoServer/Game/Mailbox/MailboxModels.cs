@@ -47,6 +47,7 @@ namespace DfoServer.Game.Mailbox
         public int SenderLevel { get; set; }
         public int ReceiverLevel { get; set; }
         public int Gold { get; set; }
+        public string Title { get; set; } = string.Empty;
         public string Text { get; set; } = string.Empty;
         public int MailType { get; set; }
         public ushort SourceProtocol { get; set; }
@@ -167,6 +168,7 @@ namespace DfoServer.Game.Mailbox
         public string SenderName { get; set; } = string.Empty;
         public int MailType { get; set; }
         public int SourceProtocol { get; set; }
+        public string Title { get; set; } = string.Empty;
         public string Body { get; set; } = string.Empty;
         public int Gold { get; set; }
         public int AttachmentCount { get; set; }
