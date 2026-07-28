@@ -25,11 +25,21 @@ namespace DfoServer
             ("--selftest-tower-of-despair-progress", SelfTests.TowerOfDespairProgressSelfTest.Run),
             ("--selftest-dungeon-room-progress", SelfTests.DungeonRoomProgressSelfTest.Run),
             ("--selftest-dungeon-run", SelfTests.DungeonRunLifecycleSelfTest.Run),
+            ("--selftest-dungeon-instance-registry", SelfTests.DungeonInstanceRegistrySelfTest.Run),
+            ("--selftest-dungeon-rejoin-protocol", SelfTests.DungeonRejoinProtocolSelfTest.Run),
+            ("--selftest-dungeon-encounter-directive", SelfTests.DungeonEncounterDirectiveSelfTest.Run),
+            ("--selftest-dungeon-reward-policy", SelfTests.DungeonRewardPolicySelfTest.Run),
+            ("--selftest-impossible-dungeon-drop", SelfTests.ImpossibleDungeonDropSelfTest.Run),
+            ("--selftest-dungeon-difficulty-permission", SelfTests.DungeonDifficultyPermissionSelfTest.Run),
+            ("--selftest-scripted-fatal-endpoint", SelfTests.ScriptedFatalEndpointSelfTest.Run),
             ("--selftest-special-dungeon", SelfTests.SpecialDungeonSelfTest.Run),
             ("--selftest-special-dungeon-part2", SelfTests.SpecialDungeonPart2SelfTest.Run),
             ("--selftest-special-dungeon-part3", SelfTests.SpecialDungeonPart3SelfTest.Run),
             ("--selftest-card-reward-flow", SelfTests.CardRewardFlowSelfTest.Run),
+            ("--selftest-dungeon-persistent-effects", SelfTests.DungeonPersistentEffectSelfTest.Run),
             ("--selftest-monster-card-drop", SelfTests.MonsterCardDropSelfTest.Run),
+            ("--selftest-dungeon-npc-item-drop", SelfTests.DungeonNpcItemDropSelfTest.Run),
+            ("--selftest-quest-dungeon-drop", SelfTests.QuestDungeonDropSelfTest.Run),
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),
             ("--selftest-expert-contract-skill", SelfTests.ExpertContractSkillSelfTest.Run),
             ("--selftest-crystal-contract", SelfTests.CrystalContractSelfTest.Run),
@@ -43,7 +53,10 @@ namespace DfoServer
             ("--selftest-death-tower-quest-routing", SelfTests.DeathTowerQuestRoutingSelfTest.Run),
             ("--selftest-quest-clear", SelfTests.QuestClearSelfTest.Run),
             ("--selftest-quest-trigger-counts", SelfTests.QuestTriggerCountSelfTest.Run),
+            ("--selftest-daily-challenge", SelfTests.DailyChallengeSelfTest.Run),
+            ("--selftest-quest-chain-availability", SelfTests.QuestChainAvailabilitySelfTest.Run),
             ("--selftest-quest-ack-format", SelfTests.QuestAckFormatSelfTest.Run),
+            ("--selftest-quest-notify-selection", SelfTests.QuestNotifySelectionSelfTest.Run),
             ("--selftest-clear-quest-list-packet", SelfTests.ClearQuestListPacketSelfTest.Run),
             ("--selftest-special-reward-quest-source", SelfTests.SpecialRewardQuestSourceSelfTest.Run),
             ("--selftest-question-quest-branch", SelfTests.QuestionQuestBranchSelfTest.Run),
@@ -237,6 +250,8 @@ namespace DfoServer
                 itemMetadataWarmupTimer.Stop();
                 FileLogger.Log(
                     $"[Startup] ITEM_METADATA_WARMUP totalMs={itemMetadataWarmupTimer.Elapsed.TotalMilliseconds:F3}");
+                Game.Dungeon.ClearRewardGenerator.WarmUp();
+                GameWorld.IndependentDropDefinitionCatalog.WarmUp();
                 Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();
                 Game.Mercenary.StrikerDefaultAvatarDataProvider.Warmup();

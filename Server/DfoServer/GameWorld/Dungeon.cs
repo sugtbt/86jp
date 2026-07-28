@@ -8,47 +8,17 @@ namespace DfoServer.GameWorld
 {
     public class Dungeon
     {
-        private const byte StartMapSpecialPassiveObjectType = 9;
-
         internal static LstFile LoadLstFile(string relativePath)
-        {
-            var content = PvfArchiveAccessor.ReadText(relativePath);
-            return LstFile.Parse(content);
-        }
+            => DungeonCatalog.LoadListFile(relativePath);
 
-        private static readonly object _dungeonLstLock = new object();
-        private static LstFile _dungeonLstCache;
-
-        // dungeon.lst 与各 .dgn 解析结果按需缓存(PVF 只读, 解析结果视为不可变共享)。
-        // 击杀热路径每杀一只怪要读 3-4 个副本标量, 此前每次都重新解码+解析整个 .dgn 文本。
         public static LstFile LoadDungeonLstFile()
-        {
-            var cached = _dungeonLstCache;
-            if (cached != null) return cached;
-            lock (_dungeonLstLock)
-            {
-                if (_dungeonLstCache == null)
-                    _dungeonLstCache = LoadLstFile(Path.Combine("dungeon", "dungeon.lst"));
-                return _dungeonLstCache;
-            }
-        }
+            => DungeonCatalog.LoadDungeonList();
 
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, (DungeonFile File, string FilePath)>
-            _dungeonFileCache = new System.Collections.Concurrent.ConcurrentDictionary<int, (DungeonFile, string)>();
-
-        // 缓存版 .dgn 读取。返回的解析对象是共享实例, 调用方只读不改
-        // (与房间拓扑的迷宫缓存共享同一约定)。
         public static DungeonFile GetDungeonFile(int dungeonId)
-            => LoadDungeonFileWithPath(dungeonId).File;
+            => DungeonCatalog.GetDungeonFile(dungeonId);
 
         internal static string ResolveFilePath(LstFile lstFile, int id, string description)
-        {
-            var entry = lstFile.GetById(id);
-            if (entry == null || string.IsNullOrEmpty(entry.FilePath))
-                throw new Exception($"未找到{description}编号{id}");
-
-            return entry.FilePath.Replace('/', Path.DirectorySeparatorChar);
-        }
+            => DungeonCatalog.ResolveFilePath(lstFile, id, description);
 
         public struct MonsterSumInfo
         {
@@ -78,6 +48,10 @@ namespace DfoServer.GameWorld
 
             // START_MAP 附加状态。当前深渊隐藏行保持 0。
             public int ExtraState { get; set; }
+
+            // 配置来源：MAP [special passive object] 的父对象序号。
+            // 与协议 Flag1 分开保存，避免业务规则依赖 byte 截断后的封包字段。
+            public int? SourceSpecialPassiveObjectIndex { get; set; }
 
             // 是否为深渊柱子流程挂接的隐藏小队成员。为 true 时死亡走深渊专用掉落分支。
             public bool IsHellPartyActor { get; set; }
@@ -109,6 +83,10 @@ namespace DfoServer.GameWorld
             public int Y { get; set; }
 
             public List<MonsterSumInfo> Monsters { get; set; }
+
+            public IReadOnlyList<EventMonsterPositionInfo> EventMonsterPositions { get; set; }
+
+            public IReadOnlyList<SpecialPassiveObjectInfo> SpecialPassiveObjects { get; set; }
         }
 
         public struct DungeonRoomCoordinate
@@ -127,6 +105,13 @@ namespace DfoServer.GameWorld
             public int DungeonId { get; set; }
             public int Rate { get; set; }
             public int Condition { get; set; }
+        }
+
+        public sealed class LinkedDungeonClearPassiveObject
+        {
+            public int ObjectCode { get; set; }
+            public int X { get; set; }
+            public int Y { get; set; }
         }
 
         public sealed class HellPartyWaveInfo
@@ -152,29 +137,10 @@ namespace DfoServer.GameWorld
         }
 
         public static byte GetDungeonBasicLv(int dungeonId)
-        {
-            var dngFile = GetDungeonFile(dungeonId);
-            if (dngFile.Mazes == null || dngFile.Mazes.Count == 0)
-                throw new Exception("未解析到迷宫信息");
-
-            return (byte)dngFile.BasisLevel;
-        }
+            => DungeonCatalog.GetBasicLevel(dungeonId);
 
         public static int GetDungeonMinimumRequiredLevel(int dungeonId)
-        {
-            try
-            {
-                var loaded = LoadDungeonFileWithPath(dungeonId);
-                if (loaded.File.MinimumRequiredLevel > 0)
-                    return loaded.File.MinimumRequiredLevel;
-
-                return loaded.File.BasisLevel;
-            }
-            catch
-            {
-                return 0;
-            }
-        }
+            => DungeonCatalog.GetMinimumRequiredLevel(dungeonId);
 
         public static bool IsSuitableLevelDungeon(int dungeonId, int characterLevel)
         {
@@ -185,60 +151,13 @@ namespace DfoServer.GameWorld
         }
 
         public static bool TryGetSuitableLevelRange(int dungeonId, out int minLevel, out int maxLevel)
-        {
-            minLevel = 0;
-            maxLevel = 0;
-
-            try
-            {
-                var file = GetDungeonFile(dungeonId);
-                // 适合等级使用 PVF 最小进入等级到基础等级的闭区间。
-                minLevel = file.MinimumRequiredLevel;
-                maxLevel = file.BasisLevel;
-
-                if (minLevel <= 0 && maxLevel <= 0)
-                    return false;
-                if (minLevel <= 0)
-                    minLevel = maxLevel;
-                if (maxLevel <= 0)
-                    maxLevel = minLevel;
-                if (minLevel > maxLevel)
-                {
-                    var tmp = minLevel;
-                    minLevel = maxLevel;
-                    maxLevel = tmp;
-                }
-
-                return minLevel > 0 && maxLevel > 0;
-            }
-            catch
-            {
-                minLevel = 0;
-                maxLevel = 0;
-                return false;
-            }
-        }
+            => DungeonCatalog.TryGetSuitableLevelRange(
+                dungeonId,
+                out minLevel,
+                out maxLevel);
 
         public static int GetMaxDifficultyCount(int dungeonId)
-        {
-            try
-            {
-                var dngFile = GetDungeonFile(dungeonId);
-                if (dngFile.DifficultyLevel != null && dngFile.DifficultyLevel.Length > 0)
-                {
-                    int count = 0;
-                    foreach (var v in dngFile.DifficultyLevel)
-                        if (v != 0) count++;
-                    return count;
-                }
-                if (dngFile.DesignateDungeonDifficulty != null && dngFile.DesignateDungeonDifficulty.Length > 0)
-                    return 5;
-                if (dngFile.Difficulty >= 0)
-                    return 5;
-                return 0;
-            }
-            catch { return 0; }
-        }
+            => DungeonCatalog.GetMaximumDifficultyCount(dungeonId);
 
         public static int GetChampionCount(int dungeonId, int difficulty, int mazeIndex, out int[] namedMonsterCodes)
         {
@@ -322,34 +241,7 @@ namespace DfoServer.GameWorld
         }
 
         public static MazeInfo GetDungeonDefaultMaze(int dungeonId)
-        {
-            var dgnlst = LoadLstFile(Path.Combine("dungeon", "dungeon.lst"));
-            if (dgnlst == null)
-                throw new Exception("未能成功解析地下城LST文件 dungeon/dungeon.lst");
-
-            var dgnFilePath = ResolveFilePath(dgnlst, dungeonId, "地下城");
-
-            var dngFile = DungeonFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("dungeon", dgnFilePath)));
-            if (dngFile.Mazes == null || dngFile.Mazes.Count == 0)
-                throw new Exception("未解析到迷宫信息");
-
-            MazeInfo defaultMaze = null;
-            foreach (var maze in dngFile.Mazes)
-            {
-                if (maze.QuestConnection == null)
-                {
-                    defaultMaze = maze;
-                    break;
-                }
-            }
-
-            if (defaultMaze == null)
-            {
-                defaultMaze = dngFile.Mazes[0];
-            }
-
-            return defaultMaze;
-        }
+            => DungeonCatalog.GetDefaultMaze(dungeonId);
 
         public static List<LinkedDungeonEntry> GetLinkedDungeonNextEntries(int dungeonId)
         {
@@ -367,14 +259,66 @@ namespace DfoServer.GameWorld
             }
         }
 
-        public static bool IsSpecialLinkedDungeon(int dungeonId)
+        public static List<int> GetLinkedDungeonPreviousIds(int dungeonId)
+        {
+            try
+            {
+                return ParseLinkedDungeonPreviousIds(
+                    GetDungeonFile(dungeonId)?.LinkedDungeon);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[Dungeon] linked dungeon prev parse failed: " +
+                    $"dungeon={dungeonId} error={ex.Message}");
+                return new List<int>();
+            }
+        }
+
+        public static bool CanEnterLinkedDungeonFrom(
+            int dungeonId,
+            int previousDungeonId)
+        {
+            if (previousDungeonId <= 0)
+                return false;
+
+            return GetLinkedDungeonPreviousIds(dungeonId)
+                .Contains(previousDungeonId);
+        }
+
+        public static bool SupportsLinkedDungeonContinue(int dungeonId)
         {
             try
             {
                 var dungeonFile = GetDungeonFile(dungeonId);
-                return dungeonFile?.SpecialDungeon == true
-                    && ParseLinkedDungeonNextEntries(
-                        dungeonFile.LinkedDungeon).Count > 0;
+                if (dungeonFile == null
+                    || ParseLinkedDungeonNextEntries(
+                        dungeonFile.LinkedDungeon).Count == 0)
+                {
+                    return false;
+                }
+
+                return dungeonFile.SpecialDungeon
+                    || TryParseLinkedDungeonClearPassiveObject(
+                        dungeonFile.LinkedDungeon,
+                        out _);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool TryGetLinkedDungeonClearPassiveObject(
+            int dungeonId,
+            out LinkedDungeonClearPassiveObject passiveObject)
+        {
+            passiveObject = null;
+            try
+            {
+                return TryParseLinkedDungeonClearPassiveObject(
+                    GetDungeonFile(dungeonId)?.LinkedDungeon,
+                    out passiveObject);
             }
             catch
             {
@@ -388,7 +332,18 @@ namespace DfoServer.GameWorld
             if (entries.Count == 0)
                 return null;
 
-            var totalRate = 0;
+            var noSelectionRate = 0;
+            try
+            {
+                noSelectionRate = ParseLinkedDungeonNoSelectionRate(
+                    GetDungeonFile(dungeonId)?.LinkedDungeon);
+            }
+            catch
+            {
+                noSelectionRate = 0;
+            }
+
+            var totalRate = noSelectionRate > 0 ? noSelectionRate : 0;
             foreach (var entry in entries)
             {
                 if (entry.Rate > 0
@@ -402,6 +357,17 @@ namespace DfoServer.GameWorld
                 return entries[0];
 
             var roll = Infrastructure.ServerRandom.Next(totalRate);
+            return SelectLinkedDungeonByRoll(entries, noSelectionRate, roll);
+        }
+
+        internal static LinkedDungeonEntry SelectLinkedDungeonByRoll(
+            IReadOnlyList<LinkedDungeonEntry> entries,
+            int noSelectionRate,
+            int roll)
+        {
+            if (entries == null || entries.Count == 0 || roll < 0)
+                return null;
+
             foreach (var entry in entries)
             {
                 if (entry.Rate <= 0)
@@ -411,7 +377,9 @@ namespace DfoServer.GameWorld
                 roll -= entry.Rate;
             }
 
-            return entries[0];
+            return noSelectionRate > 0 && roll < noSelectionRate
+                ? null
+                : entries[0];
         }
 
         internal static List<LinkedDungeonEntry> ParseLinkedDungeonNextEntries(
@@ -464,6 +432,104 @@ namespace DfoServer.GameWorld
             return result;
         }
 
+        internal static List<int> ParseLinkedDungeonPreviousIds(
+            string linkedDungeon)
+        {
+            var result = new List<int>();
+            if (string.IsNullOrWhiteSpace(linkedDungeon))
+                return result;
+
+            var seen = new HashSet<int>();
+            var matches = Regex.Matches(
+                linkedDungeon,
+                @"\[prev\](?<body>.*?)(?=\[/prev\]|\[[^\]\r\n]+\]|$)",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            foreach (Match match in matches)
+            {
+                var numbers = Regex.Matches(
+                    match.Groups["body"].Value,
+                    @"[+-]?\d+");
+                foreach (Match number in numbers)
+                {
+                    if (!int.TryParse(number.Value, out var previousDungeonId)
+                        || previousDungeonId <= 0
+                        || !seen.Add(previousDungeonId))
+                    {
+                        continue;
+                    }
+
+                    result.Add(previousDungeonId);
+                }
+            }
+
+            return result;
+        }
+
+        internal static int ParseLinkedDungeonNoSelectionRate(
+            string linkedDungeon)
+        {
+            if (string.IsNullOrWhiteSpace(linkedDungeon))
+                return 0;
+
+            var total = 0;
+            var matches = Regex.Matches(
+                linkedDungeon,
+                @"\[next\](?<body>.*?)(?:\[/next\]|$)",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            foreach (Match match in matches)
+            {
+                var numbers = Regex.Matches(
+                    match.Groups["body"].Value,
+                    @"[+-]?\d+");
+                for (var i = 0; i + 2 < numbers.Count; i += 3)
+                {
+                    if (!int.TryParse(numbers[i].Value, out var dungeonId)
+                        || !int.TryParse(numbers[i + 1].Value, out var rate)
+                        || dungeonId >= 0
+                        || rate <= 0)
+                    {
+                        continue;
+                    }
+
+                    if (total <= int.MaxValue - rate)
+                        total += rate;
+                }
+            }
+
+            return total;
+        }
+
+        internal static bool TryParseLinkedDungeonClearPassiveObject(
+            string linkedDungeon,
+            out LinkedDungeonClearPassiveObject passiveObject)
+        {
+            passiveObject = null;
+            if (string.IsNullOrWhiteSpace(linkedDungeon))
+                return false;
+
+            var match = Regex.Match(
+                linkedDungeon,
+                @"\[on\s+clear\s+add\s+passive\s+object\]\s*" +
+                @"(?<code>[+-]?\d+)\s+(?<x>[+-]?\d+)\s+(?<y>[+-]?\d+)",
+                RegexOptions.IgnoreCase);
+            if (!match.Success
+                || !int.TryParse(match.Groups["code"].Value, out var objectCode)
+                || !int.TryParse(match.Groups["x"].Value, out var x)
+                || !int.TryParse(match.Groups["y"].Value, out var y)
+                || objectCode <= 0)
+            {
+                return false;
+            }
+
+            passiveObject = new LinkedDungeonClearPassiveObject
+            {
+                ObjectCode = objectCode,
+                X = x,
+                Y = y,
+            };
+            return true;
+        }
+
         private static readonly Lazy<Dictionary<int, bool>> _monsterHellFlags =
             new Lazy<Dictionary<int, bool>>(() => LoadHellMonsterFlags("monster/monster.lst", "monster"));
         private static readonly Lazy<Dictionary<int, bool>> _aiCharacterHellFlags =
@@ -500,13 +566,23 @@ namespace DfoServer.GameWorld
             return namedSet.Contains(monsterCode);
         }
 
+        public static int[] RandomizeStartPosition(int[] startMap)
+        {
+            return RandomizeMapPosition(startMap);
+        }
+
         public static int[] RandomizeBossPosition(int[] bossMap)
         {
-            if (bossMap == null || bossMap.Length < 2) return null;
-            int pairCount = bossMap.Length / 2;
-            if (pairCount <= 1) return new[] { bossMap[0], bossMap[1] };
+            return RandomizeMapPosition(bossMap);
+        }
+
+        private static int[] RandomizeMapPosition(int[] positions)
+        {
+            if (positions == null || positions.Length < 2) return null;
+            int pairCount = positions.Length / 2;
+            if (pairCount <= 1) return new[] { positions[0], positions[1] };
             int pick = Infrastructure.ServerRandom.Next(pairCount);
-            return new[] { bossMap[pick * 2], bossMap[pick * 2 + 1] };
+            return new[] { positions[pick * 2], positions[pick * 2 + 1] };
         }
 
         // df_game_r CBattle_Field::GetAppropriateMaze — two-pass quest connection matching.
@@ -517,98 +593,28 @@ namespace DfoServer.GameWorld
             int dungeonId,
             int difficulty = 0,
             ICollection<int> activeQuestIds = null,
-            ICollection<int> clearedQuestIds = null)
-        {
-            var dgnlst = LoadLstFile(Path.Combine("dungeon", "dungeon.lst"));
-            if (dgnlst == null)
-                throw new Exception("未能成功解析地下城LST文件 dungeon/dungeon.lst");
+            ICollection<int> clearedQuestIds = null,
+            Action<string> diagnosticSink = null)
+            => DungeonSelectionPlanner.SelectMaze(
+                dungeonId,
+                difficulty,
+                activeQuestIds,
+                clearedQuestIds,
+                diagnosticSink);
 
-            var dgnFilePath = ResolveFilePath(dgnlst, dungeonId, "地下城");
-            var dngFile = DungeonFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("dungeon", dgnFilePath)));
-            if (dngFile.Mazes == null || dngFile.Mazes.Count == 0)
-                throw new Exception("未解析到迷宫信息");
-
-            var doingMatch = FindQuestConnectedMazeIndex(dngFile.Mazes, activeQuestIds, 0, difficulty);
-            if (doingMatch >= 0)
-            {
-                var qc = dngFile.Mazes[doingMatch].QuestConnection;
-                FileLogger.Log($"[Dungeon] SelectMaze: dungeon={dungeonId} matched quest maze #{doingMatch} (questId={qc[1]} type=doing)");
-                return (dngFile.Mazes[doingMatch], doingMatch);
-            }
-
-            var clearedMatch = FindQuestConnectedMazeIndex(dngFile.Mazes, clearedQuestIds, 1, difficulty);
-            if (clearedMatch >= 0)
-            {
-                var qc = dngFile.Mazes[clearedMatch].QuestConnection;
-                FileLogger.Log($"[Dungeon] SelectMaze: dungeon={dungeonId} matched quest maze #{clearedMatch} (questId={qc[1]} type=cleared)");
-                return (dngFile.Mazes[clearedMatch], clearedMatch);
-            }
-
-            var candidates = new List<(MazeInfo maze, int index)>();
-            for (int i = 0; i < dngFile.Mazes.Count; i++)
-            {
-                if (dngFile.Mazes[i].QuestConnection == null)
-                    candidates.Add((dngFile.Mazes[i], i));
-            }
-
-            if (candidates.Count == 0)
-                return (dngFile.Mazes[0], 0);
-
-            var pick = candidates[Infrastructure.ServerRandom.Next(candidates.Count)];
-            return (pick.maze, pick.index);
-        }
+        public static bool IsQuestConnectedSelection(
+            int dungeonId,
+            MazeInfo maze,
+            ICollection<int> activeQuestIds,
+            int difficulty)
+            => DungeonSelectionPlanner.IsQuestConnected(
+                dungeonId,
+                maze,
+                activeQuestIds,
+                difficulty);
 
         public static MazeInfo GetDungeonMaze(int dungeonId, int mazeIndex)
-        {
-            try
-            {
-                var loaded = LoadDungeonFileWithPath(dungeonId);
-                var dungeonFile = loaded.File;
-                if (dungeonFile.Mazes == null || dungeonFile.Mazes.Count == 0)
-                    return null;
-
-                return mazeIndex >= 0 && mazeIndex < dungeonFile.Mazes.Count
-                    ? dungeonFile.Mazes[mazeIndex]
-                    : dungeonFile.Mazes[0];
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[Dungeon] GetDungeonMaze ERROR: dungeon={dungeonId} maze={mazeIndex} {ex.Message}");
-                return null;
-            }
-        }
-
-        // df_game_r CParty::CheckQuestConnection — match by questType and difficulty.
-        private static int FindQuestConnectedMazeIndex(
-            IReadOnlyList<MazeInfo> mazes,
-            ICollection<int> questIds,
-            int requiredQuestType,
-            int difficulty)
-        {
-            if (mazes == null || questIds == null || questIds.Count == 0)
-                return -1;
-
-            var candidates = new List<int>();
-            for (int i = 0; i < mazes.Count; i++)
-            {
-                var qc = mazes[i].QuestConnection;
-                if (qc == null || qc.Length < 2)
-                    continue;
-                if (qc[0] != requiredQuestType)
-                    continue;
-                if (!questIds.Contains(qc[1]))
-                    continue;
-                if (requiredQuestType == 0 && qc.Length >= 3 && qc[2] >= 0 && difficulty < qc[2])
-                    continue;
-                candidates.Add(i);
-            }
-
-            if (candidates.Count == 0)
-                return -1;
-            if (candidates.Count == 1)
-                return candidates[0];
-            return candidates[Infrastructure.ServerRandom.Next(candidates.Count)];
-        }
+            => DungeonCatalog.GetMaze(dungeonId, mazeIndex);
 
         public static int[] GetLayeredMapIds(int dungeonId, int x, int y, int mazeIndex)
         {
@@ -641,25 +647,39 @@ namespace DfoServer.GameWorld
             try
             {
                 var dngFile = GetDungeonFile(dungeonId);
-                if (dngFile.Mazes == null || dngFile.Mazes.Count == 0
-                    || string.IsNullOrWhiteSpace(dngFile.WarpMapCondition))
+                if (dngFile.Mazes == null || dngFile.Mazes.Count == 0)
                     return false;
 
                 var maze = mazeIndex >= 0 && mazeIndex < dngFile.Mazes.Count
                     ? dngFile.Mazes[mazeIndex]
                     : dngFile.Mazes[0];
-                if (!TryParseWarpMapCondition(
-                    dngFile.WarpMapCondition,
-                    out sourceX,
-                    out sourceY,
-                    out destX,
-                    out destY))
+                if (!TryGetWarpMapConditionRules(
+                    dungeonId,
+                    mazeIndex,
+                    out var rules))
                 {
                     return false;
                 }
 
-                if (sourceX != targetX || sourceY != targetY)
+                var matchingRules = rules.FindAll(rule =>
+                    rule.SourceX == targetX && rule.SourceY == targetY);
+                if (matchingRules.Count != 1)
+                {
+                    if (matchingRules.Count > 1)
+                    {
+                        FileLogger.Log(
+                            $"[Dungeon] warp map condition has ambiguous source: " +
+                            $"dungeon={dungeonId} maze={mazeIndex} target=({targetX},{targetY}) " +
+                            $"destinations={matchingRules.Count}");
+                    }
                     return false;
+                }
+
+                var rule = matchingRules[0];
+                sourceX = rule.SourceX;
+                sourceY = rule.SourceY;
+                destX = rule.DestinationX;
+                destY = rule.DestinationY;
 
                 if (maze?.MapSpecifications == null)
                     return false;
@@ -681,41 +701,34 @@ namespace DfoServer.GameWorld
             return false;
         }
 
-        private static bool TryParseWarpMapCondition(
-            string raw,
-            out int sourceX,
-            out int sourceY,
-            out int destX,
-            out int destY)
+        internal static bool TryGetWarpMapConditionRules(
+            int dungeonId,
+            int mazeIndex,
+            out List<WarpMapConditionEntry> rules)
         {
-            sourceX = sourceY = destX = destY = -1;
-            if (string.IsNullOrWhiteSpace(raw))
-                return false;
+            rules = new List<WarpMapConditionEntry>();
 
-            if (TryReadTaggedPoint(raw, "source grid pos", out sourceX, out sourceY)
-                && TryReadTaggedPoint(raw, "dest grid pos", out destX, out destY))
+            try
             {
+                var dngFile = GetDungeonFile(dungeonId);
+                if (dngFile.Mazes == null || dngFile.Mazes.Count == 0
+                    || dngFile.WarpMapConditions == null
+                    || dngFile.WarpMapConditions.Count == 0)
+                {
+                    return false;
+                }
+
+                rules.AddRange(dngFile.WarpMapConditions);
                 return true;
             }
-
-            var matches = Regex.Matches(raw, @"-?\d+");
-            if (matches.Count < 4)
+            catch (Exception ex)
+            {
+                rules.Clear();
+                FileLogger.Log(
+                    $"[Dungeon] warp map condition load failed: " +
+                    $"dungeon={dungeonId} maze={mazeIndex} error={ex.Message}");
                 return false;
-
-            return int.TryParse(matches[0].Value, out sourceX)
-                && int.TryParse(matches[1].Value, out sourceY)
-                && int.TryParse(matches[2].Value, out destX)
-                && int.TryParse(matches[3].Value, out destY);
-        }
-
-        private static bool TryReadTaggedPoint(string raw, string tag, out int x, out int y)
-        {
-            x = y = -1;
-            var pattern = @"\[" + Regex.Escape(tag) + @"\]\s*(?<x>-?\d+)\s+(?<y>-?\d+)";
-            var match = Regex.Match(raw, pattern, RegexOptions.IgnoreCase);
-            return match.Success
-                && int.TryParse(match.Groups["x"].Value, out x)
-                && int.TryParse(match.Groups["y"].Value, out y);
+            }
         }
 
         public static List<MonsterSumInfo> GetMapMonsterConditionSummaryInformation(
@@ -724,33 +737,12 @@ namespace DfoServer.GameWorld
             int x,
             int y,
             ICollection<int> monsterCodes)
-        {
-            var result = new List<MonsterSumInfo>();
-            if (mapId <= 0 || monsterCodes == null || monsterCodes.Count == 0)
-                return result;
-
-            try
-            {
-                var dungeonBasicLv = GetDungeonBasicLv(dungeonId);
-                var maplst = LoadLstFile(Path.Combine("map", "map.lst"));
-                var mapFilePath = ResolveFilePath(maplst, mapId, "map");
-                var mapFile = MapFile.Parse(
-                    PvfArchiveAccessor.ReadText(Path.Combine("map", mapFilePath)));
-
-                AppendConditionalMonsterInfos(
-                    result,
-                    mapFile.MonsterConditionMonsters,
-                    dungeonBasicLv,
-                    monsterCodes,
-                    conditionalSummon: false);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[Dungeon] monster condition load failed: dungeon={dungeonId} room=({x},{y}) map={mapId}: {ex.Message}");
-            }
-
-            return result;
-        }
+            => ResolvedRoomTemplateProvider.GetMonsterConditionActors(
+                mapId,
+                dungeonId,
+                x,
+                y,
+                monsterCodes);
 
         public static bool IsHellDungeon(int dungeonId)
         {
@@ -782,7 +774,7 @@ namespace DfoServer.GameWorld
                     ? dungeonFile.Mazes[mazeIndex]
                     : dungeonFile.Mazes[0];
 
-                var maplst = LoadLstFile(Path.Combine("map", "map.lst"));
+                var maplst = DungeonMapCatalog.LoadMapList();
                 var mapDirCandidates = BuildMapDirCandidates(maplst, maze, loaded.FilePath);
 
                 foreach (var entry in maplst.Entries)
@@ -830,7 +822,7 @@ namespace DfoServer.GameWorld
                         : dungeonFile.Mazes[0];
                 }
 
-                var maplst = LoadLstFile(Path.Combine("map", "map.lst"));
+                var maplst = DungeonMapCatalog.LoadMapList();
                 var mapDirCandidates = BuildMapDirCandidates(maplst, maze, loaded.FilePath);
 
                 foreach (var entry in maplst.Entries)
@@ -1036,15 +1028,7 @@ namespace DfoServer.GameWorld
         }
 
         internal static (DungeonFile File, string FilePath) LoadDungeonFileWithPath(int dungeonId)
-        {
-            return _dungeonFileCache.GetOrAdd(dungeonId, id =>
-            {
-                var dgnlst = LoadDungeonLstFile();
-                var dgnFilePath = ResolveFilePath(dgnlst, id, "dungeon");
-                var dungeonFile = DungeonFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("dungeon", dgnFilePath)));
-                return (dungeonFile, dgnFilePath);
-            });
-        }
+            => DungeonCatalog.GetDungeonFileWithPath(dungeonId);
 
         internal static bool TryGetTowerOfDespairFloor(int dungeonId, out int floor)
         {
@@ -1099,11 +1083,7 @@ namespace DfoServer.GameWorld
         }
 
         private static MapFile LoadMapFile(int mapId)
-        {
-            var maplst = LoadLstFile(Path.Combine("map", "map.lst"));
-            var mapFilePath = ResolveFilePath(maplst, mapId, "map");
-            return MapFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("map", mapFilePath)));
-        }
+            => DungeonMapCatalog.GetMapFile(mapId);
 
         internal static List<string> BuildMapDirCandidates(LstFile maplst, MazeInfo maze, string dungeonFilePath)
         {
@@ -1250,85 +1230,12 @@ namespace DfoServer.GameWorld
             int x,
             int y,
             ICollection<int> monsterCodes)
-        {
-            var result = new List<MonsterSumInfo>();
-            if (mapId <= 0 || monsterCodes == null || monsterCodes.Count == 0)
-                return result;
-
-            try
-            {
-                var dungeonBasicLv = GetDungeonBasicLv(dungeonId);
-                var maplst = LoadLstFile(Path.Combine("map", "map.lst"));
-                var mapFilePath = ResolveFilePath(maplst, mapId, "map");
-                var mapFile = MapFile.Parse(
-                    PvfArchiveAccessor.ReadText(Path.Combine("map", mapFilePath)));
-
-                AppendConditionalMonsterInfos(
-                    result,
-                    mapFile.ConditionalSummonMonsters,
-                    dungeonBasicLv,
-                    monsterCodes,
-                    conditionalSummon: true);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[Dungeon] conditional summon load failed: dungeon={dungeonId} room=({x},{y}) map={mapId}: {ex.Message}");
-            }
-
-            return result;
-        }
-
-        private static void AppendConditionalMonsterInfos(
-            List<MonsterSumInfo> result,
-            IReadOnlyList<MonsterInfo> monsters,
-            byte dungeonBasicLv,
-            ICollection<int> monsterCodes,
-            bool conditionalSummon)
-        {
-            if (result == null || monsters == null || monsterCodes == null)
-                return;
-
-            for (var index = 0; index < monsters.Count; index++)
-            {
-                var item = monsters[index];
-                if (!item.MonsterId.HasValue
-                    || item.MonsterId.Value <= 0
-                    || !monsterCodes.Contains(item.MonsterId.Value))
-                {
-                    continue;
-                }
-
-                var monsterType = (byte)item.Type;
-                if (monsterType > 3)
-                    monsterType = 0;
-
-                var rawLevel = item.Lv.GetValueOrDefault() != 0
-                    ? dungeonBasicLv + item.AutoLv.GetValueOrDefault()
-                    : item.AutoLv.GetValueOrDefault();
-                var level = rawLevel > 0
-                    ? (byte)Math.Min(rawLevel, 255)
-                    : dungeonBasicLv;
-                var conditionalOrder = item.ConditionalParam0.GetValueOrDefault();
-
-                result.Add(new MonsterSumInfo
-                {
-                    Code = item.MonsterId.Value,
-                    Type = monsterType,
-                    Level = level,
-                    X = item.X.GetValueOrDefault(),
-                    Y = item.Y.GetValueOrDefault(),
-                    Z = item.Z.GetValueOrDefault(),
-                    IsBlocking = !conditionalSummon,
-                    TemplateOrder = conditionalSummon && conditionalOrder > 0
-                        ? (ushort)Math.Min(conditionalOrder, ushort.MaxValue)
-                        : (ushort)0,
-                    PacketIndex = conditionalSummon && item.ConditionalParam0.HasValue
-                        ? item.ConditionalParam0.Value
-                        : index,
-                    Flag0 = conditionalSummon ? (byte)1 : (byte)0,
-                });
-            }
-        }
+            => ResolvedRoomTemplateProvider.GetConditionalSummonActors(
+                mapId,
+                dungeonId,
+                x,
+                y,
+                monsterCodes);
 
         public static MazeSumInfo GetDungeonMapMonsterSummaryInformation(int dungeonId, int x, int y, int mazeIndex = -1, int overrideMapId = -1, int[] bossPos = null)
         {
@@ -1342,222 +1249,18 @@ namespace DfoServer.GameWorld
                     Monsters = new List<MonsterSumInfo>(),
                 };
             }
-
-            byte dungeonBasicLv = GetDungeonBasicLv(dungeonId);
-
-            MazeInfo defaultMaze;
-            if (mazeIndex >= 0)
-            {
-                var dgnFile = GetDungeonFile(dungeonId);
-                defaultMaze = (mazeIndex < dgnFile.Mazes.Count) ? dgnFile.Mazes[mazeIndex] : GetDungeonDefaultMaze(dungeonId);
-            }
-            else
-            {
-                defaultMaze = GetDungeonDefaultMaze(dungeonId);
-            }
-            if (x == 0xFF && y == 0xFF)
-            {
-                x = defaultMaze.StartMap[0];
-                y = defaultMaze.StartMap[1];
-            }
-
-            if (overrideMapId > 0)
-            {
-                var maplst = LoadLstFile(Path.Combine("map", "map.lst"));
-                var mapFilePath = ResolveFilePath(maplst, overrideMapId, "门");
-                var mapFile = MapFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("map", mapFilePath)));
-                return new MazeSumInfo
-                {
-                    Monsters = ParseMapActors(mapFile, dungeonBasicLv, overrideMapId, dungeonId, x, y),
-                    X = x,
-                    Y = y,
-                    Index = overrideMapId,
-                };
-            }
-
-            int mapId = DungeonMapResolver.ResolveMapId(dungeonId, x, y, defaultMaze, mazeIndex, bossPos);
-
-            if (mapId == -1)
-            {
-                FileLogger.Log($"[Dungeon] GetDungeonMapMonsterSummaryInformation WARNING: no map resolved for dungeon={dungeonId} maze={mazeIndex} room=({x},{y})");
-                return new MazeSumInfo { X = x, Y = y, Index = 0, Monsters = new List<MonsterSumInfo>() };
-            }
-
-            var maplst2 = LoadLstFile(Path.Combine("map", "map.lst"));
-            var resolvedMapFilePath = ResolveFilePath(maplst2, mapId, "门");
-            var resolvedMapFile = MapFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("map", resolvedMapFilePath)));
-
-            return new MazeSumInfo
-            {
-                Monsters = ParseMapActors(resolvedMapFile, dungeonBasicLv, mapId, dungeonId, x, y),
-                X = x,
-                Y = y,
-                Index = mapId,
-            };
-        }
-
-        private static List<MonsterSumInfo> ParseMapActors(MapFile mapFile, byte dungeonBasicLv, int mapId, int dungeonId, int x, int y)
-        {
-            var list = new List<MonsterSumInfo>();
-            foreach (var item in mapFile.Monsters)
-            {
-                if (!item.MonsterId.HasValue || item.MonsterId.Value <= 0)
-                {
-                    FileLogger.Log($"[Dungeon] ParseMapActors: skip monster with invalid id in map={mapId} dungeon={dungeonId} room=({x},{y})");
-                    continue;
-                }
-                var monsterType = (byte)item.Type;
-                if (monsterType > 3)
-                {
-                    FileLogger.Log($"[Dungeon] ParseMapActors: clamp monster type {monsterType} to 0 in map={mapId} dungeon={dungeonId} room=({x},{y})");
-                    monsterType = 0;
-                }
-                int rawMonsterLevel = item.Lv.GetValueOrDefault() != 0
-                    ? dungeonBasicLv + item.AutoLv.GetValueOrDefault()
-                    : item.AutoLv.GetValueOrDefault();
-                byte monsterLevel = rawMonsterLevel > 0 ? (byte)Math.Min(rawMonsterLevel, 255) : dungeonBasicLv;
-                list.Add(new MonsterSumInfo
-                {
-                    Code = item.MonsterId.Value,
-                    Type = monsterType,
-                    Level = monsterLevel,
-                    IsBlocking = true,
-                });
-            }
-
-            AppendSpecialPassiveObjects(list, mapFile, dungeonBasicLv, mapId, dungeonId, x, y);
-
-            foreach (var apc in mapFile.AICharacters)
-            {
-                if (apc.Code <= 0 || !TryGetAICharacterLevel(apc.Code, out var apcLevel))
-                {
-                    FileLogger.Log($"[Dungeon] ParseMapActors: skip APC code={apc.Code} not found in map={mapId} dungeon={dungeonId} room=({x},{y})");
-                    continue;
-                }
-                var apcType = (byte)apc.AIType;
-                if (apcType < 5 || apcType > 8)
-                {
-                    FileLogger.Log($"[Dungeon] ParseMapActors: clamp APC type {apcType} to 5 in map={mapId} dungeon={dungeonId} room=({x},{y})");
-                    apcType = 5;
-                }
-                list.Add(new MonsterSumInfo
-                {
-                    Code = apc.Code,
-                    Type = apcType,
-                    Level = apcLevel,
-                    Faction = apc.Faction,
-                    IsBlocking = IsBlockingAICharacter(apc),
-                });
-            }
-
-            return list;
-        }
-
-        // IDA check_grid_clear (0x830A0E8): spawnType==100 && spawnFlag==0 blocks passage.
-        // APC 的 spawnType 不是 100, 不参与房间通关判定 — 无论敌我阵营。
-        private static bool IsBlockingAICharacter(AICharacterInfo apc)
-        {
-            return false;
-        }
-
-        private static void AppendSpecialPassiveObjects(
-            List<MonsterSumInfo> list,
-            MapFile mapFile,
-            byte dungeonBasicLv,
-            int mapId,
-            int dungeonId,
-            int x,
-            int y)
-        {
-            if (list == null || mapFile?.SpecialPassiveObjects == null || mapFile.SpecialPassiveObjects.Count == 0)
-                return;
-
-            var objectRows = 0;
-            var templateRows = 0;
-            for (var objectIndex = 0; objectIndex < mapFile.SpecialPassiveObjects.Count; objectIndex++)
-            {
-                var obj = mapFile.SpecialPassiveObjects[objectIndex];
-                if (obj == null)
-                    continue;
-
-                if (obj.ObjectCode > 0)
-                {
-                    list.Add(new MonsterSumInfo
-                    {
-                        Code = obj.ObjectCode,
-                        Type = StartMapSpecialPassiveObjectType,
-                        Level = 0,
-                        IsBlocking = false,
-                        PacketIndex = objectIndex,
-                    });
-                    objectRows++;
-                }
-            }
-
-            for (var objectIndex = 0; objectIndex < mapFile.SpecialPassiveObjects.Count; objectIndex++)
-            {
-                var obj = mapFile.SpecialPassiveObjects[objectIndex];
-                if (obj?.Spawns == null || obj.Spawns.Count == 0)
-                    continue;
-
-                for (var spawnIndex = 0; spawnIndex < obj.Spawns.Count; spawnIndex++)
-                {
-                    var spawn = obj.Spawns[spawnIndex];
-                    if (spawn.Code <= 0
-                        || !string.Equals(spawn.Kind, "[monster]", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    var level = spawn.Level > 0
-                        ? (byte)Math.Min(spawn.Level, 255)
-                        : dungeonBasicLv;
-                    list.Add(new MonsterSumInfo
-                    {
-                        Code = spawn.Code,
-                        Type = 0,
-                        Level = level,
-                        IsBlocking = false,
-                        TemplateOrder = (ushort)Math.Min(objectIndex, ushort.MaxValue),
-                        PacketIndex = spawnIndex,
-                        Flag0 = 1,
-                        Flag1 = (byte)Math.Min(objectIndex, byte.MaxValue),
-                    });
-                    templateRows++;
-                }
-            }
-
-            if (objectRows > 0 || templateRows > 0)
-                FileLogger.Log($"[Dungeon] special passive objects: dungeon={dungeonId} room=({x},{y}) map={mapId} objects={objectRows} templates={templateRows}");
-        }
-
-
-        private static byte GetAICharacterLevel(int apcCode)
-        {
-            if (TryGetAICharacterLevel(apcCode, out var level))
-                return level;
-
-            throw new Exception($"AICharacter code={apcCode} 在 AICharacter.lst 中不存在或无法解析等级");
+            return ResolvedRoomTemplateProvider.Resolve(
+                dungeonId,
+                x,
+                y,
+                mazeIndex,
+                overrideMapId,
+                bossPos);
         }
 
         private static bool TryGetAICharacterLevel(int apcCode, out byte level)
-        {
-            level = 0;
-            var lst = LstFile.Parse(PvfArchiveAccessor.ReadText("AICharacter/AICharacter.lst"));
-            var entry = lst.GetById(apcCode);
-            if (entry == null)
-                return false;
-
-            var content = PvfArchiveAccessor.ReadText(Path.Combine("AICharacter", entry.FilePath));
-            var match = System.Text.RegularExpressions.Regex.Match(content,
-                @"\[minimum info\]\s*`[^`]*`\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)");
-            if (!match.Success)
-                return false;
-
-            int parsedLevel = int.Parse(match.Groups[1].Value);
-            if (parsedLevel <= 0 || parsedLevel > 255)
-                return false;
-
-            level = (byte)parsedLevel;
-            return true;
-        }
+            => DungeonActorTemplateProjector.TryGetAiCharacterLevel(
+                apcCode,
+                out level);
     }
 }

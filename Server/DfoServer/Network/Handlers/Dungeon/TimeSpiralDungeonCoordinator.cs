@@ -1,6 +1,7 @@
 using DfoServer.Game.Dungeon;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Parsers.Dungeon;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -10,8 +11,6 @@ namespace DfoServer.Network.Handlers.Dungeon
 {
     internal static class TimeSpiralDungeonCoordinator
     {
-        private const ushort CompleteConditionPassGateNoti = 0x0138;
-
         internal sealed class TeleportMoveContext
         {
             internal int TrapMapId;
@@ -29,16 +28,25 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static async Task HandleBreakTrapResultAsync(
             EnhancedClientSession session,
-            GamePacketHeader header,
-            byte[] body)
+            BreakTrapResultDungeonCommand command,
+            DungeonEventEnvelope sourceEvent)
         {
+            var run = session?.Player?.CurrentRun;
+            var roomIdentity = run?.CaptureRoomIdentity()
+                ?? default(DungeonRoomIdentity);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x01,
-                header.type,
+                command?.WireType ?? (ushort)CmdPacketType.BREAK_TRAP_RESULT,
                 CommonPacketBodyBuilder.BuildSuccessAck()));
 
-            var run = session?.Player?.CurrentRun;
-            if (run == null || !IsDungeon(run.DungeonId))
+            if (run == null
+                || command == null
+                || sourceEvent == null
+                || !sourceEvent.RunIdentity.Equals(roomIdentity.Run)
+                || (sourceEvent.RoomInstanceId.HasValue
+                    && sourceEvent.RoomInstanceId.Value != roomIdentity.RoomInstanceId)
+                || !session.Player.IsCurrentDungeonRoom(roomIdentity)
+                || !IsDungeon(run.DungeonId))
                 return;
 
             var mapId = ResolveCurrentMapId(run);
@@ -46,12 +54,18 @@ namespace DfoServer.Network.Handlers.Dungeon
                 $"[TimeSpiral] BREAK_TRAP_RESULT: " +
                 $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
                 $"room=({run.RoomKey.X},{run.RoomKey.Y}) map={mapId} " +
-                $"body={(body == null ? "null" : BitConverter.ToString(body))}");
+                $"body={(command.Payload.Length == 0 ? string.Empty : BitConverter.ToString(command.Payload))}");
 
-            if (TryMarkTeleportPending(session, mapId, "BREAK_TRAP_RESULT"))
+            if (TryMarkTeleportPending(
+                    session,
+                    run,
+                    mapId,
+                    "BREAK_TRAP_RESULT"))
             {
                 await SendConditionPassGateAsync(
                     session,
+                    run,
+                    roomIdentity,
                     mapId,
                     0,
                     "cmd1 BREAK_TRAP_RESULT",
@@ -64,9 +78,23 @@ namespace DfoServer.Network.Handlers.Dungeon
             int requestedX,
             int requestedY,
             ref DungeonRoomPoint moveTarget)
+            => ApplyTeleportOverride(
+                session,
+                session?.Player?.CurrentRun,
+                requestedX,
+                requestedY,
+                ref moveTarget);
+
+        internal static TeleportMoveContext ApplyTeleportOverride(
+            EnhancedClientSession session,
+            DungeonRun run,
+            int requestedX,
+            int requestedY,
+            ref DungeonRoomPoint moveTarget)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null
+            if (session?.Player == null
+                || run == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity())
                 || !run.TimeSpiralTeleportPending
                 || !IsDungeon(run.DungeonId)
                 || run.TimeSpiralTargetX < 0
@@ -137,9 +165,19 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static void RegisterHiddenBossAfterStartMap(
             EnhancedClientSession session,
             RoomState roomState)
+            => RegisterHiddenBossAfterStartMap(
+                session,
+                session?.Player?.CurrentRun,
+                roomState);
+
+        internal static void RegisterHiddenBossAfterStartMap(
+            EnhancedClientSession session,
+            DungeonRun run,
+            RoomState roomState)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null
+            if (session?.Player == null
+                || run == null
+                || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity())
                 || roomState == null
                 || !IsHiddenBossRegistrationRoom(run, roomState))
             {
@@ -288,10 +326,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private static bool TryMarkTeleportPending(
             EnhancedClientSession session,
+            DungeonRun run,
             int trapMapId,
             string source)
         {
-            var run = session?.Player?.CurrentRun;
             if (run == null
                 || !IsDungeon(run.DungeonId))
             {
@@ -345,24 +383,32 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private static async Task SendConditionPassGateAsync(
             EnhancedClientSession session,
+            DungeonRun run,
+            DungeonRoomIdentity roomIdentity,
             int mapId,
             int objectCode,
             string source,
             string objectPath)
         {
-            var body =
-                SpecialDungeonNotificationBuilder
-                    .BuildCompleteConditionPassGateTrigger();
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CompleteConditionPassGateNoti,
-                body));
+            if (run == null
+                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+            {
+                return;
+            }
+
+            await DungeonMechanismNotificationSender
+                .SendCompleteConditionPassGateAsync(
+                    session,
+                    "time-spiral-trap",
+                    source);
+            if (!session.Player.IsCurrentDungeonRoom(roomIdentity))
+                return;
             FileLogger.Log(
-                $"[TimeSpiral] 0x0138 sent: " +
+                $"[TimeSpiral] trap condition advanced: " +
                 $"cid={session.Player.CharacterId} " +
-                $"dungeon={session.Player.CurrentRun?.DungeonId ?? 0} " +
+                $"dungeon={run.DungeonId} " +
                 $"map={mapId} object={objectCode} source={source} " +
-                $"path={objectPath} body={BitConverter.ToString(body)}");
+                $"path={objectPath}");
         }
 
         private static int ResolveCurrentMapId(DungeonRun run)

@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace DfoServer.Game.Session
 {
@@ -8,6 +9,118 @@ namespace DfoServer.Game.Session
         // 进本由 DungeonRunLifecycle.BeginRun/BeginTowerRun 置换新实例,
         // 返城/断线/换角色置 null -- 单局字段随对象消失, 不存在漏重置。
         public Game.Dungeon.DungeonRun CurrentRun { get; internal set; }
+        internal object DungeonRunLifecycleSyncRoot { get; } = new object();
+
+        private long _dungeonRunGeneration;
+        private long _dungeonSelectionGeneration;
+        private Game.Dungeon.DungeonSelectionContext _currentDungeonSelection;
+
+        internal long CurrentDungeonRunGeneration =>
+            Interlocked.Read(ref _dungeonRunGeneration);
+
+        internal Game.Dungeon.DungeonSelectionContext CurrentDungeonSelection =>
+            Volatile.Read(ref _currentDungeonSelection);
+
+        internal long NextDungeonRunGeneration()
+        {
+            var generation = Interlocked.Increment(ref _dungeonRunGeneration);
+            if (generation > 0)
+                return generation;
+
+            throw new InvalidOperationException("Dungeon run generation exhausted.");
+        }
+
+        internal bool TryAttachResumedDungeonRun(
+            Game.Dungeon.DungeonRun run)
+        {
+            if (run == null
+                || !run.CaptureIdentity().IsValid
+                || run.RunState == Game.Dungeon.DungeonRunState.Ending
+                || run.RunState == Game.Dungeon.DungeonRunState.Ended)
+            {
+                return false;
+            }
+
+            lock (DungeonRunLifecycleSyncRoot)
+            {
+                if (CurrentRun != null)
+                    return ReferenceEquals(CurrentRun, run);
+
+                var currentGeneration = Interlocked.Read(
+                    ref _dungeonRunGeneration);
+                if (currentGeneration > run.RunGeneration)
+                    return false;
+
+                Interlocked.Exchange(
+                    ref _dungeonRunGeneration,
+                    run.RunGeneration);
+                Volatile.Write(ref _currentDungeonSelection, null);
+                CurrentRun = run;
+                DungeonSceneUniqueId = 0;
+                return true;
+            }
+        }
+
+        internal bool IsCurrentDungeonRun(Game.Dungeon.DungeonRunIdentity identity)
+        {
+            var run = CurrentRun;
+            return run != null && run.Matches(identity);
+        }
+
+        internal bool IsCurrentDungeonRoom(Game.Dungeon.DungeonRoomIdentity identity)
+        {
+            var run = CurrentRun;
+            return run != null && run.Matches(identity);
+        }
+
+        internal Game.Dungeon.DungeonSelectionContext BeginDungeonSelection(
+            Game.Dungeon.DungeonTownReturnAnchor returnAnchor)
+        {
+            lock (DungeonRunLifecycleSyncRoot)
+            {
+                if (CurrentRun != null)
+                    return null;
+
+                var context = new Game.Dungeon.DungeonSelectionContext(
+                    Interlocked.Increment(ref _dungeonSelectionGeneration),
+                    CurrentDungeonRunGeneration,
+                    returnAnchor);
+                Volatile.Write(ref _currentDungeonSelection, context);
+                return context;
+            }
+        }
+
+        internal bool IsCurrentDungeonSelection(
+            Game.Dungeon.DungeonSelectionContext expected)
+        {
+            return expected != null
+                && ReferenceEquals(CurrentDungeonSelection, expected)
+                && CurrentRun == null
+                && CurrentDungeonRunGeneration == expected.RunGeneration;
+        }
+
+        internal void ClearDungeonSelection()
+        {
+            Volatile.Write(ref _currentDungeonSelection, null);
+        }
+
+        internal void CompleteDungeonSelection(
+            Game.Dungeon.DungeonSelectionContext expected)
+        {
+            if (expected != null && expected.TryCompleteReturn())
+            {
+                Interlocked.CompareExchange(
+                    ref _currentDungeonSelection,
+                    null,
+                    expected);
+            }
+        }
+
+        // One-shot linked-dungeon authorization survives the result-screen town
+        // transition, but is never persisted and is cleared on character teardown.
+        internal object LinkedDungeonEntryAuthorizationSyncRoot { get; } = new object();
+        internal Game.Dungeon.LinkedDungeonEntryAuthorization
+            PendingLinkedDungeonEntryAuthorization { get; set; }
 
         // ---- 跨局存活字段(刻意不随 run 重建) ----
 

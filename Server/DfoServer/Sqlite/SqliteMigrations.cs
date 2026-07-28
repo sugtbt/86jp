@@ -577,6 +577,65 @@ CREATE TABLE IF NOT EXISTS character_tower_of_despair_progress (
             (40, "mailbox persistence on ItemCore inventory", MigrateMailboxItemCore),
             (41, "mailbox sender snapshot survives character deletion", MigrateMailboxSenderSnapshot),
             (42, "mercenary expedition assignments and reward outbox", MigrateMercenaryExpedition),
+
+            (43, "quest progress CAS and event inbox", MigrateQuestProgressConcurrency),
+
+            (44, "daily challenge reward claims", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_daily_challenge_claims (
+    character_id INTEGER NOT NULL,
+    group_index INTEGER NOT NULL CHECK (group_index >= 0 AND group_index < 6),
+    claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, group_index),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);")),
+
+            (45, "dungeon persistent effect outbox", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS dungeon_persistent_effect_outbox (
+    source_event_id TEXT NOT NULL,
+    effect_kind TEXT NOT NULL,
+    effect_scope INTEGER NOT NULL,
+    scope_target INTEGER NOT NULL,
+    character_id INTEGER NOT NULL DEFAULT 0,
+    account_id INTEGER NOT NULL DEFAULT 0,
+    payload_version INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    state INTEGER NOT NULL DEFAULT 0 CHECK (state >= 0 AND state <= 4),
+    lease_id TEXT,
+    lease_owner TEXT,
+    lease_expires_at INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    result_version INTEGER,
+    result_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    committed_at INTEGER,
+    PRIMARY KEY (source_event_id, effect_kind, effect_scope, scope_target)
+);
+CREATE INDEX IF NOT EXISTS idx_dungeon_effect_outbox_character_state
+    ON dungeon_persistent_effect_outbox(character_id, state, updated_at);
+CREATE INDEX IF NOT EXISTS idx_dungeon_effect_outbox_account_state
+    ON dungeon_persistent_effect_outbox(account_id, state, updated_at);")),
+
+            (46, "character quest notify selections", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_quest_notify_selections (
+    character_id INTEGER NOT NULL,
+    slot_index INTEGER NOT NULL CHECK (slot_index >= 0 AND slot_index < 4),
+    quest_id INTEGER NOT NULL CHECK (quest_id > 0),
+    PRIMARY KEY (character_id, slot_index),
+    UNIQUE (character_id, quest_id),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);")),
+
+            (47, "account dungeon difficulty permissions", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS account_dungeon_permissions (
+    account_id INTEGER NOT NULL,
+    dungeon_id INTEGER NOT NULL CHECK (dungeon_id > 0 AND dungeon_id <= 65535),
+    clear_state INTEGER NOT NULL CHECK (clear_state > 0 AND clear_state <= 255),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, dungeon_id),
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+);")),
         };
 
         private static void MigrateMercenaryExpedition(SqliteConnection connection)
@@ -796,6 +855,34 @@ END;");
                 if (foreignKeysEnabled)
                     ExecuteBatch(connection, "PRAGMA foreign_keys=ON;");
             }
+        }
+
+        private static void MigrateQuestProgressConcurrency(SqliteConnection connection)
+        {
+            SqliteSchemaMigrator.EnsureColumns(
+                connection,
+                "character_active_quests",
+                new[]
+                {
+                    ("version", "INTEGER NOT NULL DEFAULT 0"),
+                });
+            ExecuteBatch(connection, @"
+DELETE FROM character_active_quests
+WHERE rowid NOT IN (
+    SELECT MIN(rowid)
+    FROM character_active_quests
+    GROUP BY character_id, quest_id
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_character_active_quests_identity
+    ON character_active_quests(character_id, quest_id);
+CREATE TABLE IF NOT EXISTS quest_progress_event_inbox (
+    character_id INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, event_id, event_kind),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);");
         }
 
         private static void MigrateKnightShieldDeck(SqliteConnection connection)

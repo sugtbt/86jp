@@ -31,6 +31,31 @@ namespace PvfLib
         public int Type { get; set; }
         public int TargetId { get; set; }
         public int Count { get; set; }
+        public int GroupId { get; set; }
+        public int GroupRequired { get; set; }
+    }
+
+    public class WarpMapConditionEntry
+    {
+        public int SourceX { get; set; }
+        public int SourceY { get; set; }
+        public int DestinationX { get; set; }
+        public int DestinationY { get; set; }
+    }
+
+    public class NamedMonsterMapPosition
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
+    }
+
+    public class MazeMinimapIconInfo
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
+        public string Image { get; set; }
+        public int IconIndex { get; set; }
+        public int Flag { get; set; }
     }
 
     public class MazeInfo
@@ -49,6 +74,8 @@ namespace PvfLib
         public int[] QuestConnection { get; set; }          // [flag, questId, value]
         public RidableObjectScript RidableScript { get; set; }
         public List<ClearConditionEntry> ClearConditions { get; set; } = new List<ClearConditionEntry>();
+        public List<MazeMinimapIconInfo> MinimapIcons { get; set; } = new List<MazeMinimapIconInfo>();
+        public int EventMonsterRandomMap { get; set; } = -1;
 
         public string BossMapSpecification { get; set; }
         public string LayeredMapSpecification { get; set; }
@@ -87,6 +114,7 @@ namespace PvfLib
         public int[] NamedMonster { get; set; }
         public int[] RecommendedLevel { get; set; }         // [min, max]
         public int LimitPartyCount { get; set; } = -1;
+        public int[] QuestConnection { get; set; }          // DGN 顶层 [flag, questId, value]
 
         // 进本/经济
         public int HellDungeon { get; set; } = -1;
@@ -203,7 +231,11 @@ namespace PvfLib
         public string ClearRewardItem { get; set; }
         public string BossRoomEntranceCondition { get; set; }
         public string NamedMonsterMapPos { get; set; }
+        public List<NamedMonsterMapPosition> NamedMonsterMapPositions { get; set; } =
+            new List<NamedMonsterMapPosition>();
         public string WarpMapCondition { get; set; }
+        public List<WarpMapConditionEntry> WarpMapConditions { get; set; } =
+            new List<WarpMapConditionEntry>();
         public string DungeonMinimapIconSetting { get; set; }
         public string RealdungeonCheckup { get; set; }
         public string CommonPassiveObject { get; set; }
@@ -288,7 +320,8 @@ namespace PvfLib
             "size", "greed", "map specification", "start map", "boss map",
             "hit count", "seal door appear rate", "seal door map index", "seal door pos", "quest connection",
             "randomized object creation", "clear condition",
-            "boss map specification", "layered map specification"
+            "boss map specification", "layered map specification",
+            "minimap icon"
         };
 
         public static DungeonFile Parse(string content)
@@ -301,6 +334,7 @@ namespace PvfLib
             // 遍历所有根节点，按已知迷宫标签区分元数据和迷宫数据
             var metaNodes = new List<ScriptNode>();
             List<ScriptNode> currentMaze = null;
+            var previousNodeWasMazeMinimapIcon = false;
 
             foreach (var child in root.Children)
             {
@@ -310,14 +344,28 @@ namespace PvfLib
                     if (currentMaze != null && currentMaze.Count > 0)
                         dgn.Mazes.Add(BuildMazeInfo(currentMaze, content));
                     currentMaze = new List<ScriptNode>();
+                    previousNodeWasMazeMinimapIcon = false;
+                }
+                else if (currentMaze != null
+                    && previousNodeWasMazeMinimapIcon
+                    && child.Tag.Equals("event monster random map", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Some DGN files use this as global event-monster metadata after the
+                    // last maze. Only the direct minimap-icon sequence is maze-scoped.
+                    currentMaze.Add(child);
+                    previousNodeWasMazeMinimapIcon = false;
                 }
                 else if (currentMaze != null && MazeTags.Contains(child.Tag))
                 {
                     currentMaze.Add(child);
+                    previousNodeWasMazeMinimapIcon = child.Tag.Equals(
+                        "minimap icon",
+                        StringComparison.OrdinalIgnoreCase);
                 }
                 else
                 {
                     metaNodes.Add(child);
+                    previousNodeWasMazeMinimapIcon = false;
                 }
             }
 
@@ -400,6 +448,9 @@ namespace PvfLib
                         break;
                     case "limit party count":
                         dgn.LimitPartyCount = ParseInt(data);
+                        break;
+                    case "quest connection":
+                        dgn.QuestConnection = ParseIntArray(data);
                         break;
                     case "special passive object item":
                         try { ParseSpecialPassiveObjectItem(data, dgn); }
@@ -522,8 +573,14 @@ namespace PvfLib
                     case "clear map": dgn.ClearMap = data; break;
                     case "clear reward item": dgn.ClearRewardItem = data; break;
                     case "boss room entrance condition": dgn.BossRoomEntranceCondition = ReadRawNodeData(node, text, data); break;
-                    case "named monster map pos": dgn.NamedMonsterMapPos = data; break;
-                    case "warp map condition": dgn.WarpMapCondition = node.GetContent(text).Trim(); break;
+                    case "named monster map pos":
+                        dgn.NamedMonsterMapPos = data;
+                        dgn.NamedMonsterMapPositions = ParseNamedMonsterMapPositions(data);
+                        break;
+                    case "warp map condition":
+                        dgn.WarpMapCondition = node.GetContent(text).Trim();
+                        dgn.WarpMapConditions = ParseWarpMapConditions(node, text);
+                        break;
                     case "dungeon minimap icon setting": dgn.DungeonMinimapIconSetting = ReadRawNodeData(node, text, data); break;
                     case "realdungeon checkup": dgn.RealdungeonCheckup = data; break;
                     case "common passive object": dgn.CommonPassiveObject = data; break;
@@ -632,6 +689,72 @@ namespace PvfLib
             }
         }
 
+        private static List<WarpMapConditionEntry> ParseWarpMapConditions(
+            ScriptNode node,
+            string text)
+        {
+            var result = new List<WarpMapConditionEntry>();
+            int? sourceX = null;
+            int? sourceY = null;
+
+            for (var childIndex = 0; childIndex < node.Children.Count; childIndex++)
+            {
+                var child = node.Children[childIndex];
+                var childData = child.DataItems.Count > 0
+                    ? child.GetFirstDataContent(text)
+                    : (childIndex == node.Children.Count - 1
+                        && node.DataItems.Count > 0
+                        ? node.GetFirstDataContent(text)
+                        : child.GetContent(text));
+                var values = ParseIntArray(childData);
+                if (values == null || values.Length < 2)
+                    continue;
+
+                if (child.Tag.Equals("source grid pos", StringComparison.OrdinalIgnoreCase))
+                {
+                    sourceX = values[0];
+                    sourceY = values[1];
+                    continue;
+                }
+
+                if (!child.Tag.Equals("dest grid pos", StringComparison.OrdinalIgnoreCase)
+                    || !sourceX.HasValue
+                    || !sourceY.HasValue)
+                {
+                    continue;
+                }
+
+                result.Add(new WarpMapConditionEntry
+                {
+                    SourceX = sourceX.Value,
+                    SourceY = sourceY.Value,
+                    DestinationX = values[0],
+                    DestinationY = values[1],
+                });
+                sourceX = null;
+                sourceY = null;
+            }
+
+            return result;
+        }
+
+        private static List<NamedMonsterMapPosition> ParseNamedMonsterMapPositions(
+            string data)
+        {
+            var result = new List<NamedMonsterMapPosition>();
+            var values = ParseIntArray(data);
+            for (var index = 0; index + 1 < values.Length; index += 2)
+            {
+                result.Add(new NamedMonsterMapPosition
+                {
+                    X = values[index],
+                    Y = values[index + 1],
+                });
+            }
+
+            return result;
+        }
+
         private static MazeInfo BuildMazeInfo(List<ScriptNode> nodes, string text)
         {
             var maze = new MazeInfo { Nodes = nodes };
@@ -645,7 +768,7 @@ namespace PvfLib
                         if (sz.Length >= 2) { maze.Width = sz[0]; maze.Height = sz[1]; }
                         break;
                     case "greed":
-                        maze.Greed = StripBacktick(data);
+                        maze.Greed = StripBacktick(ReadAllNodeData(node, text));
                         break;
                     case "map specification":
                         maze.MapSpecification = string.IsNullOrEmpty(maze.MapSpecification)
@@ -688,9 +811,44 @@ namespace PvfLib
                         maze.LayeredMapSpecification = string.IsNullOrEmpty(maze.LayeredMapSpecification)
                             ? data : maze.LayeredMapSpecification + " " + data;
                         break;
+                    case "minimap icon":
+                        maze.MinimapIcons.AddRange(ParseMazeMinimapIcons(data));
+                        break;
+                    case "event monster random map":
+                        var eventMapValues = ParseIntArray(data);
+                        if (eventMapValues.Length > 0)
+                            maze.EventMonsterRandomMap = eventMapValues[0];
+                        break;
                 }
             }
             return maze;
+        }
+
+        private static List<MazeMinimapIconInfo> ParseMazeMinimapIcons(string data)
+        {
+            var result = new List<MazeMinimapIconInfo>();
+            var values = ParseStringArray(data);
+            for (var index = 0; index + 4 < values.Length; index += 5)
+            {
+                if (!int.TryParse(values[index], out var x)
+                    || !int.TryParse(values[index + 1], out var y)
+                    || !int.TryParse(values[index + 3], out var iconIndex)
+                    || !int.TryParse(values[index + 4], out var flag))
+                {
+                    continue;
+                }
+
+                result.Add(new MazeMinimapIconInfo
+                {
+                    X = x,
+                    Y = y,
+                    Image = StripBacktick(values[index + 2]),
+                    IconIndex = iconIndex,
+                    Flag = flag,
+                });
+            }
+
+            return result;
         }
 
         private static RidableObjectScript ParseRidableObjectScript(ScriptNode node, string text)
@@ -763,6 +921,7 @@ namespace PvfLib
         private static readonly Dictionary<string, int> ClearConditionTypeMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             { "destroy object", 0 },
+            { "clear map", 1 },
             { "seeking", 1 },
             { "hunt monster", 2 },
             { "hunt apc", 3 },
@@ -772,6 +931,7 @@ namespace PvfLib
         private static List<ClearConditionEntry> ParseClearConditions(ScriptNode node, string text)
         {
             var result = new List<ClearConditionEntry>();
+            var nextGroupId = 1;
             foreach (var child in node.Children)
             {
                 int type;
@@ -782,6 +942,14 @@ namespace PvfLib
                 var data = child.DataItems.Count > 0
                     ? (child.GetFirstDataContent(text) ?? "").Trim()
                     : (node.DataItems.Count > 0 ? (node.GetFirstDataContent(text) ?? "").Trim() : "");
+
+                if (child.Tag.Equals("clear map", StringComparison.OrdinalIgnoreCase)
+                    && TryParseClearMapList(data, nextGroupId, result))
+                {
+                    nextGroupId++;
+                    continue;
+                }
+
                 var vals = ParseIntArray(data);
                 if (vals == null || vals.Length == 0) continue;
                 for (int i = 0; i + 1 < vals.Length; i += 2)
@@ -790,6 +958,52 @@ namespace PvfLib
                 }
             }
             return result;
+        }
+
+        private static bool TryParseClearMapList(
+            string data,
+            int groupId,
+            List<ClearConditionEntry> result)
+        {
+            var parts = ParseStringArray(data);
+            if (parts.Length == 0
+                || !StripBacktick(parts[0]).Equals(
+                    "list",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var values = ParseIntArray(data);
+            if (values == null || values.Length < 3)
+                return false;
+
+            var mapCount = values[0];
+            if (mapCount <= 0 || values.Length < mapCount + 2)
+                return false;
+
+            var required = values[mapCount + 1];
+            if (required <= 0)
+                required = 1;
+
+            var seenMapIds = new HashSet<int>();
+            for (var i = 0; i < mapCount; i++)
+            {
+                var mapId = values[i + 1];
+                if (mapId <= 0 || !seenMapIds.Add(mapId))
+                    continue;
+
+                result.Add(new ClearConditionEntry
+                {
+                    Type = 1,
+                    TargetId = mapId,
+                    Count = 1,
+                    GroupId = groupId,
+                    GroupRequired = required,
+                });
+            }
+
+            return seenMapIds.Count > 0;
         }
 
         private static List<MapSpecificationItem> ParseMapSpecifications(string data)
@@ -902,6 +1116,22 @@ namespace PvfLib
         #endregion
 
         #region 辅助
+
+        private static string ReadAllNodeData(ScriptNode node, string text)
+        {
+            if (node?.DataItems == null || node.DataItems.Count == 0)
+                return string.Empty;
+
+            var rows = new List<string>();
+            foreach (var item in node.DataItems)
+            {
+                var row = item.GetContent(text)?.Trim();
+                if (!string.IsNullOrWhiteSpace(row))
+                    rows.Add(row);
+            }
+
+            return string.Join("\n", rows);
+        }
 
         private static string ReadRawNodeData(ScriptNode node, string text, string data)
         {

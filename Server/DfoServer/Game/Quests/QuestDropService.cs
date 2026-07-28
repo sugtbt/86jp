@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Dungeon;
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
@@ -10,24 +11,41 @@ using System.Threading.Tasks;
 namespace DfoServer.Game.Quests
 {
     // 击杀怪物/摧毁被动物体后的任务掉落判定与发放。
-    // 规则数据来自 QuestDropProvider(PVF), 发放走资产服务事务, 发放后同步寻物任务进度。
+    // 规则数据来自 QuestDropProvider(PVF)，发放走在线背包服务，发放后同步寻物任务进度。
     // 原先寄居在副本共享服务里, 拆出归任务域。
     public sealed class QuestDropService
     {
         private const string ProtocolLogName = "GameProtocol";
 
-        private readonly InventoryRefreshSender _inventoryRefresh;
+        private readonly QuestDropNotificationBatcher _notificationBatcher;
         private readonly string _connectionString;
         private readonly Func<QuestDropCandidate, int, int> _rollDrop;
+        private readonly DungeonItemAcquisitionService _itemAcquisition;
 
         public QuestDropService(
             InventoryRefreshSender inventoryRefresh,
             string connectionString = null,
             Func<QuestDropCandidate, int, int> rollDrop = null)
+            : this(
+                inventoryRefresh,
+                connectionString,
+                rollDrop,
+                itemAcquisition: null)
         {
-            _inventoryRefresh = inventoryRefresh ?? throw new ArgumentNullException(nameof(inventoryRefresh));
+        }
+
+        internal QuestDropService(
+            InventoryRefreshSender inventoryRefresh,
+            string connectionString,
+            Func<QuestDropCandidate, int, int> rollDrop,
+            DungeonItemAcquisitionService itemAcquisition)
+        {
+            if (inventoryRefresh == null) throw new ArgumentNullException(nameof(inventoryRefresh));
+            _notificationBatcher = new QuestDropNotificationBatcher(inventoryRefresh);
             _connectionString = connectionString;
             _rollDrop = rollDrop ?? QuestDropProvider.RollDrop;
+            _itemAcquisition = itemAcquisition
+                ?? new DungeonItemAcquisitionService(new DropService());
         }
 
         public async Task CheckMonsterDrop(EnhancedClientSession session, int monsterCode)
@@ -85,24 +103,28 @@ namespace DfoServer.Game.Quests
                     run.Difficulty));
         }
 
-        private async Task CheckDrop(
+        private Task CheckDrop(
             EnhancedClientSession session,
             int sourceCode,
             string sourceName,
             Func<ICollection<int>, List<QuestDropCandidate>> getCandidates)
         {
+            var run = session?.Player?.CurrentRun;
+            if (run == null || !run.RewardPolicy.AllowsQuestDrops)
+                return Task.CompletedTask;
+
             var activeQuestIds = LoadActiveQuestIds(session, $"{sourceName}={sourceCode}");
             if (activeQuestIds == null || activeQuestIds.Count == 0)
-                return;
+                return Task.CompletedTask;
 
             var candidates = getCandidates(activeQuestIds);
-            if (candidates == null) return;
+            if (candidates == null) return Task.CompletedTask;
 
             if (!InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
                 || !lease.IsOwnedBy(session.SessionId))
             {
                 FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped because online inventory is missing cid={session.Player.CharacterId}");
-                return;
+                return Task.CompletedTask;
             }
 
             var grantedItemIds = new HashSet<int>();
@@ -111,70 +133,68 @@ namespace DfoServer.Game.Quests
             lock (lease.SyncRoot)
             {
                 var inventory = lease.Inventory;
-                var plannedDrops =
-                    new List<(QuestDropCandidate Candidate, int HeldCount, int DropCount)>();
+                var requests = new List<DungeonItemGrantRequest>();
                 var projectedHeldCounts = new Dictionary<int, int>();
-
                 foreach (var candidate in candidates)
                 {
-                    if (!projectedHeldCounts.TryGetValue(candidate.ItemId, out var currentHeld))
+                    if (!projectedHeldCounts.TryGetValue(
+                            candidate.ItemId,
+                            out var currentHeld))
+                    {
                         currentHeld = inventory.CountMainItem(candidate.ItemId);
+                    }
 
-                    int dropCount = _rollDrop(candidate, currentHeld);
+                    int dropCount = ClampDropCount(
+                        candidate,
+                        currentHeld,
+                        _rollDrop(candidate, currentHeld));
                     if (dropCount <= 0)
                         continue;
 
-                    plannedDrops.Add((candidate, currentHeld, dropCount));
+                    requests.Add(new DungeonItemGrantRequest
+                    {
+                        QuestId = candidate.QuestId,
+                        ItemTemplateId = candidate.ItemId,
+                        Count = dropCount,
+                        Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
+                    });
                     projectedHeldCounts[candidate.ItemId] =
                         currentHeld > int.MaxValue - dropCount
                             ? int.MaxValue
                             : currentHeld + dropCount;
                 }
 
-                if (plannedDrops.Count > 0)
-                {
-                    var requests = new List<InventoryRewardGrantRequest>(plannedDrops.Count);
-                    foreach (var planned in plannedDrops)
-                    {
-                        requests.Add(InventoryRewardGrantRequest.Create(
-                            planned.Candidate.ItemId,
-                            planned.DropCount,
-                            ItemCreateReason.QuestReward));
-                    }
+                if (requests.Count == 0)
+                    return Task.CompletedTask;
 
-                    var batchSucceeded = InventoryRewardGrantService.TryGrantBatch(
+                if (!_itemAcquisition.TryGrantItems(
                         inventory,
                         requests,
-                        out var batchResult);
-                    if (!batchSucceeded)
+                        out var grants))
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolLogName}] QUEST_DROP: batch grant failed " +
+                        $"{sourceName}={sourceCode} count={requests.Count} error={grants?.Error}");
+                    return Task.CompletedTask;
+                }
+
+                foreach (var entry in grants.Entries)
+                {
+                    var grant = entry?.Grant;
+                    if (entry?.Request == null
+                        || grant == null
+                        || grant.SlotIndex < 0)
                     {
-                        FileLogger.Log(
-                            $"[{ProtocolLogName}] QUEST_DROP: batch insert failed " +
-                            $"{sourceName}={sourceCode} requests={requests.Count} error={batchResult.Error}");
+                        continue;
                     }
 
-                    var resultCount = Math.Min(plannedDrops.Count, batchResult.Results.Count);
-                    for (var index = 0; index < resultCount; index++)
-                    {
-                        var planned = plannedDrops[index];
-                        var grant = batchResult.Results[index];
-                        if (!grant.Success || grant.SlotIndex < 0)
-                        {
-                            FileLogger.Log(
-                                $"[{ProtocolLogName}] QUEST_DROP: failed to insert " +
-                                $"{sourceName}={sourceCode} item={planned.Candidate.ItemId} " +
-                                $"x{planned.DropCount} held={planned.HeldCount} error={grant.Error}");
-                            continue;
-                        }
-
-                        grantedItemIds.Add(planned.Candidate.ItemId);
-                        grantedSlots.Add(grant.SlotIndex);
-                    }
+                    grantedItemIds.Add(entry.Request.ItemTemplateId);
+                    grantedSlots.Add(grant.SlotIndex);
                 }
             }
 
             if (grantedItemIds.Count <= 0)
-                return;
+                return Task.CompletedTask;
 
             if (session.GameSession?.QuestManager == null)
             {
@@ -182,13 +202,30 @@ namespace DfoServer.Game.Quests
             }
             else
             {
-                // Avoid per-drop ACCEPTED_QUEST (0x023F); it causes a visible client hitch.
                 session.GameSession.QuestManager
-                    .RecalibrateItemSeekingQuestProgressWithoutNotification(grantedItemIds);
+                    .RecalibrateItemSeekingQuestProgressWithoutNotification(
+                        grantedItemIds);
             }
 
-            // During a dungeon, refresh only the changed slots after quest progress has settled.
-            await _inventoryRefresh.SendUpdateItemList(session, InventoryListType.Main, grantedSlots);
+            // Coalesce only client projections after online inventory and quest state settle.
+            _notificationBatcher.Queue(session, grantedSlots);
+            return Task.CompletedTask;
+        }
+
+        internal static int ClampDropCount(
+            QuestDropCandidate candidate,
+            int currentHeld,
+            int requestedCount)
+        {
+            if (requestedCount <= 0)
+                return 0;
+
+            var effectiveLimit = QuestDropProvider.GetEffectiveHeldLimit(candidate);
+            if (effectiveLimit < 0)
+                return requestedCount;
+            if (currentHeld >= effectiveLimit)
+                return 0;
+            return Math.Min(requestedCount, effectiveLimit - currentHeld);
         }
 
         private HashSet<int> LoadActiveQuestIds(

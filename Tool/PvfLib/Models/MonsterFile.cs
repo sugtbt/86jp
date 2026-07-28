@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 
 namespace PvfLib
 {
@@ -14,6 +15,7 @@ namespace PvfLib
         public string Name { get; set; }
         public string FaceImage { get; set; }
         public string Category { get; set; }
+        public List<string> Categories { get; set; } = new List<string>();
         
         public string AbilityCategory { get; set; }
         
@@ -66,6 +68,7 @@ namespace PvfLib
         public string OverturnAction { get; set; }
         
         public string AttackAction { get; set; }
+        public List<string> EtcActions { get; set; } = new List<string>();
 
         #endregion
 
@@ -131,7 +134,10 @@ namespace PvfLib
                     
                     case "name": mob.Name = StripBacktick(data); break;
                     case "face image": mob.FaceImage = data; break;
-                    case "category": mob.Category = StripBacktick(data); break;
+                    case "category":
+                        mob.Category = StripBacktick(data);
+                        AddBacktickValues(node, content, mob.Categories);
+                        break;
                     case "ability category": mob.AbilityCategory = data; break;
                     case "level": mob.Level = ParseIntPair(data); break;
 
@@ -172,6 +178,9 @@ namespace PvfLib
                     case "down action": mob.DownAction = StripBacktick(data); break;
                     case "overturn action": mob.OverturnAction = StripBacktick(data); break;
                     case "attack action": mob.AttackAction = data; break;
+                    case "etc action":
+                        AddBacktickValues(node, content, mob.EtcActions);
+                        break;
 
                     
                     case "ai pattern": mob.AiPattern = StripBacktick(data); break;
@@ -207,6 +216,38 @@ namespace PvfLib
             }
 
             return mob;
+        }
+
+        private static void AddBacktickValues(
+            ScriptNode node,
+            string content,
+            ICollection<string> destination)
+        {
+            if (node == null || destination == null)
+                return;
+
+            foreach (var item in node.DataItems)
+            {
+                var raw = item.GetContent(content) ?? string.Empty;
+                var matches = Regex.Matches(raw, "`([^`]*)`");
+                if (matches.Count > 0)
+                {
+                    foreach (Match match in matches)
+                    {
+                        var value = match.Groups[1].Value.Trim();
+                        if (!string.IsNullOrWhiteSpace(value))
+                            destination.Add(value);
+                    }
+                    continue;
+                }
+
+                foreach (var value in raw.Split(
+                    new[] { ' ', '\t', '\r', '\n' },
+                    StringSplitOptions.RemoveEmptyEntries))
+                {
+                    destination.Add(value.Trim());
+                }
+            }
         }
 
         #endregion

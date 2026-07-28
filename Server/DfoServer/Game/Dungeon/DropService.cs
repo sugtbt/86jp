@@ -20,26 +20,90 @@ namespace DfoServer.Game.Dungeon
             HellMonsterDropConfig.WarmUp();
         }
 
+        internal bool TryRegisterTemplateDrop(
+            DungeonRun run,
+            int itemTemplateId,
+            int count,
+            out DropInfo drop)
+        {
+            drop = default;
+            if (run == null || itemTemplateId <= 0 || count <= 0)
+                return false;
+
+            ItemMetadata metadata;
+            try
+            {
+                metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+
+            if (metadata == null
+                || (metadata.ItemKind != "equipment" && metadata.ItemKind != "stackable"))
+            {
+                return false;
+            }
+
+            lock (run.SyncRoot)
+            {
+                run.SceneSlotCounter++;
+                if (run.SceneSlotCounter == 0)
+                    run.SceneSlotCounter++;
+
+                drop = new DropInfo
+                {
+                    SceneSlot = run.SceneSlotCounter,
+                    TemplateId = (uint)itemTemplateId,
+                    StackCount = (uint)count,
+                    Endurance = metadata.Durability,
+                };
+                run.Drops[drop.SceneSlot] = drop;
+            }
+
+            return true;
+        }
+
         internal MonsterDropResult GenerateAndRegister(DungeonRun run, MonsterDropRequest request)
         {
-            if (run == null) return default;
+            if (run == null || !run.RewardPolicy.AllowsMonsterDrops)
+                return default;
 
             var slotCounter = run.SceneSlotCounter;
 
-            var dropPool = MonsterDropTable.GetDropPool(request.MonsterCode);
-            int areaMaterialId = AreaMaterialDropProvider.GetAreaMaterialItem(run.DungeonId);
-            if (areaMaterialId > 0)
+            IReadOnlyList<MonsterDropTable.DropPoolEntry> dropPool = null;
+            if (run.DropPolicy.Allows(
+                    DungeonMonsterDropSource.MonsterTemplateItems))
             {
-                var extended = new List<MonsterDropTable.DropPoolEntry>();
-                if (dropPool != null) extended.AddRange(dropPool);
-                extended.Add(new MonsterDropTable.DropPoolEntry { ItemId = areaMaterialId, Weight = 100 });
-                dropPool = extended;
+                dropPool = MonsterDropTable.GetDropPool(request.MonsterCode);
+            }
+
+            if (run.DropPolicy.Allows(DungeonMonsterDropSource.AreaMaterials))
+            {
+                var areaMaterialId = AreaMaterialDropProvider.GetAreaMaterialItem(
+                    run.DungeonId);
+                if (areaMaterialId > 0)
+                {
+                    var extended = new List<MonsterDropTable.DropPoolEntry>();
+                    if (dropPool != null)
+                        extended.AddRange(dropPool);
+                    extended.Add(new MonsterDropTable.DropPoolEntry
+                    {
+                        ItemId = areaMaterialId,
+                        Weight = 100,
+                    });
+                    dropPool = extended;
+                }
             }
 
             var generator = new DropGenerator(run.RoomLcg);
             var result = generator.GenerateMonsterDrops(
                 request.DropRateLevel, request.MonsterType, request.MonsterCode,
                 run.Difficulty, request.DungeonBasisLevel,
+                run.EntryPartyMemberCount,
+                run.ChronicleDropJobGroup,
+                run.DropPolicy,
                 ref slotCounter, dropPool);
 
             run.SceneSlotCounter = slotCounter;
@@ -54,13 +118,21 @@ namespace DfoServer.Game.Dungeon
 
         internal List<DropInfo> GenerateAbyssPartyAndRegister(DungeonRun run, AbyssPartyDropRequest request)
         {
-            if (run == null) return new List<DropInfo>();
+            if (run == null || !run.RewardPolicy.AllowsMonsterDrops)
+                return new List<DropInfo>();
 
             var slotCounter = run.SceneSlotCounter;
 
-            var drops = IndependentDropSystem.GenerateDrops(
-                request.MonsterCode, run.Difficulty, request.DungeonBasisLevel,
-                run.RoomLcg, ref slotCounter);
+            var drops = run.DropPolicy.Allows(DungeonMonsterDropSource.Independent)
+                ? IndependentDropSystem.GenerateDrops(
+                    request.MonsterCode,
+                    run.Difficulty,
+                    request.DungeonBasisLevel,
+                    run.EntryPartyMemberCount,
+                    run.ChronicleDropJobGroup,
+                    run.RoomLcg,
+                    ref slotCounter)
+                : new List<DropInfo>();
 
             if (request.IsLastGroupMonster && !request.IsAbyssMonsterScript)
             {

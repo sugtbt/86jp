@@ -45,6 +45,10 @@ namespace DfoServer.SelfTests
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
             var failures = 0;
+            var sessionId = Guid.NewGuid();
+            InventoryContext.Register(
+                sessionId,
+                new InventoryService(CharacterId, AccountId));
 
             Check("1862 is question quest", GameWorld.QuestData.IsQuestionQuest(BranchQuestionQuestId), ref failures);
             Check("1862 has two answer-dependent successors", GameWorld.QuestData.GetQuestionAnswerCount(BranchQuestionQuestId) == 2, ref failures);
@@ -83,6 +87,8 @@ namespace DfoServer.SelfTests
             var acceptCorrectBranch = questService.HandleAcceptQuest(CharacterId,
                 BuildQuestBody(PrinceBranchQuestId), AccountId);
             Check("direct accept of chosen 1864 succeeds", IsSuccessAck(acceptCorrectBranch), ref failures);
+
+            InventoryContext.Unregister(sessionId, CharacterId);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;

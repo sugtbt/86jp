@@ -43,6 +43,23 @@ namespace DfoServer.Game.Dungeon
 
     public class RoomState
     {
+        private readonly object _stateSync = new object();
+        private DungeonRoomState _state = DungeonRoomState.Created;
+        private DungeonEncounterState _encounterState = DungeonEncounterState.NotStarted;
+
+        public DungeonInstanceRoom InstanceRoom;
+        public long RoomInstanceId => InstanceRoom?.RoomInstanceId ?? 0;
+        public DungeonRoomState State { get { lock (_stateSync) return _state; } }
+        public DungeonEncounterState EncounterState
+        {
+            get
+            {
+                if (InstanceRoom != null)
+                    return InstanceRoom.EncounterState;
+                lock (_stateSync)
+                    return _encounterState;
+            }
+        }
         public GameWorld.Dungeon.MazeSumInfo Maze;
         public ushort FirstSeqId;
         public ushort MonsterCount;
@@ -63,7 +80,79 @@ namespace DfoServer.Game.Dungeon
         public ushort TimeSpiralHiddenBossSeqId;
         public int TimeSpiralHiddenBossCode;
         public string TimeSpiralHiddenBossSource;
+        public bool EventMonsterConditionAdvanced;
 
         public bool IsCleared => KilledSeqIds.Count >= MonsterCount && MonsterCount > 0;
+
+        public bool TryActivate()
+        {
+            lock (_stateSync)
+            {
+                if (_state == DungeonRoomState.Active)
+                    return false;
+                if (_state != DungeonRoomState.Created)
+                    return false;
+                _state = DungeonRoomState.Active;
+                InstanceRoom?.TryActivate();
+                return true;
+            }
+        }
+
+        public bool TryClear()
+        {
+            lock (_stateSync)
+            {
+                if (_state == DungeonRoomState.Cleared)
+                    return false;
+                if (_state != DungeonRoomState.Active)
+                    return false;
+                _state = DungeonRoomState.Cleared;
+                InstanceRoom?.TryClear();
+                return true;
+            }
+        }
+
+        public bool TryClose()
+        {
+            lock (_stateSync)
+            {
+                if (_state == DungeonRoomState.Closed)
+                    return false;
+                _state = DungeonRoomState.Closed;
+                return true;
+            }
+        }
+
+        public bool TryStartEncounter()
+        {
+            if (InstanceRoom != null)
+                return InstanceRoom.TryStartEncounter();
+            lock (_stateSync)
+            {
+                if (_encounterState == DungeonEncounterState.Active)
+                    return false;
+                if (_encounterState != DungeonEncounterState.NotStarted)
+                    return false;
+                _encounterState = DungeonEncounterState.Active;
+                InstanceRoom?.TryStartEncounter();
+                return true;
+            }
+        }
+
+        public bool TryCompleteEncounter(bool succeeded)
+        {
+            if (InstanceRoom != null)
+                return InstanceRoom.TryCompleteEncounter(succeeded);
+            lock (_stateSync)
+            {
+                if (_encounterState != DungeonEncounterState.Active)
+                    return false;
+                _encounterState = succeeded
+                    ? DungeonEncounterState.Succeeded
+                    : DungeonEncounterState.Failed;
+                InstanceRoom?.TryCompleteEncounter(succeeded);
+                return true;
+            }
+        }
     }
 }

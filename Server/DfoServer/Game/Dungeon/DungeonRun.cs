@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using DfoServer.Game.Quests;
 using DfoServer.Infrastructure;
 
 namespace DfoServer.Game.Dungeon
@@ -22,10 +23,26 @@ namespace DfoServer.Game.Dungeon
         public readonly object SyncRoot = new object();
 
         public DungeonRun(short dungeonId, byte difficulty)
+            : this(
+                new DungeonInstance(dungeonId, difficulty),
+                DungeonIdentityGenerator.NextRunId(),
+                runGeneration: 1,
+                DungeonRunState.Active)
         {
-            DungeonId = dungeonId;
-            Difficulty = difficulty;
-            Phase = DungeonRunPhase.InProgress;
+        }
+
+        internal DungeonRun(
+            DungeonInstance instance,
+            long runId,
+            long runGeneration,
+            DungeonRunState initialState)
+        {
+            Instance = instance ?? throw new ArgumentNullException(nameof(instance));
+            DungeonId = instance.DungeonId;
+            Difficulty = instance.Difficulty;
+            RunId = runId;
+            RunGeneration = runGeneration;
+            _runState = initialState;
             StartedUtc = DateTime.UtcNow;
         }
 
@@ -34,134 +51,470 @@ namespace DfoServer.Game.Dungeon
         {
         }
 
+        private DungeonRunState _runState;
+        private DungeonSettlementState _settlementState;
+        private DungeonClearedFact _clearedFact;
+        private Guid _settlementSourceEventId;
+
+        public DungeonInstance Instance { get; }
+        public DungeonRewardPolicy RewardPolicy =>
+            Instance?.RewardPolicy ?? DungeonRewardPolicy.Standard;
+        public DungeonDropDefinition DropDefinition =>
+            Instance?.DropDefinition ?? DungeonDropDefinition.Standard;
+        public DungeonDropPolicy DropPolicy => DropDefinition.Policy;
+        public long PartyDungeonInstanceId => Instance?.PartyDungeonInstanceId ?? 0;
+        public long RunId { get; }
+        public long RunGeneration { get; }
+        public long CurrentRoomInstanceId { get; private set; }
+        public DungeonEffectLedger Effects { get; } = new DungeonEffectLedger();
+        public RunTimerRegistry Timers { get; } = new RunTimerRegistry();
+        public DungeonRunState RunState { get { lock (SyncRoot) return _runState; } }
+        public DungeonSettlementState SettlementState { get { lock (SyncRoot) return _settlementState; } }
+        public DungeonClearedFact ClearedFact { get { lock (SyncRoot) return _clearedFact; } }
+        internal DungeonRunSelectionState Selection { get; } =
+            new DungeonRunSelectionState();
+        internal DungeonRunCombatState Combat { get; } =
+            new DungeonRunCombatState();
+        internal DungeonRunSettlementData Settlement { get; } =
+            new DungeonRunSettlementData();
+        internal DungeonRunQuestBridgeState QuestBridge { get; } =
+            new DungeonRunQuestBridgeState();
+        internal DungeonMechanismRuntimeSet Mechanisms { get; } =
+            new DungeonMechanismRuntimeSet();
+
+        public QuestRunSnapshot QuestSnapshot
+        {
+            get => QuestBridge.Snapshot;
+            internal set => QuestBridge.Snapshot = value ?? QuestRunSnapshot.Empty;
+        }
+        internal DungeonTownReturnAnchor TownReturnAnchor { get; set; }
+        internal DungeonSettlementRuntime SettlementRuntime
+        {
+            get => Settlement.Runtime;
+            set => Settlement.Runtime = value;
+        }
+
         public short DungeonId;
         public byte Difficulty;
-        public DungeonRunPhase Phase;
+        public DungeonRunPhase Phase
+        {
+            get
+            {
+                lock (SyncRoot)
+                {
+                    if (_runState == DungeonRunState.None || _runState == DungeonRunState.Ended)
+                        return DungeonRunPhase.None;
+                    if (_settlementState == DungeonSettlementState.Completed)
+                        return CardRewards == null
+                            ? DungeonRunPhase.ResultShown
+                            : DungeonRunPhase.CardsRevealed;
+                    if (_settlementState == DungeonSettlementState.CardsRevealed)
+                        return DungeonRunPhase.CardsRevealed;
+                    if (_settlementState == DungeonSettlementState.ResultShown)
+                        return DungeonRunPhase.ResultShown;
+                    if (_runState == DungeonRunState.ClearCommitting
+                        || _runState == DungeonRunState.Cleared
+                        || _runState == DungeonRunState.Ending)
+                        return DungeonRunPhase.Cleared;
+                    return DungeonRunPhase.InProgress;
+                }
+            }
+            set
+            {
+                lock (SyncRoot)
+                {
+                    switch (value)
+                    {
+                        case DungeonRunPhase.None:
+                            _runState = DungeonRunState.None;
+                            _settlementState = DungeonSettlementState.NotStarted;
+                            break;
+                        case DungeonRunPhase.InProgress:
+                            _runState = DungeonRunState.Active;
+                            _settlementState = DungeonSettlementState.NotStarted;
+                            break;
+                        case DungeonRunPhase.Cleared:
+                            _runState = DungeonRunState.Cleared;
+                            _settlementState = DungeonSettlementState.NotStarted;
+                            break;
+                        case DungeonRunPhase.ResultShown:
+                            _runState = DungeonRunState.Cleared;
+                            _settlementState = DungeonSettlementState.ResultShown;
+                            break;
+                        case DungeonRunPhase.CardsRevealed:
+                            _runState = DungeonRunState.Cleared;
+                            _settlementState = DungeonSettlementState.CardsRevealed;
+                            break;
+                    }
+                }
+            }
+        }
         public DateTime StartedUtc;
-        private readonly HashSet<(int DungeonId, int MapId)> _syncedClearMapQuestTargets =
-            new HashSet<(int DungeonId, int MapId)>();
+        // Compatibility projections. New production code should address the
+        // composed state objects above instead of adding fields to this root.
+        internal SpecialDungeonRuntime SpecialDungeon { get => Mechanisms.SpecialDungeon; set => Mechanisms.SpecialDungeon = value; }
+        public bool IgnoreDefaultDungeonClear { get => Mechanisms.IgnoreDefaultDungeonClear; set => Mechanisms.IgnoreDefaultDungeonClear = value; }
+        public IReadOnlyList<IReadOnlyList<(byte X, byte Y)>> SpecialMinimapIconGroups { get => Mechanisms.SpecialMinimapIconGroups; set => Mechanisms.SpecialMinimapIconGroups = value; }
+        internal List<BossEntranceConditionTargetState> BossEntranceConditionTargets { get => Mechanisms.BossEntranceConditionTargets; set => Mechanisms.BossEntranceConditionTargets = value; }
+        internal List<int> BossEntranceConditionalSummonCodes { get => Mechanisms.BossEntranceConditionalSummonCodes; set => Mechanisms.BossEntranceConditionalSummonCodes = value; }
+        internal bool BossEntranceConditionComplete { get => Mechanisms.BossEntranceConditionComplete; set => Mechanisms.BossEntranceConditionComplete = value; }
+        internal bool ConditionalBossSpawned { get => Mechanisms.ConditionalBossSpawned; set => Mechanisms.ConditionalBossSpawned = value; }
+        internal int ConditionalBossCode { get => Mechanisms.ConditionalBossCode; set => Mechanisms.ConditionalBossCode = value; }
+        internal ScriptedFatalEndpointRuntime ScriptedFatalEndpoint { get => Mechanisms.ScriptedFatalEndpoint; set => Mechanisms.ScriptedFatalEndpoint = value; }
+        internal bool HasBossEntranceConditionalSummon => Mechanisms.HasBossEntranceConditionalSummon;
 
-        // Per-run state for the ordinary special dungeons in PR part one.
-        internal SpecialDungeonRuntime SpecialDungeon;
-        public bool IgnoreDefaultDungeonClear;
-        public IReadOnlyList<IReadOnlyList<(byte X, byte Y)>> SpecialMinimapIconGroups;
-        internal List<MeltdownHelpusHostageAssignment> MeltdownHelpusHostages =
-            new List<MeltdownHelpusHostageAssignment>();
-        internal bool MeltdownHelpusBossConditionComplete;
-        internal bool MeltdownHelpusBossSpawned;
+        public int MazeIndex { get => Selection.MazeIndex; set => Selection.MazeIndex = value; }
+        public int LayeredMapIndex { get => Selection.LayeredMapIndex; set => Selection.LayeredMapIndex = value; }
+        public bool MazeQuestConnected { get => Selection.MazeQuestConnected; set => Selection.MazeQuestConnected = value; }
+        public int MazeStartMapId { get => Selection.MazeStartMapId; set => Selection.MazeStartMapId = value; }
+        public int MazeStartX { get => Selection.MazeStartX; set => Selection.MazeStartX = value; }
+        public int MazeStartY { get => Selection.MazeStartY; set => Selection.MazeStartY = value; }
+        public int TotalRoomCount { get => Selection.TotalRoomCount; set => Selection.TotalRoomCount = value; }
+        public int EntryPartyMemberCount { get => Selection.EntryPartyMemberCount; set => Selection.EntryPartyMemberCount = value; }
+        internal int ChronicleDropJobGroup { get => Selection.ChronicleDropJobGroup; set => Selection.ChronicleDropJobGroup = value; }
+        public int LinkedDungeonNextId { get => Selection.LinkedDungeonNextId; set => Selection.LinkedDungeonNextId = value; }
+        public int LinkedDungeonNextRate { get => Selection.LinkedDungeonNextRate; set => Selection.LinkedDungeonNextRate = value; }
+        public int LinkedDungeonNextCondition { get => Selection.LinkedDungeonNextCondition; set => Selection.LinkedDungeonNextCondition = value; }
 
-        // 迷宫选择与任务连接
-        public int MazeIndex = -1;
-        public int LayeredMapIndex = -1;
-        public bool MazeQuestConnected;
-        public int MazeStartMapId;
-        public int MazeStartX = -1;
-        public int MazeStartY = -1;
-        public int LinkedDungeonNextId;
-        public int LinkedDungeonNextRate;
-        public int LinkedDungeonNextCondition;
+        internal bool TimeSpiralTeleportPending { get => Mechanisms.TimeSpiralTeleportPending; set => Mechanisms.TimeSpiralTeleportPending = value; }
+        internal int TimeSpiralTrapMapId { get => Mechanisms.TimeSpiralTrapMapId; set => Mechanisms.TimeSpiralTrapMapId = value; }
+        internal bool TimeSpiralTargetActive { get => Mechanisms.TimeSpiralTargetActive; set => Mechanisms.TimeSpiralTargetActive = value; }
+        internal int TimeSpiralTargetX { get => Mechanisms.TimeSpiralTargetX; set => Mechanisms.TimeSpiralTargetX = value; }
+        internal int TimeSpiralTargetY { get => Mechanisms.TimeSpiralTargetY; set => Mechanisms.TimeSpiralTargetY = value; }
+        internal int TimeSpiralTargetFlag { get => Mechanisms.TimeSpiralTargetFlag; set => Mechanisms.TimeSpiralTargetFlag = value; }
+        internal int TimeSpiralTargetWeight { get => Mechanisms.TimeSpiralTargetWeight; set => Mechanisms.TimeSpiralTargetWeight = value; }
+        internal bool TimeSpiralHiddenBossActive { get => Mechanisms.TimeSpiralHiddenBossActive; set => Mechanisms.TimeSpiralHiddenBossActive = value; }
+        internal ushort TimeSpiralHiddenBossSeqId { get => Mechanisms.TimeSpiralHiddenBossSeqId; set => Mechanisms.TimeSpiralHiddenBossSeqId = value; }
+        internal int TimeSpiralHiddenBossCode { get => Mechanisms.TimeSpiralHiddenBossCode; set => Mechanisms.TimeSpiralHiddenBossCode = value; }
+        internal int TimeSpiralHiddenBossMapId { get => Mechanisms.TimeSpiralHiddenBossMapId; set => Mechanisms.TimeSpiralHiddenBossMapId = value; }
+        internal int TimeSpiralHiddenBossX { get => Mechanisms.TimeSpiralHiddenBossX; set => Mechanisms.TimeSpiralHiddenBossX = value; }
+        internal int TimeSpiralHiddenBossY { get => Mechanisms.TimeSpiralHiddenBossY; set => Mechanisms.TimeSpiralHiddenBossY = value; }
+        internal string TimeSpiralHiddenBossSource { get => Mechanisms.TimeSpiralHiddenBossSource; set => Mechanisms.TimeSpiralHiddenBossSource = value; }
 
-        // 赫拉斯研究所 / TimeSpiral 单局传送与结算状态。
-        internal bool TimeSpiralTeleportPending;
-        internal int TimeSpiralTrapMapId;
-        internal bool TimeSpiralTargetActive;
-        internal int TimeSpiralTargetX = -1;
-        internal int TimeSpiralTargetY = -1;
-        internal int TimeSpiralTargetFlag = -1;
-        internal int TimeSpiralTargetWeight;
-        internal bool TimeSpiralHiddenBossActive;
-        internal ushort TimeSpiralHiddenBossSeqId;
-        internal int TimeSpiralHiddenBossCode;
-        internal int TimeSpiralHiddenBossMapId;
-        internal int TimeSpiralHiddenBossX = -1;
-        internal int TimeSpiralHiddenBossY = -1;
-        internal string TimeSpiralHiddenBossSource;
+        public bool HellMode { get => Selection.HellMode; set => Selection.HellMode = value; }
+        public byte HellPartyMode { get => Selection.HellPartyMode; set => Selection.HellPartyMode = value; }
+        public bool VeryDifficultHell { get => Selection.VeryDifficultHell; set => Selection.VeryDifficultHell = value; }
+        public bool HellGorgeousChallenge { get => Selection.HellGorgeousChallenge; set => Selection.HellGorgeousChallenge = value; }
+        public int HellMapId { get => Selection.HellMapId; set => Selection.HellMapId = value; }
+        public byte HellMapX { get => Selection.HellMapX; set => Selection.HellMapX = value; }
+        public byte HellMapY { get => Selection.HellMapY; set => Selection.HellMapY = value; }
+        public GameWorld.Dungeon.HellPartyRoomInfo HellRoomInfo { get => Selection.HellRoomInfo; set => Selection.HellRoomInfo = value; }
 
-        // 深渊(地狱派对)
-        public bool HellMode;
-        public byte HellPartyMode;
-        public bool VeryDifficultHell;
-        public bool HellGorgeousChallenge;
-        public int HellMapId = -1;
-        public byte HellMapX = 0xFF;
-        public byte HellMapY = 0xFF;
-        public GameWorld.Dungeon.HellPartyRoomInfo HellRoomInfo;
+        public ushort MonsterCount { get => Combat.MonsterCount; set => Combat.MonsterCount = value; }
+        public ushort RoomStartSequence { get => Combat.RoomStartSequence; set => Combat.RoomStartSequence = value; }
+        public IReadOnlyList<GameWorld.Dungeon.MonsterSumInfo> RoomMonsters { get => Combat.RoomMonsters; set => Combat.RoomMonsters = value; }
+        public HashSet<ushort> RoomKilledSeqIds { get => Combat.RoomKilledSeqIds; set => Combat.RoomKilledSeqIds = value; }
+        public RoomKey RoomKey { get => Combat.RoomKey; set => Combat.RoomKey = value; }
+        public Dictionary<RoomKey, RoomState> RoomStates { get => Combat.RoomStates; set => Combat.RoomStates = value; }
+        public uint Seed { get => Combat.Seed; set => Combat.Seed = value; }
+        public DnfLcg RoomLcg { get => Combat.RoomLcg; set => Combat.RoomLcg = value; }
+        public List<RidableObjectSpawnEntry> RidableObjects { get => Combat.RidableObjects; set => Combat.RidableObjects = value; }
+        public ClearConditionState ClearCondition { get => Combat.ClearCondition; set => Combat.ClearCondition = value; }
+        public int BossCode { get => Combat.BossCode; set => Combat.BossCode = value; }
+        public int[] BossMapPos { get => Combat.BossMapPos; set => Combat.BossMapPos = value; }
+        public int SelectedBossMapId { get => Combat.SelectedBossMapId; set => Combat.SelectedBossMapId = value; }
+        public uint TotalExp { get => Combat.TotalExp; set => Combat.TotalExp = value; }
+        public uint BossTotalExp { get => Combat.BossTotalExp; set => Combat.BossTotalExp = value; }
+        public uint ChampionTotalExp { get => Combat.ChampionTotalExp; set => Combat.ChampionTotalExp = value; }
+        public uint SuperChampionTotalExp { get => Combat.SuperChampionTotalExp; set => Combat.SuperChampionTotalExp = value; }
+        public uint NamedMonsterTotalExp { get => Combat.NamedMonsterTotalExp; set => Combat.NamedMonsterTotalExp = value; }
+        public uint MonsterGrowthContractBonusExp { get => Combat.MonsterGrowthContractBonusExp; set => Combat.MonsterGrowthContractBonusExp = value; }
+        public int TotalGold { get => Combat.TotalGold; set => Combat.TotalGold = value; }
+        public ushort SceneSlotCounter { get => Combat.SceneSlotCounter; set => Combat.SceneSlotCounter = value; }
+        public Dictionary<ushort, DropInfo> Drops { get => Combat.Drops; set => Combat.Drops = value; }
 
-        // 当前房间与怪物追踪
-        public ushort MonsterCount;
-        public ushort RoomStartSequence;
-        public IReadOnlyList<GameWorld.Dungeon.MonsterSumInfo> RoomMonsters
-            = Array.Empty<GameWorld.Dungeon.MonsterSumInfo>();
-        public HashSet<ushort> RoomKilledSeqIds = new HashSet<ushort>();
-        public RoomKey RoomKey;
-        public Dictionary<RoomKey, RoomState> RoomStates = new Dictionary<RoomKey, RoomState>();
-        public uint Seed;
-        public DnfLcg RoomLcg;
-        public List<RidableObjectSpawnEntry> RidableObjects = new List<RidableObjectSpawnEntry>();
+        internal SecretShop.SecretShopOffer SecretShopOffer { get => Settlement.SecretShopOffer; set => Settlement.SecretShopOffer = value; }
+        public List<ClearRewardGenerator.CardReward> CardRewards { get => Settlement.CardRewards; set => Settlement.CardRewards = value; }
+        public int PaidCardCost { get => Settlement.PaidCardCost; set => Settlement.PaidCardCost = Math.Max(0, value); }
+        public int CardFlipCount { get => Settlement.CardFlipCount; set => Settlement.CardFlipCount = value; }
+        public byte[] FreeCardSlots { get => Settlement.FreeCardSlots; set => Settlement.FreeCardSlots = value; }
+        public byte[] PaidCardSlots { get => Settlement.PaidCardSlots; set => Settlement.PaidCardSlots = value; }
+        public bool FreeCardRewardDelivered { get => Settlement.FreeCardRewardDelivered; set => Settlement.FreeCardRewardDelivered = value; }
+        public bool PaidCardRewardDelivered { get => Settlement.PaidCardRewardDelivered; set => Settlement.PaidCardRewardDelivered = value; }
+        public DeathTower.DeathTowerSession Tower { get => Mechanisms.Tower; set => Mechanisms.Tower = value; }
+        public bool IsWaitingDeathRespawn { get => Combat.IsWaitingDeathRespawn; set => Combat.IsWaitingDeathRespawn = value; }
+        public DateTime DeathRespawnAvailableAt { get => Combat.DeathRespawnAvailableAt; set => Combat.DeathRespawnAvailableAt = value; }
 
-        // 通关条件与 Boss
-        public ClearConditionState ClearCondition;
-        public int BossCode;
-        public int[] BossMapPos;
-        public int SelectedBossMapId = -1;
+        public DungeonRunIdentity CaptureIdentity() =>
+            new DungeonRunIdentity(PartyDungeonInstanceId, RunId, RunGeneration);
 
-        // 本局累计(经验/金币/统计)
-        public uint TotalExp;
-        public uint BossTotalExp;
-        public uint ChampionTotalExp;
-        public uint SuperChampionTotalExp;
-        public uint NamedMonsterTotalExp;
-        public uint MonsterGrowthContractBonusExp;
-        public int TotalGold;
+        public DungeonRoomIdentity CaptureRoomIdentity() =>
+            new DungeonRoomIdentity(CaptureIdentity(), CurrentRoomInstanceId);
 
-        // 本局通关后生成的秘密商店快照；随 DungeonRun 一起创建和销毁。
-        internal SecretShop.SecretShopOffer SecretShopOffer;
+        public Guid GetSettlementSourceEventId()
+        {
+            lock (SyncRoot)
+            {
+                if (_clearedFact != null)
+                    return _clearedFact.SourceEventId;
+                if (_settlementSourceEventId == Guid.Empty)
+                    _settlementSourceEventId = Guid.NewGuid();
+                return _settlementSourceEventId;
+            }
+        }
 
-        // 掉落物追踪
-        public ushort SceneSlotCounter;
-        public Dictionary<ushort, DropInfo> Drops = new Dictionary<ushort, DropInfo>();
+        public bool Matches(DungeonRunIdentity identity) =>
+            identity.IsValid && CaptureIdentity().Equals(identity);
 
-        // 通关翻牌
-        public List<ClearRewardGenerator.CardReward> CardRewards;
-        public int CardFlipCount;
-        public byte[] FreeCardSlots = { 0xFF, 0xFF, 0xFF, 0xFF };
-        public byte[] PaidCardSlots = { 0xFF, 0xFF, 0xFF, 0xFF };
-        // 翻牌奖励按免费/付费两段分别做幂等标记。
-        // 自动翻免费卡、玩家手动翻牌、EPLP/再次挑战可能前后贴得很近; 发奖前必须先占用对应标记,
-        // 防止后续路径把同一段奖励再次入库。
-        public bool FreeCardRewardDelivered;
-        public bool PaidCardRewardDelivered;
+        public bool Matches(DungeonRoomIdentity identity) =>
+            identity.IsValid
+            && CaptureIdentity().Equals(identity.Run)
+            && CurrentRoomInstanceId == identity.RoomInstanceId;
 
-        // 死亡之塔: 塔是一局副本的变体, 塔专属状态(层数/推进状态/序号)封装在 DeathTowerSession,
-        // 挂在局对象上; null=本局不是塔。
-        public DeathTower.DeathTowerSession Tower;
+        public bool SharesPhysicalInstanceWith(DungeonRun other) =>
+            other != null
+            && PartyDungeonInstanceId > 0
+            && PartyDungeonInstanceId == other.PartyDungeonInstanceId;
 
-        // 翻牌自动流程定时器句柄(结算界面 2s 布局 + 4s 自动翻免费卡)。
-        // 旧服 CParty timer 使用 gen_timer_key/check_timer_key 让旧回调失效;
-        // 当前项目用 ClockTimerHandle + 单局版本号表达同一语义。
-        // 回调必须捕获所属 DungeonRun 实例, 并在动作前校验它仍是当前局。
-        public ClockService.ClockTimerHandle AutoFlipTimerHandle;
-        public int AutoFlipTimerVersion;
+        public bool SharesCurrentRoomWith(DungeonRun other) =>
+            SharesPhysicalInstanceWith(other)
+            && CurrentRoomInstanceId > 0
+            && CurrentRoomInstanceId == other.CurrentRoomInstanceId;
 
-        public bool IsWaitingDeathRespawn;
-        public DateTime DeathRespawnAvailableAt = DateTime.MinValue;
-        public ClockService.ClockTimerHandle DeathRespawnTimerHandle;
-        public int DeathRespawnTimerVersion;
+        public bool TryBeginSelecting()
+        {
+            lock (SyncRoot)
+            {
+                if (_runState == DungeonRunState.Selecting)
+                    return false;
+                if (_runState != DungeonRunState.Created)
+                    return false;
+                _runState = DungeonRunState.Selecting;
+                return true;
+            }
+        }
 
-        public ClockService.ClockTimerHandle SpecialDungeonTimerHandle;
-        public int SpecialDungeonTimerVersion;
+        public bool TryActivate()
+        {
+            lock (SyncRoot)
+            {
+                if (_runState == DungeonRunState.Active)
+                    return false;
+                if (_runState != DungeonRunState.Created
+                    && _runState != DungeonRunState.Selecting)
+                    return false;
+                _runState = DungeonRunState.Active;
+                return true;
+            }
+        }
+
+        public bool TryBeginClearCommit(DungeonClearedFact fact)
+        {
+            if (fact == null)
+                throw new ArgumentNullException(nameof(fact));
+
+            lock (SyncRoot)
+            {
+                if (_runState == DungeonRunState.ClearCommitting
+                    && ReferenceEquals(_clearedFact, fact))
+                    return false;
+                if (_runState != DungeonRunState.Active)
+                    return false;
+                _clearedFact = fact;
+                _runState = DungeonRunState.ClearCommitting;
+                return true;
+            }
+        }
+
+        public bool CanResumeClearCommit(DungeonClearedFact fact)
+        {
+            lock (SyncRoot)
+            {
+                return fact != null
+                    && _runState == DungeonRunState.ClearCommitting
+                    && ReferenceEquals(_clearedFact, fact);
+            }
+        }
+
+        public bool TryCompleteClearCommit(DungeonClearedFact fact)
+        {
+            lock (SyncRoot)
+            {
+                if (_runState == DungeonRunState.Cleared
+                    && ReferenceEquals(_clearedFact, fact))
+                    return false;
+                if (_runState != DungeonRunState.ClearCommitting
+                    || !ReferenceEquals(_clearedFact, fact))
+                    return false;
+                _runState = DungeonRunState.Cleared;
+                return true;
+            }
+        }
+
+        public bool TryBeginSettlementPreparation()
+        {
+            lock (SyncRoot)
+            {
+                if (_runState != DungeonRunState.Cleared)
+                    return false;
+                if (_settlementState == DungeonSettlementState.Preparing)
+                    return false;
+                if (_settlementState != DungeonSettlementState.NotStarted)
+                    return false;
+                _settlementState = DungeonSettlementState.Preparing;
+                return true;
+            }
+        }
+
+        public bool CanResumeSettlementPreparation()
+        {
+            lock (SyncRoot)
+            {
+                return _runState == DungeonRunState.Cleared
+                    && _settlementState == DungeonSettlementState.Preparing;
+            }
+        }
+
+        public bool TryMarkResultShown()
+        {
+            lock (SyncRoot)
+            {
+                if (_settlementState == DungeonSettlementState.ResultShown)
+                    return false;
+                if (_settlementState != DungeonSettlementState.Preparing)
+                    return false;
+                _settlementState = DungeonSettlementState.ResultShown;
+                return true;
+            }
+        }
+
+        public bool TryMarkCardsRevealed()
+        {
+            lock (SyncRoot)
+            {
+                if (_settlementState == DungeonSettlementState.CardsRevealed)
+                    return false;
+                if (_settlementState != DungeonSettlementState.ResultShown)
+                    return false;
+                _settlementState = DungeonSettlementState.CardsRevealed;
+                return true;
+            }
+        }
+
+        public bool TryCompleteSettlement()
+        {
+            lock (SyncRoot)
+            {
+                if (_settlementState == DungeonSettlementState.Completed)
+                    return false;
+                if (_settlementState != DungeonSettlementState.ResultShown
+                    && _settlementState != DungeonSettlementState.CardsRevealed)
+                    return false;
+                _settlementState = DungeonSettlementState.Completed;
+                return true;
+            }
+        }
+
+        public bool TryBeginEnding()
+        {
+            lock (SyncRoot)
+            {
+                if (_runState == DungeonRunState.Ending
+                    || _runState == DungeonRunState.Ended)
+                    return false;
+                _runState = DungeonRunState.Ending;
+                return true;
+            }
+        }
+
+        public bool TryMarkEnded()
+        {
+            lock (SyncRoot)
+            {
+                if (_runState == DungeonRunState.Ended)
+                    return false;
+                if (_runState != DungeonRunState.Ending)
+                    return false;
+                _runState = DungeonRunState.Ended;
+                return true;
+            }
+        }
+
+        public void SetCurrentRoom(DungeonInstanceRoom room)
+        {
+            if (room == null)
+                throw new ArgumentNullException(nameof(room));
+            if (Instance == null)
+                throw new InvalidOperationException("A room cannot be attached without a dungeon instance.");
+
+            lock (SyncRoot)
+                CurrentRoomInstanceId = room.RoomInstanceId;
+        }
 
         internal bool TryMarkClearMapQuestSynced(int dungeonId, int mapId)
         {
-            return _syncedClearMapQuestTargets.Add((dungeonId, mapId));
+            lock (SyncRoot)
+                return QuestBridge.TryMarkClearMapSynced(dungeonId, mapId);
+        }
+
+        internal void UnmarkClearMapQuestSynced(int dungeonId, int mapId)
+        {
+            lock (SyncRoot)
+                QuestBridge.UnmarkClearMapSynced(dungeonId, mapId);
+        }
+
+        internal void MarkServerDrivenHuntMonsterTrigger(
+            ushort questId,
+            int channelIndex)
+        {
+            if (questId == 0 || channelIndex < 0 || channelIndex > 2)
+                return;
+
+            lock (SyncRoot)
+                QuestBridge.MarkHuntMonsterTrigger(questId, channelIndex);
+        }
+
+        internal bool TryConsumeServerDrivenHuntMonsterTrigger(
+            ushort questId,
+            byte triggerType)
+        {
+            if (questId == 0)
+                return false;
+
+            var channelMask = triggerType == 0
+                ? 0x01
+                : (triggerType & 0x0F) == 0
+                    ? (triggerType >> 4) & 0x07
+                    : 0;
+            if (channelMask == 0 || (triggerType & 0x80) != 0)
+                return false;
+
+            lock (SyncRoot)
+                return QuestBridge.TryConsumeHuntMonsterTrigger(
+                    questId,
+                    channelMask);
+        }
+
+        internal bool HasPendingServerDrivenHuntMonsterTriggers()
+        {
+            lock (SyncRoot)
+                return QuestBridge.HasPendingHuntMonsterTriggers();
+        }
+
+        internal bool TryMarkNpcItemDropGenerated(int questId)
+        {
+            if (questId <= 0)
+                return false;
+
+            lock (SyncRoot)
+                return QuestBridge.TryMarkNpcItemDropGenerated(questId);
+        }
+
+        internal void UnmarkNpcItemDropGenerated(int questId)
+        {
+            if (questId <= 0)
+                return;
+
+            lock (SyncRoot)
+                QuestBridge.UnmarkNpcItemDropGenerated(questId);
         }
     }
 
-    internal sealed class MeltdownHelpusHostageAssignment
+    internal sealed class BossEntranceConditionTargetState
     {
         internal int MonsterCode { get; set; }
         internal byte X { get; set; }
         internal byte Y { get; set; }
-        internal bool Rescued { get; set; }
+        internal bool Completed { get; set; }
     }
 }

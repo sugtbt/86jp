@@ -9,6 +9,10 @@ namespace DfoServer.Game.SelectCharacter
         public uint ValueA { get; set; }
 
         public uint ValueB { get; set; }
+
+        public uint TargetValue => ValueA;
+
+        public uint RemainingValue => ValueB;
     }
 
     public sealed class RacingDungeonGroupSnapshot

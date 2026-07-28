@@ -26,6 +26,9 @@ namespace DfoServer.Network.Handlers
         private readonly Game.Session.ISessionDirectory _sessions;   // 他人外观 PULL: 按 uid 找目标在线会话; 可空(上游注册表)
         private readonly GrowthCapsuleSyncService _growthCapsule;
         private readonly IMercenaryRestrictionService _mercenaryRestrictions;
+        private readonly Game.Dungeon.DungeonPersistentEffectApplicationService
+            _dungeonPersistentEffects;
+        private readonly Game.Dungeon.DungeonInstanceRegistry _dungeonInstances;
 
         public string ProtocolName => "GameProtocol";
 
@@ -35,6 +38,26 @@ namespace DfoServer.Network.Handlers
             GetUserInfoTemplate getUserInfoTemplate,
             Game.Session.ISessionDirectory sessions = null,
             IMercenaryRestrictionService mercenaryRestrictions = null)
+            : this(
+                null,
+                selectCharacterDataSource,
+                characterRepository,
+                getUserInfoTemplate,
+                sessions,
+                null,
+                mercenaryRestrictions)
+        {
+        }
+
+        internal CharacterSelectHandler(
+            Game.Dungeon.DungeonPersistentEffectApplicationService
+                dungeonPersistentEffects,
+            ISelectCharacterDataSource selectCharacterDataSource,
+            ICharacterRepository characterRepository,
+            GetUserInfoTemplate getUserInfoTemplate,
+            Game.Session.ISessionDirectory sessions = null,
+            Game.Dungeon.DungeonInstanceRegistry dungeonInstances = null,
+            IMercenaryRestrictionService mercenaryRestrictions = null)
         {
             _selectCharacterDataSource = selectCharacterDataSource ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
             _characterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
@@ -43,6 +66,8 @@ namespace DfoServer.Network.Handlers
             _sessions = sessions;
             _growthCapsule = new GrowthCapsuleSyncService(_characterRepository);
             _mercenaryRestrictions = mercenaryRestrictions;
+            _dungeonPersistentEffects = dungeonPersistentEffects;
+            _dungeonInstances = dungeonInstances;
         }
 
         // 按 UserId 找在线会话(他人外观拉取用)。
@@ -121,7 +146,10 @@ namespace DfoServer.Network.Handlers
             {
                 // 换角色前丢弃上一个角色的副本局: PlayerContext 实例跨角色复用, 不丢会把
                 // 上个角色的副本状态带给下个角色。
-                Dungeon.DungeonRunLifecycle.EndRunOnTeardown(session, "select_character");
+                Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
+                    session,
+                    "select_character",
+                    _dungeonInstances);
 
                 int slot = 0;
                 if (body != null && body.Length >= 2)
@@ -158,6 +186,28 @@ namespace DfoServer.Network.Handlers
 
                 if (record != null)
                 {
+                    if (_dungeonPersistentEffects != null)
+                    {
+                        var recovery = _dungeonPersistentEffects
+                            .RecoverCharacter(record.CharacterId);
+                        if (recovery.CommittedCount > 0)
+                        {
+                            record = _characterRepository.GetById(
+                                record.CharacterId) ?? record;
+                        }
+                        if (recovery.CommittedCount > 0
+                            || recovery.DeadLetterCount > 0
+                            || recovery.FailedCount > 0)
+                        {
+                            FileLogger.Log(
+                                $"[{ProtocolName}] dungeon effect recovery: " +
+                                $"cid={record.CharacterId} " +
+                                $"committed={recovery.CommittedCount} " +
+                                $"dead={recovery.DeadLetterCount} " +
+                                $"failed={recovery.FailedCount}");
+                        }
+                    }
+
                     SaveExistingInventoryLeaseBeforeReload(session, record.CharacterId);
                     var inventory = TryLoadInventoryForLease(
                         record.CharacterId,
@@ -543,7 +593,10 @@ namespace DfoServer.Network.Handlers
                     $"for character_id={session.Player.CharacterId}");
             }
 
-            Dungeon.DungeonRunLifecycle.EndRunOnTeardown(session, "return_select_character");
+            Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
+                session,
+                "return_select_character",
+                _dungeonInstances);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0007, CommonPacketBodyBuilder.BuildSuccessAck()));
             FileLogger.Log($"[{ProtocolName}] RETURN_SELECT_CHARACTER: sent ACK for session {session.SessionId}");
             await SendCharacterListAsync(session);

@@ -25,6 +25,9 @@ namespace DfoServer.SelfTests
             Check("mapped mob=61236 card 3726 respects PVF probability when seed 0 misses",
                 !IndependentDropCanProduceKnownCard(61236, 3726, 61, 0), ref failures);
 
+            Check("independent drop uses party attempts and fifth count cap",
+                IndependentDropUsesPartyAttemptsAndCap(), ref failures);
+
             Check("world drop PVF table does not contain monster cards",
                 !WorldDropContainsMonsterCards(), ref failures);
 
@@ -67,6 +70,8 @@ namespace DfoServer.SelfTests
                 monsterCode: monsterCode,
                 difficulty: 0,
                 dungeonLevel: dungeonLevel,
+                partyMemberCount: 1,
+                chronicleDropJobGroup: -1,
                 lcg: new DnfLcg(seed),
                 slotCounter: ref slotCounter);
 
@@ -95,6 +100,9 @@ namespace DfoServer.SelfTests
                 monsterCode: NoIndependentDropMonsterCode,
                 difficulty: DifficultyNormal,
                 dungeonLevel: DungeonLevel,
+                partyMemberCount: 1,
+                chronicleDropJobGroup: -1,
+                dropPolicy: DungeonDropPolicy.Standard,
                 slotCounter: ref slotCounter);
 
             for (int i = 0; i < drops.Count; i++)
@@ -103,6 +111,63 @@ namespace DfoServer.SelfTests
                     return false;
             }
             return true;
+        }
+
+        private static bool IndependentDropUsesPartyAttemptsAndCap()
+        {
+            const int MonsterCode = 61128;
+            const int ItemId = 3241;
+            const int Difficulty = 2;
+            const int DungeonLevel = 65;
+            var sawSingleDrop = false;
+            var sawFourPlayerCap = false;
+
+            for (uint seed = 0; seed < 128; seed++)
+            {
+                ushort singleSlotCounter = 0;
+                var singleDrops = IndependentDropSystem.GenerateDrops(
+                    MonsterCode,
+                    Difficulty,
+                    DungeonLevel,
+                    partyMemberCount: 1,
+                    chronicleDropJobGroup: -1,
+                    lcg: new DnfLcg(seed),
+                    slotCounter: ref singleSlotCounter);
+                var singleCount = CountItem(singleDrops, ItemId);
+                if (singleCount > 1)
+                    return false;
+                sawSingleDrop |= singleCount == 1;
+
+                ushort partySlotCounter = 0;
+                var partyDrops = IndependentDropSystem.GenerateDrops(
+                    MonsterCode,
+                    Difficulty,
+                    DungeonLevel,
+                    partyMemberCount: 4,
+                    chronicleDropJobGroup: -1,
+                    lcg: new DnfLcg(seed),
+                    slotCounter: ref partySlotCounter);
+                var partyDropCount = CountItem(partyDrops, ItemId);
+                if (partyDropCount > 4)
+                    return false;
+                sawFourPlayerCap |= partyDropCount == 4;
+
+                if (sawSingleDrop && sawFourPlayerCap)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static int CountItem(System.Collections.Generic.List<DropInfo> drops, int itemId)
+        {
+            var count = 0;
+            for (var i = 0; i < drops.Count; i++)
+            {
+                if (drops[i].TemplateId == itemId)
+                    count++;
+            }
+            return count;
         }
 
         private static bool WorldDropContainsMonsterCards()

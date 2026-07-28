@@ -13,21 +13,83 @@ namespace DfoServer.Network.Handlers.Dungeon
     // 单局字段随对象消失 -- 全仓不再有逐字段重置清单。
     internal static class DungeonRunLifecycle
     {
-        private const int GentInfiltrateClientTimerSyncGraceSeconds = 4;
-
         // 进本: 掐掉旧局残留定时器 -> 换新局。
-        internal static void BeginRun(EnhancedClientSession session, int dungeonId, byte difficulty)
+        internal static void BeginRun(
+            EnhancedClientSession session,
+            int dungeonId,
+            byte difficulty,
+            DungeonInstance sharedInstance = null,
+            DungeonInstanceRegistry instanceRegistry = null)
         {
             var towerItemIds = CaptureTowerItemIds(session);
-            CancelAutoFlip(session);
-            CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
-            Game.DeathTower.DeathTowerHandler.ClearTowerState(session);
+            var oldRun = session?.Player?.CurrentRun;
+            var returnAnchor = session?.Player?.CurrentDungeonSelection?.ReturnAnchor
+                ?? oldRun?.TownReturnAnchor
+                ?? default(DungeonTownReturnAnchor);
+            if (oldRun != null)
+            {
+                instanceRegistry?.Terminate(
+                    session.Player.CharacterId,
+                    oldRun.CaptureIdentity(),
+                    DungeonRunEndReason.ReplacedByNewRun.ToString());
+            }
+            CancelAllTimers(oldRun);
+            DeathTowerCoordinator.ClearTowerState(session);
 
-            session.Player.CurrentRun = new DungeonRun((short)dungeonId, difficulty);
-            SpecialDungeonRunCoordinator.InitializeRuntime(session, dungeonId, "begin_run");
+            var instance = sharedInstance ?? CreateInstance(dungeonId, difficulty);
+            if (instance.DungeonId != dungeonId || instance.Difficulty != difficulty)
+                throw new InvalidOperationException("A participant run must match its shared dungeon instance.");
+            var questSnapshot = CaptureQuestSnapshot(session);
+
+            DungeonRun newRun;
+            lock (session.Player.DungeonRunLifecycleSyncRoot)
+            {
+                oldRun?.TryBeginEnding();
+                var generation = session.Player.NextDungeonRunGeneration();
+                newRun = new DungeonRun(
+                    instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    generation,
+                    DungeonRunState.Created);
+                newRun.ChronicleDropJobGroup =
+                    GameWorld.IndependentDropDefinitionCatalog
+                        .ResolveChronicleDropJobGroup(
+                            session.Player.Job,
+                            session.Player.GrowType);
+                newRun.QuestSnapshot = questSnapshot;
+                newRun.TownReturnAnchor = returnAnchor;
+                newRun.TryBeginSelecting();
+                session.Player.ClearDungeonSelection();
+                session.Player.CurrentRun = newRun;
+            }
+            oldRun?.TryMarkEnded();
+            var runIdentity = newRun.CaptureIdentity();
+            if (!session.Player.IsCurrentDungeonRun(runIdentity))
+                return;
+            if (newRun.RewardPolicy.Kind != DungeonRewardPolicyKind.Standard)
+            {
+                FileLogger.Log(
+                    $"[DungeonRunLifecycle] configured reward policy " +
+                    $"cid={session.Player.CharacterId} dungeon={dungeonId} " +
+                    $"instance={newRun.PartyDungeonInstanceId} " +
+                    $"policy={newRun.RewardPolicy.Kind}");
+            }
+            if (newRun.DropDefinition.Kind != DungeonDropDefinitionKind.Standard)
+            {
+                FileLogger.Log(
+                    $"[DungeonRunLifecycle] configured drop definition " +
+                    $"cid={session.Player.CharacterId} dungeon={dungeonId} " +
+                    $"instance={newRun.PartyDungeonInstanceId} " +
+                    $"kind={newRun.DropDefinition.Kind} " +
+                    $"shared={newRun.DropDefinition.SharedDungeonId} " +
+                    $"classification={newRun.DropDefinition.ImpossibleClassification} " +
+                    $"jobGroup={newRun.ChronicleDropJobGroup} " +
+                    $"sources={newRun.DropPolicy.AllowedSources}");
+            }
+            DungeonMechanismCoordinator.OnRunCreated(session, newRun, "begin_run");
             RecalibrateTowerQuestOverlayWithoutNotification(session, towerItemIds);
-            PetCreatureRuntimeService.BeginDungeon(session, dungeonId, "begin_run");
+            if (session.Player.IsCurrentDungeonRun(runIdentity))
+                PetCreatureRuntimeService.BeginDungeon(session, runIdentity, "begin_run");
         }
 
         // 进塔: 塔是一局副本的变体, 同样换新局(顺带丢弃上一局的全部残留状态)。
@@ -35,65 +97,341 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             int dungeonId,
             Game.DeathTower.DeathTowerSession tower,
-            byte difficulty = 0)
+            byte difficulty = 0,
+            DungeonInstanceRegistry instanceRegistry = null)
         {
             var towerItemIds = CaptureTowerItemIds(session);
-            CancelAutoFlip(session);
-            CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
+            var oldRun = session?.Player?.CurrentRun;
+            var returnAnchor = session?.Player?.CurrentDungeonSelection?.ReturnAnchor
+                ?? oldRun?.TownReturnAnchor
+                ?? default(DungeonTownReturnAnchor);
+            if (oldRun != null)
+            {
+                instanceRegistry?.Terminate(
+                    session.Player.CharacterId,
+                    oldRun.CaptureIdentity(),
+                    DungeonRunEndReason.ReplacedByNewRun.ToString());
+            }
+            CancelAllTimers(oldRun);
+            DeathTowerCoordinator.ClearTowerState(session);
 
-            session.Player.CurrentRun = new DungeonRun((short)dungeonId, difficulty);
-            session.Player.CurrentRun.Tower = tower;
+            DungeonRun newRun;
+            var questSnapshot = CaptureQuestSnapshot(session);
+            lock (session.Player.DungeonRunLifecycleSyncRoot)
+            {
+                oldRun?.TryBeginEnding();
+                var instance = CreateInstance(dungeonId, difficulty);
+                newRun = new DungeonRun(
+                    instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    session.Player.NextDungeonRunGeneration(),
+                    DungeonRunState.Active);
+                newRun.ChronicleDropJobGroup =
+                    GameWorld.IndependentDropDefinitionCatalog
+                        .ResolveChronicleDropJobGroup(
+                            session.Player.Job,
+                            session.Player.GrowType);
+                newRun.QuestSnapshot = questSnapshot;
+                newRun.TownReturnAnchor = returnAnchor;
+                newRun.Tower = tower;
+                session.Player.ClearDungeonSelection();
+                session.Player.CurrentRun = newRun;
+            }
+            oldRun?.TryMarkEnded();
+            var runIdentity = newRun.CaptureIdentity();
+            if (!session.Player.IsCurrentDungeonRun(runIdentity))
+                return;
             RecalibrateTowerQuestOverlayWithoutNotification(session, towerItemIds);
-            PetCreatureRuntimeService.BeginDungeon(session, dungeonId, "begin_tower_run");
+            if (session.Player.IsCurrentDungeonRun(runIdentity))
+                PetCreatureRuntimeService.BeginDungeon(
+                    session,
+                    runIdentity,
+                    "begin_tower_run");
         }
 
-        // 返城(EPLP/回城/放弃): 先掐定时器(残留的翻牌定时器不能对下一局或城镇状态发包), 再丢弃本局。
-        internal static async Task EndRunToTownAsync(EnhancedClientSession session)
+        private static DungeonInstance CreateInstance(
+            int dungeonId,
+            byte difficulty)
+            => new DungeonInstance(
+                (short)dungeonId,
+                difficulty,
+                GameWorld.DungeonRewardPolicyData.Resolve(dungeonId),
+                GameWorld.DungeonDropDefinitionCatalog.Resolve(dungeonId));
+
+        // The only public ending entry. Every caller supplies its semantic
+        // reason and, when it originates from a delayed/client continuation,
+        // the run it expects to detach.
+        internal static Task<bool> EndRunAsync(
+            EnhancedClientSession session,
+            DungeonRunEndReason reason,
+            DungeonRunIdentity? expectedRun = null,
+            DungeonInstanceRegistry instanceRegistry = null)
         {
-            var tower = session?.Player?.CurrentRun?.Tower;
+            return reason == DungeonRunEndReason.SessionTeardown
+                || reason == DungeonRunEndReason.CharacterSwitch
+                ? Task.FromResult(EndRunOnTeardownCore(
+                    session,
+                    reason,
+                    instanceRegistry))
+                : EndRunToTownCoreAsync(
+                    session,
+                    reason,
+                    expectedRun,
+                    instanceRegistry);
+        }
+
+        internal static async Task EndRunToTownAsync(EnhancedClientSession session)
+            => await EndRunAsync(
+                session,
+                DungeonRunEndReason.ReturnToTown,
+                expectedRun: null);
+
+        internal static Task<bool> TryEndRunToTownAsync(
+            EnhancedClientSession session,
+            DungeonRunIdentity expectedIdentity)
+            => EndRunAsync(
+                session,
+                DungeonRunEndReason.ReturnToTown,
+                expectedIdentity);
+
+        internal static bool CanProjectTownState(
+            EnhancedClientSession session,
+            DungeonRunIdentity endedRunIdentity)
+        {
+            var player = session?.Player;
+            return endedRunIdentity.IsValid
+                && player != null
+                && player.CurrentRun == null
+                && player.CurrentDungeonRunGeneration
+                    == endedRunIdentity.RunGeneration;
+        }
+
+        private static async Task<bool> EndRunToTownCoreAsync(
+            EnhancedClientSession session,
+            DungeonRunEndReason reason,
+            DungeonRunIdentity? expectedIdentity,
+            DungeonInstanceRegistry instanceRegistry)
+        {
+            var player = session?.Player;
+            if (player == null)
+                return false;
+
+            if (!TryDetachCurrentRun(
+                    player,
+                    expectedIdentity,
+                    clearSelection: false,
+                    out var run))
+                return false;
+
+            instanceRegistry?.Terminate(
+                player.CharacterId,
+                run.CaptureIdentity(),
+                reason.ToString());
+
+            var tower = run.Tower;
             var towerItemIds = tower != null
                 ? new List<int>(tower.SeenItemIds)
                 : null;
-            CancelAutoFlip(session);
-            CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
-            PersistSessionExp(session, "town");
-            Game.DeathTower.DeathTowerHandler.ClearTowerState(session);
-            await SpecialDungeonNotifier.ClearRunBuffsAsync(session, "town");
-            await PetCreatureRuntimeService.EndDungeonToTownAsync(session, "town");
+            CancelAllTimers(run);
+            PersistSessionExp(session, run, reason.ToString());
+            run.Tower = null;
+            RecalibrateTowerQuestOverlayWithoutNotification(session, towerItemIds);
 
-            session.Player.DungeonSceneUniqueId = 0;
-            session.Player.CurrentRun = null;
-            if (towerItemIds != null
-                && towerItemIds.Count > 0
-                && session.GameSession?.QuestManager != null)
-            {
-                await session.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(towerItemIds);
-            }
+            await DungeonMechanismCoordinator.ClearRunEffectsAsync(
+                session,
+                run,
+                reason.ToString());
+            await PetCreatureRuntimeService.EndDungeonToTownAsync(
+                session,
+                run.CaptureIdentity(),
+                reason.ToString());
+            run.TryMarkEnded();
+            return true;
         }
 
         // 断线/换角色: 同样丢弃本局。
         // 换角色时必须丢弃当前局 -- PlayerContext 实例跨角色复用, 不丢会把上个角色的副本状态带给下个角色。
-        internal static void EndRunOnTeardown(EnhancedClientSession session, string source)
+        internal static void EndRunOnTeardown(
+            EnhancedClientSession session,
+            string source,
+            DungeonInstanceRegistry instanceRegistry = null)
         {
-            var towerItemIds = CaptureTowerItemIds(session);
-            CancelAutoFlip(session);
-            CancelDeathRespawn(session);
-            CancelSpecialDungeonTimer(session);
-            PersistSessionExp(session, source);
-            Game.DeathTower.DeathTowerHandler.ClearTowerState(session);
-            PetCreatureRuntimeService.EndCharacterSession(session, source);
+            var reason = string.Equals(
+                source,
+                "select_character",
+                StringComparison.OrdinalIgnoreCase)
+                || string.Equals(
+                    source,
+                    "return_select_character",
+                    StringComparison.OrdinalIgnoreCase)
+                ? DungeonRunEndReason.CharacterSwitch
+                : DungeonRunEndReason.SessionTeardown;
+            _ = EndRunAsync(
+                session,
+                reason,
+                instanceRegistry: instanceRegistry).GetAwaiter().GetResult();
+        }
 
-            session.Player.DungeonSceneUniqueId = 0;
-            session.Player.CurrentRun = null;
+        internal static bool DetachRunOnNetworkDisconnect(
+            EnhancedClientSession session,
+            DungeonInstanceRegistry instanceRegistry)
+        {
+            var player = session?.Player;
+            if (player == null || instanceRegistry == null)
+                return false;
+
+            DungeonRun run;
+            DungeonParticipantAttachmentSnapshot attachment;
+            DungeonAttachmentOperationStatus status;
+            lock (player.DungeonRunLifecycleSyncRoot)
+            {
+                run = player.CurrentRun;
+                if (run == null)
+                    return false;
+
+                status = instanceRegistry.TryDetach(
+                    session.Account?.AccountId ?? 0,
+                    player.CharacterId,
+                    player.UserId,
+                    session.SessionId,
+                    run.CaptureIdentity(),
+                    out attachment);
+                if (status != DungeonAttachmentOperationStatus.Success)
+                    return false;
+
+                player.CurrentRun = null;
+                player.DungeonSceneUniqueId = 0;
+                player.ClearDungeonSelection();
+            }
+
+            LinkedDungeonEntryAuthorizationStore.Clear(player);
+            CancelAllTimers(run);
+            PersistSessionExp(
+                session,
+                run,
+                DungeonRunEndReason.SessionTeardown.ToString());
+            PetCreatureRuntimeService.EndCharacterSession(
+                session,
+                "disconnect_detached");
+            FileLogger.Log(
+                $"[DungeonRunLifecycle] network detach preserved " +
+                $"cid={player.CharacterId} party={attachment.PartyId} " +
+                $"instance={attachment.RunIdentity.PartyDungeonInstanceId} " +
+                $"run={attachment.RunIdentity.RunId}/" +
+                $"{attachment.RunIdentity.RunGeneration} " +
+                $"attachmentGeneration={attachment.AttachmentGeneration}");
+            return true;
+        }
+
+        internal static bool AttachResumedRun(
+            EnhancedClientSession session,
+            DungeonParticipantAttachmentSnapshot attachment)
+        {
+            var player = session?.Player;
+            if (player == null
+                || attachment == null
+                || attachment.State != DungeonParticipantAttachmentState.Active
+                || attachment.CharacterId != player.CharacterId
+                || attachment.ParticipantUserId != player.UserId
+                || attachment.Run == null)
+            {
+                return false;
+            }
+
+            if (!player.TryAttachResumedDungeonRun(attachment.Run))
+                return false;
+
+            player.UserState = 0x01;
+            return true;
+        }
+
+        private static bool EndRunOnTeardownCore(
+            EnhancedClientSession session,
+            DungeonRunEndReason reason,
+            DungeonInstanceRegistry instanceRegistry)
+        {
+            var player = session?.Player;
+            if (player == null)
+                return false;
+
+            var detached = TryDetachCurrentRun(
+                player,
+                expectedIdentity: null,
+                clearSelection: true,
+                out var run);
+
+            var towerItemIds = run?.Tower != null
+                ? new List<int>(run.Tower.SeenItemIds)
+                : null;
+            if (run != null)
+            {
+                instanceRegistry?.Terminate(
+                    player.CharacterId,
+                    run.CaptureIdentity(),
+                    reason.ToString());
+            }
+            LinkedDungeonEntryAuthorizationStore.Clear(player);
+            CancelAllTimers(run);
+            PersistSessionExp(session, run, reason.ToString());
+            if (run != null)
+                run.Tower = null;
+            PetCreatureRuntimeService.EndCharacterSession(session, reason.ToString());
+
             RecalibrateTowerQuestOverlayWithoutNotification(session, towerItemIds);
+            run?.TryMarkEnded();
+            return detached;
+        }
+
+        private static bool TryDetachCurrentRun(
+            Game.Session.PlayerContext player,
+            DungeonRunIdentity? expectedIdentity,
+            bool clearSelection,
+            out DungeonRun run)
+        {
+            run = null;
+            if (player == null)
+                return false;
+
+            lock (player.DungeonRunLifecycleSyncRoot)
+            {
+                run = player.CurrentRun;
+                if (run == null
+                    || (expectedIdentity.HasValue
+                        && !run.Matches(expectedIdentity.Value)))
+                {
+                    return false;
+                }
+
+                run.TryBeginEnding();
+                player.CurrentRun = null;
+                player.DungeonSceneUniqueId = 0;
+                if (clearSelection)
+                    player.ClearDungeonSelection();
+                return true;
+            }
         }
 
         private static List<int> CaptureTowerItemIds(EnhancedClientSession session)
         {
             var tower = session?.Player?.CurrentRun?.Tower;
             return tower == null ? null : new List<int>(tower.SeenItemIds);
+        }
+
+        private static Game.Quests.QuestRunSnapshot CaptureQuestSnapshot(
+            EnhancedClientSession session)
+        {
+            try
+            {
+                return session?.GameSession?.QuestManager?.CaptureRunSnapshot()
+                    ?? Game.Quests.QuestRunSnapshot.Empty;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[DungeonRunLifecycle] quest snapshot failed closed: " +
+                    $"cid={session?.Player?.CharacterId ?? 0}: {ex.Message}");
+                return Game.Quests.QuestRunSnapshot.Empty;
+            }
         }
 
         private static void RecalibrateTowerQuestOverlayWithoutNotification(
@@ -120,143 +458,51 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         // 离开一局时把会话内存的等级/经验落库(实现收口在经验系统,
         // 这里只保留"仍在一局中才需要兜底"的副本生命周期判断)。
-        private static void PersistSessionExp(EnhancedClientSession session, string source)
+        private static void PersistSessionExp(
+            EnhancedClientSession session,
+            DungeonRun run,
+            string source)
         {
             var player = session?.Player;
-            if (player == null || player.CurrentRun == null)
+            if (player == null || run == null)
                 return;
 
             Game.Progression.CharacterExperienceService.PersistSessionExp(player, source);
         }
 
-        // 取消当前局的翻牌自动流程定时器(结算界面 2s 布局 + 4s 自动翻免费卡)。
-        // 先推进版本号, 让已经出队但还在异步发包的旧回调失效; 再取消仍挂在 ClockService 中的句柄。
         internal static void CancelAutoFlip(EnhancedClientSession session)
+            => CancelAutoFlip(session?.Player?.CurrentRun);
+
+        internal static void CancelAutoFlip(DungeonRun run)
         {
-            var run = session?.Player?.CurrentRun;
             if (run == null)
                 return;
 
-            Interlocked.Increment(ref run.AutoFlipTimerVersion);
-            var handle = Interlocked.Exchange(ref run.AutoFlipTimerHandle, null);
-            handle?.Cancel();
+            run.Timers.Cancel(DungeonRunTimerKeys.SettlementCardAutoFlow);
         }
 
         internal static void CancelDeathRespawn(EnhancedClientSession session)
+            => CancelDeathRespawn(session?.Player?.CurrentRun);
+
+        internal static void CancelDeathRespawn(DungeonRun run)
         {
-            var run = session?.Player?.CurrentRun;
             if (run == null)
                 return;
 
             run.IsWaitingDeathRespawn = false;
             run.DeathRespawnAvailableAt = System.DateTime.MinValue;
-            Interlocked.Increment(ref run.DeathRespawnTimerVersion);
-            var handle = Interlocked.Exchange(ref run.DeathRespawnTimerHandle, null);
-            handle?.Cancel();
+            run.Timers.Cancel(DungeonRunTimerKeys.CombatDeathRespawn);
         }
 
-        internal static void StartSpecialDungeonTimer(
-            EnhancedClientSession session,
-            string source)
+        internal static void CancelAllTimers(DungeonRun run)
         {
-            var run = session?.Player?.CurrentRun;
-            var special = run?.SpecialDungeon;
-            if (run == null
-                || special == null
-                || special.Kind != SpecialDungeonKind.GentInfiltrate)
-            {
-                return;
-            }
-
-            CancelSpecialDungeonTimer(session);
-            var seconds = special.GentInfiltrateTimerSeconds;
-            if (seconds <= 0)
-            {
-                FileLogger.Log(
-                    $"[SpecialDungeonModule] GENT_INFILTRATE timer skipped " +
-                    $"source={source} cid={session.Player.CharacterId} " +
-                    $"dungeon={special.DungeonId} reason=no_timer");
-                return;
-            }
-
-            var version = Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-            if (version == 0)
-                version = Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-
-            var scheduledSeconds =
-                seconds + GentInfiltrateClientTimerSyncGraceSeconds;
-            var timerName =
-                $"special-dungeon:gent-infiltrate:{session.Player.CharacterId}:{run.StartedUtc.Ticks}";
-            var handle = ClockService.Instance.ScheduleOneShotAfterAsync(
-                timerName,
-                TimeSpan.FromSeconds(scheduledSeconds),
-                async _ =>
-                {
-                    if (!IsSpecialDungeonTimerCurrent(session, run, version))
-                        return;
-
-                    await SpecialDungeonNotifier.MarkGentInfiltrateTimeoutAsync(
-                        session,
-                        "timer");
-                });
-
-            StoreSpecialDungeonTimerHandle(run, version, handle);
-            FileLogger.Log(
-                $"[SpecialDungeonModule] GENT_INFILTRATE timer scheduled " +
-                $"source={source} cid={session.Player.CharacterId} " +
-                $"dungeon={special.DungeonId} configSeconds={seconds} " +
-                $"scheduledSeconds={scheduledSeconds} " +
-                $"clientSyncGrace={GentInfiltrateClientTimerSyncGraceSeconds} " +
-                $"version={version}");
-        }
-
-        internal static void CancelSpecialDungeonTimer(
-            EnhancedClientSession session)
-        {
-            var run = session?.Player?.CurrentRun;
             if (run == null)
                 return;
 
-            Interlocked.Increment(ref run.SpecialDungeonTimerVersion);
-            var handle = Interlocked.Exchange(
-                ref run.SpecialDungeonTimerHandle,
-                null);
-            handle?.Cancel();
+            run.IsWaitingDeathRespawn = false;
+            run.DeathRespawnAvailableAt = DateTime.MinValue;
+            run.Timers.CancelAll();
         }
 
-        private static bool IsSpecialDungeonTimerCurrent(
-            EnhancedClientSession session,
-            DungeonRun run,
-            int version)
-            => session?.Player != null
-                && ReferenceEquals(session.Player.CurrentRun, run)
-                && run.SpecialDungeonTimerVersion == version;
-
-        private static void StoreSpecialDungeonTimerHandle(
-            DungeonRun run,
-            int version,
-            ClockService.ClockTimerHandle handle)
-        {
-            if (run.SpecialDungeonTimerVersion != version)
-            {
-                handle.Cancel();
-                return;
-            }
-
-            var previous = Interlocked.Exchange(
-                ref run.SpecialDungeonTimerHandle,
-                handle);
-            if (previous != null && !ReferenceEquals(previous, handle))
-                previous.Cancel();
-
-            if (run.SpecialDungeonTimerVersion != version)
-            {
-                Interlocked.CompareExchange(
-                    ref run.SpecialDungeonTimerHandle,
-                    null,
-                    handle);
-                handle.Cancel();
-            }
-        }
     }
 }

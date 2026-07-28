@@ -22,16 +22,31 @@ namespace DfoServer.Network.Handlers
         private readonly SqliteSubtype0FieldsRepository _subtype0Repository;
         private readonly HonorLevelSyncService _honorLevel;
         private readonly Game.Session.ISessionDirectory _sessions;   // 跨会话定位(邀请/广播); 单人/自测时可为 null。采用上游会话注册表(按 charId 查, 抗重连)
+        private readonly Game.Dungeon.DungeonInstanceRegistry _dungeonInstances;
         private const string ProtocolName = "GameProtocol";
 
         public PartyHandler(PartyManager partyManager, ICharacterRepository characterRepository,
             Game.Session.ISessionDirectory sessions = null)
+            : this(
+                partyManager,
+                characterRepository,
+                sessions,
+                dungeonInstances: null)
+        {
+        }
+
+        internal PartyHandler(
+            PartyManager partyManager,
+            ICharacterRepository characterRepository,
+            Game.Session.ISessionDirectory sessions,
+            Game.Dungeon.DungeonInstanceRegistry dungeonInstances)
         {
             _partyManager = partyManager;
             _characterRepository = characterRepository;
             _subtype0Repository = new SqliteSubtype0FieldsRepository(ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
             _honorLevel = new HonorLevelSyncService(characterRepository);
             _sessions = sessions;
+            _dungeonInstances = dungeonInstances;
             // 断线清理走会话目录的生命周期事件: 断线者自动退队, 剩余成员收到名册刷新。
             // 不订阅就会产生幽灵队员(断线者永久留在名册里)。事件在 session 从目录移除前触发,
             // 只向【剩余成员】发包, 绝不向垂死会话本身发(其 socket 已在关闭流程中)。
@@ -151,21 +166,109 @@ namespace DfoServer.Network.Handlers
         // 对应 df leave_user 的 set_state + sendInoutConditionDungeon。
         private async Task PullBackToTownIfInDungeonAsync(EnhancedClientSession s, string reason)
         {
-            if (s?.Player?.CurrentRun == null) return;
-            await Dungeon.DungeonRunLifecycle.EndRunToTownAsync(s);
+            var run = s?.Player?.CurrentRun;
+            if (run == null) return;
+            var runIdentity = run.CaptureIdentity();
+            if (!await Dungeon.DungeonRunLifecycle.EndRunAsync(
+                    s,
+                    Game.Dungeon.DungeonRunEndReason.PartyLeave,
+                    runIdentity,
+                    _dungeonInstances))
+            {
+                return;
+            }
+            if (!Dungeon.DungeonRunLifecycle.CanProjectTownState(s, runIdentity))
+                return;
             s.Player.UserState = 0x00;
             var snap = TownAreaNotificationBuilder.CreateCurrentSnapshot(s.Player);
             await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0003, EnterSelectDungeonStateBuilder.BuildUserState(s.Player)));
+            if (!Dungeon.DungeonRunLifecycle.CanProjectTownState(s, runIdentity))
+                return;
             await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0017, TownAreaNotificationBuilder.BuildUserArea(snap)));
+            if (!Dungeon.DungeonRunLifecycle.CanProjectTownState(s, runIdentity))
+                return;
             await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0018, TownAreaNotificationBuilder.BuildAreaUsers(snap)));
+            if (!Dungeon.DungeonRunLifecycle.CanProjectTownState(s, runIdentity))
+                return;
             await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00CA, new byte[] { 0x00 }));
+            if (!Dungeon.DungeonRunLifecycle.CanProjectTownState(s, runIdentity))
+                return;
             await UserInfoBroadcastService.SendSubtype0Async(
                 s,
                 _characterRepository,
                 _subtype0Repository,
                 _honorLevel,
                 $"{reason} subtype0");
+            if (!Dungeon.DungeonRunLifecycle.CanProjectTownState(s, runIdentity))
+                return;
             FileLogger.Log($"[{ProtocolName}] {reason}: cid={s.Player.CharacterId} 在副本内 → 清 run + 拉回城镇");
+        }
+
+        internal async Task<bool> TryRestoreDungeonParticipantAsync(
+            EnhancedClientSession session,
+            int partyId)
+        {
+            if (session?.Player == null
+                || partyId <= 0
+                || partyId > ushort.MaxValue)
+            {
+                return false;
+            }
+
+            var characterId = session.Player.CharacterId;
+            var userId = session.Player.UserId;
+            var current = _partyManager.GetPartyByUser(userId);
+            if (current != null && current.PartyId == partyId)
+                return true;
+
+            var party = _partyManager.GetPartyById(partyId);
+            if (party == null)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] DUNGEON_REJOIN party missing: " +
+                    $"cid={characterId} party={partyId}");
+                return false;
+            }
+
+            var join = _partyManager.Join(
+                partyId,
+                BuildMember(session, characterId));
+            if (!join.Ok)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] DUNGEON_REJOIN party restore rejected: " +
+                    $"cid={characterId} party={partyId} reason={join.Reason}");
+                return false;
+            }
+
+            await NotifyPriorPartyAsync(join.PriorPartyLeave);
+            await BroadcastPartyInfo(join.Party);
+            FileLogger.Log(
+                $"[{ProtocolName}] DUNGEON_REJOIN party restored: " +
+                $"cid={characterId} uid={userId} party={partyId}");
+            return true;
+        }
+
+        internal async Task RollbackDungeonParticipantRestoreAsync(
+            EnhancedClientSession session,
+            int partyId)
+        {
+            var userId = session?.Player?.UserId ?? 0;
+            if (userId == 0)
+                return;
+
+            var current = _partyManager.GetPartyByUser(userId);
+            if (current == null || current.PartyId != partyId)
+                return;
+
+            var leave = _partyManager.Leave(userId);
+            if (leave.Ok
+                && !leave.Disbanded
+                && leave.Party != null
+                && leave.Party.Count > 0)
+            {
+                await BroadcastPartyInfo(leave.Party);
+            }
         }
 
         // 0x00A6 CALL_PARTY_MEMBER_REALTIME_INFO: 客户端请求成员实时信息(空 body)→ 回 0x0099(HP% + 成员列表)。

@@ -3,26 +3,28 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DfoServer.Game.Accounts;
-using DfoServer.Network.Builders;
+using DfoServer.Game.DeathTower;
 using DfoServer.Game.Inventory;
 using DfoServer.Network;
+using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers;
+using GameDungeon = DfoServer.Game.Dungeon;
 
-namespace DfoServer.Game.DeathTower
+namespace DfoServer.Network.Handlers.Dungeon
 {
-    public sealed class DeathTowerHandler
+    public sealed class DeathTowerCoordinator
     {
         private readonly DeathTowerSettlementService _settlementService;
         private readonly Func<EnhancedClientSession, DeathTowerSettlementResult, Task> _sendExpGrantNotification;
         private readonly Func<EnhancedClientSession, Task> _sendInDungeonLevelUpFollowups;
         private readonly InventoryRefreshSender _inventoryRefresh;
 
-        public DeathTowerHandler()
+        public DeathTowerCoordinator()
             : this(null, null, null, null, null, null)
         {
         }
 
-        internal DeathTowerHandler(
+        internal DeathTowerCoordinator(
             string connectionString = null,
             DeathTowerExperienceGrantInTransaction grantExperienceInTransaction = null,
             Func<EnhancedClientSession, DeathTowerSettlementResult, Task> sendExpGrantNotification = null,
@@ -158,10 +160,10 @@ namespace DfoServer.Game.DeathTower
         private static Task SyncCurrentStageClearMapAsync(EnhancedClientSession session, DeathTowerSession tower, string source)
         {
             var mapId = tower.GetCurrentMapId();
-            return Network.Handlers.Dungeon.DungeonClearMapQuestSync.SyncAsync(session, 0, mapId, source);
+            return DungeonClearMapQuestSync.SyncAsync(session, 0, mapId, source);
         }
 
-        // 返城时清除塔状�?由生命周期统一清理路径调用; run 置换后本方法只负责日志与提前摘除)
+        // 返城时清除塔状�?由生命周期统一清理路径调用; run 置换后本方法只负责日志与提前摘除)
         public static void ClearTowerState(EnhancedClientSession session)
         {
             var run = session?.Player?.CurrentRun;
@@ -187,7 +189,20 @@ namespace DfoServer.Game.DeathTower
             {
                 try
                 {
-                    settlement = _settlementService.Grant(session, tower);
+                    if (!TryGetOwnedInventory(session, out var lease))
+                    {
+                        throw new InvalidOperationException(
+                            $"Death tower settlement requires owned online inventory for character {cid}.");
+                    }
+
+                    var context = new DeathTowerSettlementContext(
+                        cid,
+                        session.Account?.AccountId ?? 1,
+                        session.Player.Level,
+                        session.Player.Exp);
+                    settlement = _settlementService.Grant(context, tower, lease);
+                    session.Player.Exp = settlement.ExperienceGrant.NewExp;
+                    session.Player.Level = settlement.ExperienceGrant.NewLevel;
                 }
                 catch (Exception ex)
                 {
@@ -279,6 +294,17 @@ namespace DfoServer.Game.DeathTower
             FileLogger.Log($"[DeathTower] SENT 0x008F STAGE_MAP: stage={tower.CurrentStage} map={mapId} monsters={monsters.Count} items={items.Count} seed={stageSeed} bodyLen={body.Length}");
         }
 
+        private static bool TryGetOwnedInventory(
+            EnhancedClientSession session,
+            out InventoryLease lease)
+        {
+            lease = null;
+            var characterId = session?.Player?.CharacterId ?? 0;
+            return characterId > 0
+                && InventoryContext.TryGetLease(characterId, out lease)
+                && lease.IsOwnedBy(session.SessionId);
+        }
+
         private static void SyncCombatStage(
             EnhancedClientSession session,
             DeathTowerSession tower,
@@ -319,12 +345,12 @@ namespace DfoServer.Game.DeathTower
         public bool TryGenerateDropsForMonster(
             EnhancedClientSession session,
             ushort monsterUniqueId,
-            out IReadOnlyList<Dungeon.DropInfo> drops)
+            out IReadOnlyList<GameDungeon.DropInfo> drops)
         {
             var tower = session?.Player?.DeathTowerState;
             if (tower == null)
             {
-                drops = Array.Empty<Dungeon.DropInfo>();
+                drops = Array.Empty<GameDungeon.DropInfo>();
                 return false;
             }
 
@@ -355,7 +381,7 @@ namespace DfoServer.Game.DeathTower
                     (ushort)pickup.DestinationSlot,
                     7)));
             await SendInventoryUpdates(session, tower, pickup.ChangedSlots);
-            await SyncTowerQuestProgress(session, tower, pickup.ItemId);
+            RecalibrateTowerQuestProgress(session, tower, pickup.ItemId);
             FileLogger.Log($"[DeathTower] GET_ITEM: cid={session.Player.CharacterId} sceneSlot={sceneSlot} item={pickup.ItemId} towerSlot={pickup.DestinationSlot}");
             return true;
         }
@@ -402,7 +428,7 @@ namespace DfoServer.Game.DeathTower
                     instanceValue,
                     expectedItemId)));
             await SendInventoryUpdates(session, tower, mutation.ChangedSlots);
-            await SyncTowerQuestProgress(session, tower, mutation.ItemId);
+            RecalibrateTowerQuestProgress(session, tower, mutation.ItemId);
             FileLogger.Log($"[DeathTower] USE_STACKABLE: cid={session.Player.CharacterId} slot={slot} item={expectedItemId} remaining={mutation.RemainingCount}");
             return true;
         }
@@ -538,15 +564,15 @@ namespace DfoServer.Game.DeathTower
                 && (ItemSlotBoundService.IsMainQuickSlot(slot)
                     || tower.InventoryItems.ContainsKey(slot));
 
-        private static Task SyncTowerQuestProgress(
+        private static void RecalibrateTowerQuestProgress(
             EnhancedClientSession session,
             DeathTowerSession tower,
             int itemId)
         {
             var questManager = session?.GameSession?.QuestManager;
             if (questManager == null || itemId <= 0)
-                return Task.CompletedTask;
-            return questManager.SyncItemSeekingQuestProgressAsync(
+                return;
+            questManager.RecalibrateItemSeekingQuestProgressWithoutNotification(
                 new[] { itemId },
                 tower.GetItemCountsSnapshot());
         }

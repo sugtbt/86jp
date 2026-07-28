@@ -304,11 +304,8 @@ namespace DfoServer.SelfTests
                     },
                     KnightShieldDeck = repository.Load(CharacterId),
                 };
-                var fullInitPackets = new System.Collections.Generic.List<byte[]>(
-                    SelectCharacterPacketBuilder.BuildPacketStream(
-                        new FixedSelectCharacterDataSource(streamSnapshot),
-                        CharacterId,
-                        AccountId));
+                var fullInitPackets = BuildPacketStreamWithOnlineInventory(
+                    new FixedSelectCharacterDataSource(streamSnapshot));
                 var fullDeckCount = 0;
                 var fullDeckIndex = -1;
                 var fullSubtype0Index = -1;
@@ -348,20 +345,17 @@ namespace DfoServer.SelfTests
                     new[] { 113370025, 113370026, 113370029, 0, 113370036 });
                 streamSnapshot.CharacterRecord.GrowType = 2;
                 streamSnapshot.KnightShieldDeck = crossGrowTypeDeck;
-                var crossGrowTypePackets = new System.Collections.Generic.List<byte[]>(
-                    SelectCharacterPacketBuilder.BuildPacketStream(
-                        new FixedSelectCharacterDataSource(streamSnapshot),
-                        CharacterId,
-                        AccountId,
-                        new System.Collections.Generic.List<SelectCharacterPacketTemplate>
+                var crossGrowTypePackets = BuildPacketStreamWithOnlineInventory(
+                    new FixedSelectCharacterDataSource(streamSnapshot),
+                    new List<SelectCharacterPacketTemplate>
+                    {
+                        new SelectCharacterPacketTemplate
                         {
-                            new SelectCharacterPacketTemplate
-                            {
-                                Kind = SelectCharacterPacketTemplateKind.Raw,
-                                Command = 0x00,
-                                Type = KnightShieldDeckBodyBuilder.DeckNotificationType,
-                            },
-                        }));
+                            Kind = SelectCharacterPacketTemplateKind.Raw,
+                            Command = 0x00,
+                            Type = KnightShieldDeckBodyBuilder.DeckNotificationType,
+                        },
+                    });
                 Check("cross-grow-type init keeps authoritative shield ids without aliases",
                     CountPackets(
                         crossGrowTypePackets,
@@ -376,11 +370,8 @@ namespace DfoServer.SelfTests
                         KnightShieldDeckBodyBuilder.BuildDeck(crossGrowTypeDeck)));
 
                 streamSnapshot.CharacterRecord.Job = 0;
-                var nonGuardianPackets = new System.Collections.Generic.List<byte[]>(
-                    SelectCharacterPacketBuilder.BuildPacketStream(
-                        new FixedSelectCharacterDataSource(streamSnapshot),
-                        CharacterId,
-                        AccountId));
+                var nonGuardianPackets = BuildPacketStreamWithOnlineInventory(
+                    new FixedSelectCharacterDataSource(streamSnapshot));
                 Check("non-guardian init does not send 0x0245",
                     CountPackets(
                         nonGuardianPackets,
@@ -932,6 +923,35 @@ SELECT
             }
             catch
             {
+            }
+        }
+
+        private static List<byte[]> BuildPacketStreamWithOnlineInventory(
+            ISelectCharacterDataSource dataSource,
+            List<SelectCharacterPacketTemplate> templates = null)
+        {
+            var sessionId = Guid.NewGuid();
+            InventoryContext.Register(
+                sessionId,
+                CharacterId,
+                new InventoryService(CharacterId, AccountId));
+            try
+            {
+                var packets = templates == null
+                    ? SelectCharacterPacketBuilder.BuildPacketStream(
+                        dataSource,
+                        CharacterId,
+                        AccountId)
+                    : SelectCharacterPacketBuilder.BuildPacketStream(
+                        dataSource,
+                        CharacterId,
+                        AccountId,
+                        templates);
+                return new List<byte[]>(packets);
+            }
+            finally
+            {
+                InventoryContext.Unregister(sessionId, CharacterId);
             }
         }
 

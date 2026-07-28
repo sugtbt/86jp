@@ -1,48 +1,98 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
-using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
-using DfoServer.Game.Skills;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
-using DfoServer.Network.Handlers.Pets;
+using DfoServer.Network.Handlers;
+using DfoServer.Network.Parsers.Quest;
 
 namespace DfoServer.Game.Quests
 {
     public sealed class QuestManager
     {
+        private static readonly TimeSpan DefaultHuntMonsterEchoGrace =
+            TimeSpan.FromMilliseconds(500);
+
         private readonly ISessionPacketSender _sender;
         private readonly string _connStr;
-        private readonly string _databasePath;
         private readonly QuestService _service;
-        private readonly SqliteCharacterRepository _characterRepository;
-        private readonly SqliteCharacterProgressRepository _progressRepository;
-        private readonly HonorLevelSyncService _honorLevel;
-        private readonly SqliteSubtype0FieldsRepository _subtype0Repository;
-        private readonly GrowthCapsuleProgressRepository _growthCapsuleRepository;
+        private readonly DailyChallengeService _dailyChallengeService;
+        private readonly ImageCommunicationApplicationService
+            _imageCommunicationService;
+        private readonly QuestNotifySelectionService _notifySelectionService;
+        private readonly QuestNotificationProjector _notifications;
+        private readonly TimeSpan _huntMonsterEchoGrace;
+        private readonly ClockService _clock;
+        private readonly object _huntMonsterProjectionSync = new object();
+        private ClockService.ClockTimerHandle _huntMonsterProjectionTimer;
+        private int _huntMonsterProjectionVersion;
 
         public QuestManager(ISessionPacketSender sender, string connStr)
+            : this(
+                sender,
+                connStr,
+                DefaultHuntMonsterEchoGrace,
+                ClockService.Instance)
+        {
+        }
+
+        internal QuestManager(
+            ISessionPacketSender sender,
+            string connStr,
+            TimeSpan huntMonsterEchoGrace,
+            ClockService clock)
         {
             _sender = sender;
             _connStr = connStr;
-            _databasePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connStr).DataSource;
+            _huntMonsterEchoGrace = huntMonsterEchoGrace > TimeSpan.Zero
+                ? huntMonsterEchoGrace
+                : DefaultHuntMonsterEchoGrace;
+            _clock = clock ?? throw new ArgumentNullException(nameof(clock));
             _service = new QuestService(connStr);
-            _characterRepository = new SqliteCharacterRepository(_databasePath, ServerPaths.SchemaFilePath);
-            _progressRepository = SqliteCharacterProgressRepository.FromConnectionString(connStr);
-            _honorLevel = new HonorLevelSyncService(
-                _characterRepository,
-                _databasePath,
+            _dailyChallengeService = new DailyChallengeService(connStr);
+            _imageCommunicationService =
+                new ImageCommunicationApplicationService(connStr);
+            _notifySelectionService = new QuestNotifySelectionService(connStr);
+            var databasePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connStr).DataSource;
+            var characterRepository = new SqliteCharacterRepository(
+                databasePath,
                 ServerPaths.SchemaFilePath);
-            _subtype0Repository = new SqliteSubtype0FieldsRepository(
-                _databasePath, ServerPaths.SchemaFilePath);
-            _growthCapsuleRepository = new GrowthCapsuleProgressRepository(
-                _databasePath, ServerPaths.SchemaFilePath);
+            var progressRepository = SqliteCharacterProgressRepository.FromConnectionString(connStr);
+            var honorLevel = new HonorLevelSyncService(
+                characterRepository,
+                databasePath,
+                ServerPaths.SchemaFilePath);
+            var subtype0Repository = new SqliteSubtype0FieldsRepository(
+                databasePath,
+                ServerPaths.SchemaFilePath);
+            var growthCapsuleRepository = new GrowthCapsuleProgressRepository(
+                databasePath,
+                ServerPaths.SchemaFilePath);
+            _notifications = new QuestNotificationProjector(
+                sender,
+                connStr,
+                databasePath,
+                characterRepository,
+                progressRepository,
+                honorLevel,
+                subtype0Repository,
+                growthCapsuleRepository);
+        }
+
+        public QuestRunSnapshot CaptureRunSnapshot()
+        {
+            var characterId = _sender.CharacterId;
+            return characterId > 0
+                ? QuestRunSnapshot.Capture(
+                    QuestService.LoadActiveQuests(_connStr, characterId))
+                : QuestRunSnapshot.Empty;
         }
 
         private static byte[] StripEcho(byte[] body)
@@ -59,16 +109,74 @@ namespace DfoServer.Game.Quests
             FileLogger.Log($"[GameProtocol] ACCEPT_QUEST payload: {(qBody != null ? BitConverter.ToString(qBody) : "null")} ({qBody?.Length ?? 0}B)");
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
-            var result = _service.HandleAcceptQuest(cid, qBody, _sender.AccountId);
+            var result = QuestCommandParser.TryParseAccept(qBody, out var command)
+                ? _service.HandleAcceptQuest(cid, command, _sender.AccountId)
+                : QuestAcceptResult.Fail(23);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildAccept(result));
         }
 
-        public async Task HandleGiveupQuestAsync(ushort wireType, byte[] body)
+        public async Task HandleImageCommunicationEquipmentUseAsync(
+            ushort wireType,
+            byte[] body)
+        {
+            ImageCommunicationUseResult result;
+            if (!QuestCommandParser.TryParseImageCommunicationUse(
+                    body,
+                    out var command))
+            {
+                result = new ImageCommunicationUseResult
+                {
+                    Status = ImageCommunicationUseStatus.NoMatchingActiveQuest,
+                };
+            }
+            else
+            {
+                result = _imageCommunicationService.Apply(
+                    _sender.CharacterId,
+                    command);
+            }
+
+            await _sender.SendCmdAckAsync(
+                wireType,
+                ImageCommunicationAckBuilder.Build(result.NpcIndex));
+
+            if (!result.Success)
+            {
+                FileLogger.Log(
+                    $"[ImageCommunication] use rejected "
+                    + $"cid={_sender.CharacterId} status={result.Status} "
+                    + $"bodyLen={body?.Length ?? 0}");
+            }
+        }
+
+        public async Task HandleGiveupQuestAsync(
+            ushort wireType,
+            byte[] body,
+            Guid sessionId)
         {
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
-            var result = _service.HandleGiveupQuest(cid, qBody);
+            InventoryLease lease = null;
+            if (InventoryContext.TryGetLease(cid, out var candidateLease)
+                && candidateLease.IsOwnedBy(sessionId))
+            {
+                lease = candidateLease;
+            }
+            var result = QuestCommandParser.TryParseGiveup(qBody, out var command)
+                ? _service.HandleGiveupQuest(cid, command, lease)
+                : QuestGiveupResult.Fail(19);
+            if (result.Success && result.InventoryChanges.HasChanges)
+            {
+                foreach (var group in result.InventoryChanges.Slots
+                    .GroupBy(change => change.ListType))
+                {
+                    await InventoryRefreshSender.SendOnlineUpdateItemList(
+                        _sender,
+                        group.Key,
+                        group.Select(change => change.SlotIndex));
+                }
+            }
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildGiveup(result));
         }
 
@@ -80,7 +188,23 @@ namespace DfoServer.Game.Quests
             int cid = _sender.CharacterId;
             if (cid <= 0) return null;
 
+            if (_dailyChallengeService.TryHandleSetTrigger(cid, qBody, out var dailyChallenge))
+            {
+                await _sender.SendNotiAsync(
+                    0x0286,
+                    DailyChallengeBodyBuilder.Build(dailyChallenge.Snapshot));
+                return dailyChallenge.Ack;
+            }
+
             QuestSetTriggerResult deferred;
+            if (TryBuildServerDrivenHuntMonsterEcho(cid, qBody, out deferred))
+            {
+                await _sender.SendCmdAckAsync(
+                    wireType,
+                    QuestAckBuilder.BuildSetTrigger(deferred));
+                return deferred;
+            }
+
             if (TryBuildDeferredClearMapSetTrigger(cid, qBody, out deferred))
             {
                 await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildSetTrigger(deferred));
@@ -92,151 +216,75 @@ namespace DfoServer.Game.Quests
             return result;
         }
 
+        internal DailyChallengeRewardClaimResult HandleDailyChallengeReward(
+            Guid sessionId,
+            byte[] body)
+        {
+            var characterId = _sender.CharacterId;
+            if (characterId <= 0 || body == null || body.Length != 4)
+            {
+                return DailyChallengeRewardClaimResult.Rejected(
+                    DailyChallengeRewardClaimStatus.InvalidRequest,
+                    -1,
+                    null);
+            }
+
+            var groupIndex = BitConverter.ToInt32(body, 0);
+            if (!InventoryContext.TryGetLease(characterId, out var lease)
+                || !lease.IsOwnedBy(sessionId))
+            {
+                return DailyChallengeRewardClaimResult.Rejected(
+                    DailyChallengeRewardClaimStatus.InvalidRequest,
+                    groupIndex,
+                    null);
+            }
+
+            return _dailyChallengeService.ClaimReward(
+                characterId,
+                _sender.Player?.Level ?? 0,
+                groupIndex,
+                lease);
+        }
+
         public async Task HandleFinishQuestAsync(ushort wireType, byte[] body)
         {
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
-            var result = _service.HandleFinishQuest(cid, qBody, _sender.Player?.Exp);
-
-            // 转职/觉醒后在 ACK 之前重发全量技能表(0x0013), 客户端整体替换, 面板即时刷新。
-            if (result.Success && (result.ChainType == 1 || result.ChainType == 2))
-                await SendSkillInfoRefreshAsync(cid);
-
+            var result = QuestCommandParser.TryParseFinish(qBody, out var command)
+                ? _service.HandleFinishQuest(cid, command, _sender.Player?.Exp)
+                : QuestFinishResult.Fail(22);
+            await _notifications.SendPreFinishAckNotificationsAsync(cid, result);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildFinish(result));
+            await _notifications.ProjectFinishedQuestAsync(cid, result);
+        }
 
-            if (!result.Success)
+        public void HandleSaveQuestNotify(byte[] body)
+        {
+            var characterId = _sender.CharacterId;
+            if (characterId <= 0)
                 return;
 
-            var player = _sender.Player;
-            var prevLevel = player.Level;
-
-            // 经验/等级已在完成事务内落库(见 QuestService), 这里只同步会话内存。
-            if (result.Exp > 0)
+            if (!QuestCommandParser.TryParseSaveNotify(body, out var command)
+                || !_notifySelectionService.TryReplace(characterId, command))
             {
-                player.Exp = result.NewExp;
-                player.Level = result.NewLevel;
+                var bodyHex = body == null ? "null" : BitConverter.ToString(body);
+                FileLogger.Log(
+                    $"[QuestManager] SAVE_QUEST_NOTIFY rejected: " +
+                    $"cid={characterId} body={bodyHex}");
+                return;
             }
 
-            var leveledUp = player.Level > prevLevel;
-            var inDungeon = player.CurrentRun != null;
-            var needsExpNotification = result.Exp > 0 || leveledUp;
-            SkillPointProtocolState? skillPoints = null;
-            if (needsExpNotification)
-            {
-                try
-                {
-                    var rec = _characterRepository.GetById(cid);
-                    if (rec != null)
-                    {
-                        Characters.CharacterStatComputer.DecodeGrowType(rec.GrowType, out var fGrow, out var sGrow);
-                        skillPoints = SkillStateService.LoadProtocolState(
-                            _progressRepository,
-                            cid,
-                            rec.Job,
-                            player.Level,
-                            rec.BonusSp,
-                            rec.BonusTp,
-                            persist: leveledUp,
-                            growType: fGrow,
-                            secondGrowType: sGrow);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log($"[QuestManager] SP calc ERROR: {ex.Message}");
-                }
-            }
-
-            var refreshesCharacterState = leveledUp
-                || result.ChainType == 1
-                || result.ChainType == 2
-                || result.ChainType == 20
-                || result.ChainType == GameWorld.QuestData.ChainTypeSlotExpansion;
-            HonorLevelSummary honorLevel = null;
-            GrowthCapsuleSummary growthCapsule = null;
-            if (result.HonorExp > 0)
-            {
-                honorLevel = HonorLevelDataProvider.CalculateFromHonorExp(result.TotalHonorExp, 0);
-                growthCapsule = GrowthCapsuleDataProvider.Calculate(result.TotalGrowthCapsuleExp);
-            }
-            else if (needsExpNotification || refreshesCharacterState)
-                honorLevel = ResolveHonorLevelForExp();
-            if (needsExpNotification && player.Level >= ExpTableProvider.MaxLevel && growthCapsule == null)
-                growthCapsule = _growthCapsuleRepository.LoadSummary(_sender.AccountId);
-            if (result.HonorExp > 0 && player.Subtype0Tail != null)
-                HonorLevelDataProvider.ApplyToSubtype0Tail(player.Subtype0Tail, honorLevel);
-            // 城镇内升级: 先推角色状态(subtype0)+属性(subtype1)再发经验包, 面板即时刷新。
-            // 副本内升级绝不能发角色状态包(subtype0) -- 它会打乱客户端的副本内角色状态,
-            // 实测导致清房后无法进下一个门; 副本内沿用旧时序(经验包之后只补属性)。
-            if (leveledUp && !inDungeon)
-            {
-                await SendUserInfoSubtype0Broadcast("LevelUp", honorLevel);
-                await SendUserInfoBroadcast(cid, honorLevel);
-            }
-
-            if (needsExpNotification && skillPoints.HasValue)
-            {
-                await _sender.SendNotiAsync(0x0025,
-                    ExpNotificationBuilder.Build(
-                        player.Level, player.Exp, skillPoints.Value, honorLevel,
-                        growthCapsuleExp: GrowthCapsuleDataProvider.GetDisplayProgress(
-                            player.Level, growthCapsule)));
-            }
-            else if (needsExpNotification)
-            {
-                FileLogger.Log($"[QuestManager] EXP notification skipped: skill-point protocol state unavailable for cid={cid}");
-            }
-
-            if (leveledUp)
-            {
-                FileLogger.Log($"[QuestManager] LEVEL UP from quest: cid={cid} {prevLevel}->{player.Level} exp={player.Exp} inDungeon={inDungeon}");
-                if (inDungeon)
-                    await SendUserInfoBroadcast(cid, honorLevel);
-            }
-
-            if (result.HonorExp > 0)
-            {
-                FileLogger.Log($"[QuestManager] HONOR_EXP_GAIN quest: account={_sender.AccountId} cid={cid} gain={result.HonorExp} total={result.TotalHonorExp}");
-                FileLogger.Log($"[QuestManager] GROWTH_CAPSULE_EXP_GAIN quest: account={_sender.AccountId} cid={cid} gain={result.GrowthCapsuleExp} total={result.TotalGrowthCapsuleExp}");
-            }
-
-            if (result.ChainType == 1 || result.ChainType == 2)
-            {
-                await SendJobChangeNotification(cid, honorLevel);
-                await SendUserInfoBroadcast(cid, honorLevel);
-            }
-            else if (result.ChainType == 20)
-            {
-                await SendExpertJobChangeNotification(cid, result.GrowNumber, honorLevel);
-                await SendUserInfoBroadcast(cid, honorLevel);
-            }
-            else if (result.ChainType == GameWorld.QuestData.ChainTypeSlotExpansion)
-            {
-                // The ACK completes the quest, but the client opens the visual slot from refreshed subtype1 data.
-                await SendUserInfoBroadcast(cid, honorLevel);
-            }
-            else if ((result.ChainType == 10 || result.ChainType == 25) && result.PetCreatureEvolution.Changed)
-            {
-                await PetCreatureRuntimeService.SendPetCreatureEvolutionAsync(_sender, result.PetCreatureEvolution);
-            }
-
-            var noti = BuildAcceptedQuestNoti(cid);
-            await _sender.SendNotiAsync(0x023F, noti);
-            await SendAcceptableQuestListAsync();
+            FileLogger.Log(
+                $"[QuestManager] SAVE_QUEST_NOTIFY persisted: " +
+                $"cid={characterId} count={command.QuestIds.Count}");
         }
 
         public async Task SendActiveQuestListAsync()
         {
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
-            var noti = BuildAcceptedQuestNoti(cid);
-            await _sender.SendNotiAsync(0x023F, noti);
-        }
-
-        public async Task SyncMonsterRewardItemProgressAsync(ICollection<int> itemFilter)
-        {
-            await SyncItemSeekingQuestProgressAsync(itemFilter);
+            await _notifications.SendActiveQuestListAsync(cid);
         }
 
         public async Task SyncItemSeekingQuestProgressAsync(
@@ -246,42 +294,253 @@ namespace DfoServer.Game.Quests
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
 
-            bool matched = _service.SyncItemSeekingQuestProgress(
-                cid,
-                _sender.AccountId,
+            bool matched = SyncItemSeekingQuestProgressWithoutNotification(
                 itemFilter,
                 temporaryHeldCounts);
             if (!matched)
                 return;
 
-            var noti = BuildAcceptedQuestNoti(cid);
-            await _sender.SendNotiAsync(0x023F, noti);
+            await _notifications.SendActiveQuestListAsync(cid);
         }
 
-        public void RecalibrateItemSeekingQuestProgressWithoutNotification(
-            ICollection<int> itemFilter)
+        public bool SyncItemSeekingQuestProgressWithoutNotification(
+            ICollection<int> itemFilter,
+            IReadOnlyDictionary<int, int> temporaryHeldCounts = null)
         {
-            var cid = _sender.CharacterId;
+            int cid = _sender.CharacterId;
             if (cid <= 0)
-                return;
+                return false;
 
-            _service.SyncItemSeekingQuestProgress(
+            return _service.SyncItemSeekingQuestProgress(
                 cid,
                 _sender.AccountId,
-                itemFilter);
+                itemFilter,
+                temporaryHeldCounts);
         }
 
-        public async Task SyncClearMapQuestProgressAsync(int dungeonId, int mapId)
+        public bool RecalibrateItemSeekingQuestProgressWithoutNotification(
+            ICollection<int> itemFilter,
+            IReadOnlyDictionary<int, int> temporaryHeldCounts = null)
+        {
+            return SyncItemSeekingQuestProgressWithoutNotification(
+                itemFilter,
+                temporaryHeldCounts);
+        }
+
+        public async Task SyncClearMapQuestProgressAsync(
+            int dungeonId,
+            int mapId,
+            Guid sourceEventId = default,
+            IReadOnlyCollection<ushort> eligibleQuestIds = null)
         {
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
 
-            bool changed = _service.SyncClearMapQuestProgress(cid, dungeonId, mapId);
+            bool changed = _service.SyncClearMapQuestProgress(
+                cid,
+                dungeonId,
+                mapId,
+                sourceEventId,
+                eligibleQuestIds);
             if (!changed)
                 return;
 
-            var noti = BuildAcceptedQuestNoti(cid);
-            await _sender.SendNotiAsync(0x023F, noti);
+            await _notifications.SendActiveQuestListAsync(cid);
+        }
+
+        public async Task SyncHuntMonsterQuestProgressAsync(
+            int dungeonId,
+            int difficulty,
+            int monsterCode,
+            Guid sourceEventId = default,
+            IReadOnlyCollection<ushort> eligibleQuestIds = null,
+            DungeonRunIdentity sourceRunIdentity = default)
+        {
+            var cid = _sender.CharacterId;
+            if (cid <= 0 || dungeonId <= 0 || monsterCode <= 0)
+                return;
+
+            var changes = _service.SyncHuntMonsterQuestProgress(
+                cid,
+                dungeonId,
+                difficulty,
+                monsterCode,
+                sourceEventId,
+                eligibleQuestIds);
+            if (changes.Count == 0)
+                return;
+
+            var run = _sender.Player?.CurrentRun;
+            if (run != null
+                && (!sourceRunIdentity.IsValid
+                    || run.Matches(sourceRunIdentity)))
+            {
+                foreach (var change in changes)
+                {
+                    var channelIndex = FindDecrementedTriggerChannel(change);
+                    if (channelIndex >= 0)
+                    {
+                        run.MarkServerDrivenHuntMonsterTrigger(
+                            change.QuestId,
+                            channelIndex);
+                    }
+                }
+
+                if (run.HasPendingServerDrivenHuntMonsterTriggers())
+                    ScheduleHuntMonsterProjectionFallback(run, cid);
+            }
+        }
+
+        private bool TryBuildServerDrivenHuntMonsterEcho(
+            int characterId,
+            byte[] qBody,
+            out QuestSetTriggerResult result)
+        {
+            result = null;
+            if (qBody == null || qBody.Length < 3)
+                return false;
+
+            var triggerType = qBody[2];
+            var isIncrement = qBody.Length >= 4 && qBody[3] != 0;
+            if (triggerType == 1 || isIncrement)
+                return false;
+
+            var questId = BitConverter.ToUInt16(qBody, 0);
+            var run = _sender.Player?.CurrentRun;
+            if (run == null
+                || !run.TryConsumeServerDrivenHuntMonsterTrigger(
+                    questId,
+                    triggerType))
+            {
+                return false;
+            }
+
+            if (!run.HasPendingServerDrivenHuntMonsterTriggers())
+                CancelHuntMonsterProjectionFallback();
+
+            var active = QuestService.LoadActiveQuests(_connStr, characterId);
+            var quest = QuestService.FindByQuestId(active, questId);
+            var trigger = quest?.TriggerValue ?? 0;
+            result = new QuestSetTriggerResult
+            {
+                QuestId = questId,
+                PreviousTriggerValue = trigger,
+                TriggerValue = trigger,
+            };
+            FileLogger.Log(
+                $"[QuestManager] SET_TRIGGER echo suppressed after " +
+                $"server hunt progress: cid={characterId} quest={questId} " +
+                $"type=0x{triggerType:X2} trigger={trigger}");
+            return true;
+        }
+
+        private static int FindDecrementedTriggerChannel(
+            QuestSetTriggerResult change)
+        {
+            if (change == null)
+                return -1;
+
+            var previous = new QuestTrigger(change.PreviousTriggerValue);
+            var current = new QuestTrigger(change.TriggerValue);
+            for (var channelIndex = 0; channelIndex < 3; channelIndex++)
+            {
+                if (previous.GetChannel(channelIndex)
+                    == current.GetChannel(channelIndex) + 1)
+                {
+                    return channelIndex;
+                }
+            }
+
+            return -1;
+        }
+
+        private void ScheduleHuntMonsterProjectionFallback(
+            DungeonRun run,
+            int characterId)
+        {
+            if (run == null || characterId <= 0)
+                return;
+
+            var identity = run.CaptureIdentity();
+            ClockService.ClockTimerHandle previous;
+            int version;
+            lock (_huntMonsterProjectionSync)
+            {
+                previous = _huntMonsterProjectionTimer;
+                _huntMonsterProjectionTimer = null;
+                version = NextProjectionVersion(_huntMonsterProjectionVersion);
+                _huntMonsterProjectionVersion = version;
+            }
+            previous?.Cancel();
+
+            var timer = _clock.ScheduleOneShotAfterAsync(
+                $"quest-hunt:{characterId}:{identity.RunId}:projection",
+                _huntMonsterEchoGrace,
+                _ => FlushHuntMonsterProjectionFallbackAsync(
+                    run,
+                    identity,
+                    characterId,
+                    version));
+
+            lock (_huntMonsterProjectionSync)
+            {
+                if (_huntMonsterProjectionVersion != version)
+                {
+                    timer.Cancel();
+                    return;
+                }
+
+                _huntMonsterProjectionTimer = timer;
+            }
+        }
+
+        private async Task FlushHuntMonsterProjectionFallbackAsync(
+            DungeonRun run,
+            DungeonRunIdentity identity,
+            int characterId,
+            int version)
+        {
+            lock (_huntMonsterProjectionSync)
+            {
+                if (_huntMonsterProjectionVersion != version)
+                    return;
+                _huntMonsterProjectionTimer = null;
+            }
+
+            var currentRun = _sender.Player?.CurrentRun;
+            if (_sender.CharacterId != characterId
+                || currentRun == null
+                || !ReferenceEquals(currentRun, run)
+                || !currentRun.Matches(identity)
+                || !run.HasPendingServerDrivenHuntMonsterTriggers())
+            {
+                return;
+            }
+
+            await _notifications.SendActiveQuestListAsync(characterId);
+            FileLogger.Log(
+                $"[QuestManager] HUNT_MONSTER projection fallback: " +
+                $"cid={characterId} run={identity.RunId} " +
+                $"pending client echo after {_huntMonsterEchoGrace.TotalMilliseconds:F0}ms");
+        }
+
+        private void CancelHuntMonsterProjectionFallback()
+        {
+            ClockService.ClockTimerHandle timer;
+            lock (_huntMonsterProjectionSync)
+            {
+                _huntMonsterProjectionVersion = NextProjectionVersion(
+                    _huntMonsterProjectionVersion);
+                timer = _huntMonsterProjectionTimer;
+                _huntMonsterProjectionTimer = null;
+            }
+            timer?.Cancel();
+        }
+
+        private static int NextProjectionVersion(int version)
+        {
+            version = unchecked(version + 1);
+            return version == 0 ? 1 : version;
         }
 
         private bool TryBuildDeferredClearMapSetTrigger(int characterId, byte[] qBody, out QuestSetTriggerResult result)
@@ -365,187 +624,7 @@ namespace DfoServer.Game.Quests
 
         public async Task SendAcceptableQuestListAsync()
         {
-            int cid = _sender.CharacterId;
-            if (cid <= 0) return;
-            var character = _sender.Player;
-            int level = character != null ? character.Level : 1;
-            int job = character != null ? character.Job : 0;
-            int growType = character != null ? character.GrowType : -1;
-
-            var clearedFlags = new QuestRepository(_connStr).LoadClearedFlags(cid);
-            var allowedCreatureKinds = InventoryContext.TryGetLease(cid, out var lease)
-                ? PetCreatureEvolutionRuntimeService.LoadEligiblePetCreatureEvolutionQuestKinds(lease.Inventory)
-                : new HashSet<int>();
-            await _sender.SendNotiAsync(
-                0x0015,
-                QuestListBodyBuilder.BuildBody(level, job, growType, clearedFlags, allowedCreatureKinds));
-        }
-
-        private async Task SendUserInfoBroadcast(int characterId, HonorLevelSummary honorLevel = null)
-        {
-            try
-            {
-                var record = _characterRepository.GetById(characterId);
-                var addition = SqliteSubtype1Repository.FromConnectionString(_connStr).Load(characterId);
-
-                if (record != null && addition != null)
-                {
-                    var accountCharacters = _characterRepository.ListByAccount(record.AccountId);
-                    honorLevel = honorLevel
-                        ?? _honorLevel.LoadSummary(record.AccountId, accountCharacters);
-                    Characters.CharacterStatComputer.DecodeGrowType(record.GrowType, out var fGrow2, out var sGrow2);
-                    var synced = SkillStateService.LoadAndSync(
-                        _progressRepository, characterId, record.Job, record.Level, record.BonusSp, record.BonusTp, persist: false,
-                        growType: fGrow2, secondGrowType: sGrow2);
-                    await _sender.SendNotiAsync(0x0002,
-                        Network.Handlers.UserInfoBroadcastService.BuildSubtype1Body(
-                            record, addition, accountCharacters, honorLevel, synced.Skills));
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[QuestManager] SendUserInfoBroadcast ERROR: {ex.Message}");
-            }
-        }
-
-        // 广播对象固定是当前会话角色(_sender.Player), 不接受外部 cid。
-        private async Task SendUserInfoSubtype0Broadcast(
-            string reason,
-            HonorLevelSummary honorLevel = null)
-        {
-            var sent = await Network.Handlers.UserInfoBroadcastService.SendSubtype0Async(
-                _sender.Player,
-                _sender.AccountId,
-                body => _sender.SendNotiAsync(0x0002, body),
-                _characterRepository,
-                _subtype0Repository,
-                _honorLevel,
-                "QuestManager subtype0",
-                honorLevel);
-            if (sent)
-                FileLogger.Log($"[QuestManager] {reason} NOTI 2 subtype0 sent: cid={_sender.CharacterId}");
-        }
-
-        // 会话内重发全量技能表(NOTI 0x0013), 客户端整体替换技能状态。
-        private async Task SendSkillInfoRefreshAsync(int characterId)
-        {
-            try
-            {
-                var dataSource = new SqliteSelectCharacterDataSource(
-                    _databasePath, ServerPaths.SchemaFilePath, _characterRepository);
-                dataSource.PrepareForSkillSynchronization(
-                    characterId,
-                    _sender.AccountId);
-                var snapshot = dataSource.Load(characterId, _sender.AccountId);
-                var skillBytes = SkillInfoBodyBuilder.BuildFrom(snapshot.InitializationSnapshot.SkillInfo);
-                await _sender.SendNotiAsync(0x0013, skillBytes);
-                FileLogger.Log($"[QuestManager] JobChange skill info refresh sent: cid={characterId} len={skillBytes.Length}");
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[QuestManager] SendSkillInfoRefresh ERROR: {ex.Message}");
-            }
-        }
-
-        private async Task SendJobChangeNotification(
-            int characterId,
-            HonorLevelSummary honorLevel = null)
-        {
-            try
-            {
-                var record = _characterRepository.GetById(characterId);
-                if (record == null) return;
-                record.Subtype0Tail = new SqliteSubtype0FieldsRepository(_databasePath, ServerPaths.SchemaFilePath)
-                    .Load(characterId)
-                    ?? new UserInfoMinimumTailSnapshot();
-                honorLevel = honorLevel
-                    ?? _honorLevel.LoadSummary(record.AccountId);
-                HonorLevelDataProvider.ApplyToSubtype0Tail(record.Subtype0Tail, honorLevel);
-
-                _sender.Player.GrowType = record.GrowType;
-
-                await _sender.SendNotiAsync(0x0002, UserInfoSubtype0Builder.BuildNotificationBody(record));
-
-                FileLogger.Log($"[QuestManager] JobChange NOTI 2 subtype0 sent: cid={characterId} growType=0x{record.GrowType:X2}");
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[QuestManager] SendJobChangeNotification ERROR: {ex.Message}");
-            }
-        }
-
-        private async Task SendExpertJobChangeNotification(
-            int characterId,
-            int expertJobType,
-            HonorLevelSummary honorLevel = null)
-        {
-            try
-            {
-                var record = _characterRepository.GetById(characterId);
-                if (record == null || _sender.Player == null) return;
-
-                var tail = new SqliteSubtype0FieldsRepository(_databasePath, ServerPaths.SchemaFilePath)
-                    .Load(characterId)
-                    ?? _sender.Player.Subtype0Tail
-                    ?? new UserInfoMinimumTailSnapshot();
-                tail.ExpertJobType = (byte)expertJobType;
-                _sender.Player.Subtype0Tail = tail;
-                honorLevel = honorLevel
-                    ?? _honorLevel.LoadSummary(record.AccountId);
-                HonorLevelDataProvider.ApplyToSubtype0Tail(tail, honorLevel);
-                record.Subtype0Tail = tail;
-
-                // NOTI 0x00CD ExpertJobInfo
-                var ejw = new Network.GamePacketWriter();
-                ejw.WriteByte(1);          // State0
-                ejw.WriteByte(1);          // Mode
-                ejw.WriteByte(1);          // Count
-                ejw.WriteInt32(expertJobType);
-                await _sender.SendNotiAsync(0x00CD, ejw.ToArray());
-
-                // NOTI 0x0002 subtype 0 USERINFO Minimum
-                var w = new Network.GamePacketWriter();
-                w.WriteByte(0);
-                w.WriteUInt16(1);
-                w.WriteUInt16((ushort)record.CharacterId);
-                w.WriteDstr(record.Name);
-                w.WriteBytes(UserInfoSubtype0Builder.BuildRemainingBytes(record));
-                await _sender.SendNotiAsync(0x0002, w.ToArray());
-
-                FileLogger.Log($"[QuestManager] ExpertJobChange NOTI sent: cid={characterId} expertJobType={expertJobType}");
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[QuestManager] SendExpertJobChangeNotification ERROR: {ex.Message}");
-            }
-        }
-
-        private HonorLevelSummary ResolveHonorLevelForExp()
-        {
-            var tail = _sender.Player?.Subtype0Tail;
-            if (tail != null)
-            {
-                return new HonorLevelSummary
-                {
-                    HonorLevel = (byte)Math.Min(byte.MaxValue, tail.ProgressA),
-                    HonorExp = tail.ProgressB,
-                };
-            }
-
-            return _honorLevel.LoadSummary(_sender.AccountId);
-        }
-
-        private byte[] BuildAcceptedQuestNoti(int characterId)
-        {
-            var active = QuestService.LoadActiveQuests(_connStr, characterId);
-            var w = new Network.GamePacketWriter();
-            w.WriteUInt32((uint)active.Count);
-            foreach (var q in active)
-            {
-                w.WriteUInt16(q.QuestId);
-                w.WriteUInt32(q.TriggerValue);
-            }
-            return w.ToArray();
+            await _notifications.SendAcceptableQuestListAsync();
         }
     }
 }

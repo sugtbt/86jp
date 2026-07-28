@@ -2,9 +2,11 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Quests;
+using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 
@@ -23,6 +25,8 @@ namespace DfoServer.SelfTests
         // 2042(交信任务, 完成发放事件道具 10089292), 前置 2041。
         private const ushort LetterQuestId = 2042;
         private const ushort PrerequisiteQuestId = 2041;
+        private const ushort ThievesCityQuestId = 2066;
+        private const int ThievesCityQuestItemId = 10089306;
 
         public static int Run()
         {
@@ -50,6 +54,11 @@ namespace DfoServer.SelfTests
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
             var failures = 0;
+            var sessionId = Guid.NewGuid();
+            var inventory = new InventoryService(CharacterId, AccountId);
+            InventoryContext.Register(
+                sessionId,
+                inventory);
 
             // --- 接取: 前置未完成 -> 失败 ACK ---
             var acceptFail = QuestAckBuilder.BuildAccept(questService.HandleAcceptQuest(CharacterId, BuildAcceptBody(LetterQuestId), AccountId));
@@ -87,14 +96,35 @@ namespace DfoServer.SelfTests
             // --- 放弃: 重新接取后放弃 -> 成功 ACK ---
             DeleteQuestCleared(connStr, LetterQuestId);
             questService.HandleAcceptQuest(CharacterId, BuildAcceptBody(LetterQuestId), AccountId);
-            var giveup = QuestAckBuilder.BuildGiveup(questService.HandleGiveupQuest(CharacterId, BuildGiveupBody(LetterQuestId)));
+            Check(
+                "depend-give quest item exists before giveup",
+                inventory.CountMainItem(10089292) > 0,
+                ref failures);
+            var giveupResult = questService.HandleGiveupQuest(
+                CharacterId,
+                BuildGiveupBody(LetterQuestId));
+            var giveup = QuestAckBuilder.BuildGiveup(giveupResult);
             CheckBytes("giveup success ack bytes",
                 "01-FA-07", giveup, ref failures);
+            Check(
+                "depend-give quest item is reclaimed through inventory mutation",
+                inventory.CountMainItem(10089292) == 0
+                    && giveupResult.InventoryChanges.HasChanges,
+                ref failures);
 
             // --- 放弃: 不在身上 -> 失败 ACK ---
             var giveupFail = QuestAckBuilder.BuildGiveup(questService.HandleGiveupQuest(CharacterId, BuildGiveupBody(LetterQuestId)));
             CheckBytes("giveup missing quest rejected",
                 "00-13", giveupFail, ref failures);
+
+            VerifyGiveupRecoveryPolicy(ref failures);
+            VerifySeekingGiveupProjection(
+                connStr,
+                sessionId,
+                inventory,
+                ref failures);
+
+            InventoryContext.Unregister(sessionId, CharacterId);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
@@ -161,6 +191,146 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
             cmd.ExecuteNonQuery();
         }
 
+        private static void VerifyGiveupRecoveryPolicy(ref int failures)
+        {
+            const ushort abandonedQuestId = 1;
+            const ushort sharedQuestA = 2;
+            const ushort sharedQuestB = 3;
+            const int questItemId = 500001;
+            const int ordinaryMaterialId = 500002;
+            var active = new List<ActiveQuest>
+            {
+                new ActiveQuest { QuestId = abandonedQuestId },
+                new ActiveQuest { QuestId = sharedQuestA },
+                new ActiveQuest { QuestId = sharedQuestB },
+            };
+            var events = new Dictionary<ushort, IReadOnlyCollection<GameWorld.QuestRewardItem>>
+            {
+                [abandonedQuestId] = new[]
+                {
+                    new GameWorld.QuestRewardItem { ItemId = questItemId, Count = 4 },
+                    new GameWorld.QuestRewardItem { ItemId = ordinaryMaterialId, Count = 3 },
+                },
+                [sharedQuestA] = new[]
+                {
+                    new GameWorld.QuestRewardItem { ItemId = questItemId, Count = 10 },
+                },
+            };
+            var seeking = new Dictionary<ushort, IReadOnlyCollection<GameWorld.QuestRewardItem>>
+            {
+                [abandonedQuestId] = new[]
+                {
+                    new GameWorld.QuestRewardItem { ItemId = questItemId, Count = 20 },
+                    new GameWorld.QuestRewardItem { ItemId = ordinaryMaterialId, Count = 8 },
+                },
+                [sharedQuestA] = new[]
+                {
+                    new GameWorld.QuestRewardItem { ItemId = questItemId, Count = 7 },
+                },
+                [sharedQuestB] = new[]
+                {
+                    new GameWorld.QuestRewardItem { ItemId = questItemId, Count = 12 },
+                },
+            };
+            var plan = QuestGiveupItemRecoveryPolicy.Build(
+                active,
+                abandonedQuestId,
+                questId => events.TryGetValue(questId, out var values)
+                    ? values
+                    : Array.Empty<GameWorld.QuestRewardItem>(),
+                questId => seeking.TryGetValue(questId, out var values)
+                    ? values
+                    : Array.Empty<GameWorld.QuestRewardItem>(),
+                itemId => itemId == questItemId);
+            Check(
+                "giveup policy keeps the largest shared quest requirement",
+                plan.Count == 1
+                    && plan[0].ItemId == questItemId
+                    && plan[0].RetainCount == 12,
+                ref failures);
+            Check(
+                "giveup policy excludes ordinary materials",
+                !ContainsPlanItem(plan, ordinaryMaterialId),
+                ref failures);
+        }
+
+        private static void VerifySeekingGiveupProjection(
+            string connectionString,
+            Guid sessionId,
+            InventoryService inventory,
+            ref int failures)
+        {
+            QuestService.SaveActiveQuests(
+                connectionString,
+                CharacterId,
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = ThievesCityQuestId,
+                        TriggerValue = 0,
+                    },
+                });
+            var granted = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                ThievesCityQuestItemId,
+                ItemCreateReason.QuestReward,
+                24,
+                out var grant);
+            Check(
+                "seeking quest item fixture is inserted",
+                granted
+                    && grant.Success
+                    && inventory.CountMainItem(ThievesCityQuestItemId) == 24,
+                ref failures);
+
+            var sender = new RecordingSender(CharacterId, AccountId);
+            var manager = new QuestManager(sender, connectionString);
+            var body = new byte[4];
+            BitConverter.GetBytes(ThievesCityQuestId).CopyTo(body, 2);
+            manager.HandleGiveupQuestAsync(0x0020, body, sessionId)
+                .GetAwaiter()
+                .GetResult();
+
+            Check(
+                "seeking quest items are reclaimed on giveup",
+                inventory.CountMainItem(ThievesCityQuestItemId) == 0,
+                ref failures);
+            Check(
+                "giveup projects item slots before command ack",
+                sender.Events.Count == 2
+                    && sender.Events[0] == "noti:000E"
+                    && sender.Events[1] == "cmd:0020",
+                ref failures);
+            CheckBytes(
+                "giveup manager preserves success ack bytes",
+                "01-12-08",
+                sender.LastCommandBody,
+                ref failures);
+        }
+
+        private static bool ContainsPlanItem(
+            IReadOnlyList<QuestGiveupItemRecoveryEntry> plan,
+            int itemId)
+        {
+            if (plan == null)
+                return false;
+            foreach (var entry in plan)
+            {
+                if (entry.ItemId == itemId)
+                    return true;
+            }
+            return false;
+        }
+
+        private static void Check(string name, bool ok, ref int failures)
+        {
+            Console.WriteLine($"[{(ok ? "OK" : "FAIL")}] {name}");
+            if (!ok)
+                failures++;
+        }
+
         private static void CheckBytes(string name, string expectedHex, byte[] actual, ref int failures)
         {
             var actualHex = actual == null ? "<null>" : BitConverter.ToString(actual);
@@ -171,6 +341,38 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
                 Console.WriteLine($"    expected: {expectedHex}");
                 Console.WriteLine($"    actual:   {actualHex}");
                 failures++;
+            }
+        }
+
+        private sealed class RecordingSender : ISessionPacketSender
+        {
+            internal RecordingSender(int characterId, int accountId)
+            {
+                CharacterId = characterId;
+                AccountId = accountId;
+                Player.CharacterId = characterId;
+            }
+
+            public List<string> Events { get; } = new List<string>();
+            public byte[] LastCommandBody { get; private set; }
+            public PlayerContext Player { get; } = new PlayerContext();
+            public int CharacterId { get; }
+            public int AccountId { get; }
+
+            public Task SendPacketAsync(byte[] rawPacket)
+                => Task.CompletedTask;
+
+            public Task SendNotiAsync(ushort notiType, byte[] body)
+            {
+                Events.Add($"noti:{notiType:X4}");
+                return Task.CompletedTask;
+            }
+
+            public Task SendCmdAckAsync(ushort cmdType, byte[] body)
+            {
+                Events.Add($"cmd:{cmdType:X4}");
+                LastCommandBody = body;
+                return Task.CompletedTask;
             }
         }
     }

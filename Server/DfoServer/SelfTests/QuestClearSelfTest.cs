@@ -17,6 +17,7 @@ namespace DfoServer.SelfTests
         private const ushort ParentQuestId = 1826;
         private const ushort SampleQuestId = 1827;
         private const ushort ToolQuestId = 1828;
+        private const int SampleItemId = 10099813;
 
         public static int Run()
         {
@@ -44,6 +45,11 @@ namespace DfoServer.SelfTests
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
             var failures = 0;
+            var sessionId = Guid.NewGuid();
+            var inventory = new InventoryService(CharacterId, AccountId);
+            InventoryContext.Register(
+                sessionId,
+                inventory);
 
             Check("1826 is quest-clear parent", GameWorld.QuestData.IsQuestClearQuest(ParentQuestId), ref failures);
             Check("1826 requires 1827 and 1828",
@@ -65,6 +71,14 @@ namespace DfoServer.SelfTests
                 new ActiveQuest { Slot = 0, QuestId = ParentQuestId, TriggerValue = 2 },
                 new ActiveQuest { Slot = 1, QuestId = SampleQuestId, TriggerValue = 0 },
             });
+            Check("sample quest inventory contains its five required items",
+                InventoryRewardGrantService.TryCreateAndInsert(
+                    inventory,
+                    SampleItemId,
+                    ItemCreateReason.QuestReward,
+                    5,
+                    out _),
+                ref failures);
             var finishSample = questService.HandleFinishQuest(CharacterId,
                 BuildQuestBody(SampleQuestId));
             Check("finishing last missing child succeeds", IsSuccessAck(finishSample), ref failures);
@@ -102,6 +116,8 @@ namespace DfoServer.SelfTests
             var staleParent = questService.HandleFinishQuest(CharacterId,
                 BuildQuestBody(ParentQuestId));
             Check("stale nonzero parent trigger can finish after all subquests cleared", IsSuccessAck(staleParent), ref failures);
+
+            InventoryContext.Unregister(sessionId, CharacterId);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;

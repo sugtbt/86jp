@@ -91,7 +91,7 @@ namespace DfoServer.SelfTests
                     builder.TryBuild(snapshot, 0, out builtBody)
                         && ByteEquals(builtBody, emptyBody));
 
-                Check("character without selection loads default cube state",
+                Check("character without selection loads empty cube state",
                     SeedCharacterAndLoadDefault(tempDb, dataSource));
             }
             finally
@@ -155,7 +155,7 @@ VALUES (@cid);";
             SeedCharacter(databasePath, SeedCharacterId);
             var snapshot = dataSource.Load(SeedCharacterId, AccountId);
             return snapshot.InitializationSnapshot.CubeType == 0
-                && snapshot.InitializationSnapshot.CubeGrade == 0;
+                && snapshot.InitializationSnapshot.CubeGrade == 0xff;
         }
 
         private static bool ByteEquals(byte[] left, byte[] right)

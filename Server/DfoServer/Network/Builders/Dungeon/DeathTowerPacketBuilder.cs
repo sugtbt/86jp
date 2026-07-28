@@ -1,8 +1,9 @@
 using System;
 using System.Collections.Generic;
+using DfoServer.Game.DeathTower;
 using DfoServer.Network;
 
-namespace DfoServer.Game.DeathTower
+namespace DfoServer.Network.Builders
 {
     // 塔专属包构建(NOTI 142/143/144/145/146)。字段定义全部来自 86JP IDA 汇编定案。
     public static class DeathTowerPacketBuilder
@@ -99,11 +100,6 @@ namespace DfoServer.Game.DeathTower
         }
 
         // NOTI 145 DEATH_TOWER_STATE_REWARD (变长, 双端闭环: summary + 4组×{count+items})
-        public static byte[] BuildEmptyReward()
-        {
-            return BuildReward(0, null);
-        }
-
         // Client handler (86JP DNF.exe RVA 0x008F7230):
         // u32 summary + 4 * { u8 count + count * { u32 itemId + u32 stackCount } }.
         public static byte[] BuildReward(
@@ -136,24 +132,4 @@ namespace DfoServer.Game.DeathTower
         }
     }
 
-    public struct StageMonster
-    {
-        public int ListIndex;
-        public ushort MonsterUniqueId;
-        public int MonsterIndex;
-        public byte MonsterLevel;
-        public byte MonsterType;    // 0=普通, 5=APC
-        public byte IsBoxMonster;
-        public byte BoxIndex;
-    }
-
-    public struct StageTowerItem
-    {
-        public int SourceListIndex;
-        public ushort SourceMonsterUniqueId;
-        public ushort ItemUniqueId;
-        public int ItemId;
-        public int DropRate;
-        public int StackCount;
-    }
 }

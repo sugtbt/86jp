@@ -165,6 +165,10 @@ namespace DfoServer.Game.Inventory
             = new ConcurrentDictionary<int, Lazy<string>>();
         private static readonly ConcurrentDictionary<int, Lazy<byte>> EmblemSocketTypeCache
             = new ConcurrentDictionary<int, Lazy<byte>>();
+        private static readonly ConcurrentDictionary<int, Lazy<EquipmentFile>> EquipmentFileCache
+            = new ConcurrentDictionary<int, Lazy<EquipmentFile>>();
+        private static readonly ConcurrentDictionary<int, Lazy<StackableItemFile>> StackableFileCache
+            = new ConcurrentDictionary<int, Lazy<StackableItemFile>>();
         private static readonly Regex AvatarSocketRegex = new Regex(@"\[\s*([ABCDSM])\s+socket\s*\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private const string AvatarTypeSelectTag = "[avatar type select]";
         private const string AvatarTypeSelectEndTag = "[/avatar type select]";
@@ -178,6 +182,9 @@ namespace DfoServer.Game.Inventory
             _ = StackableList.Value;
         }
 
+        internal static bool AreItemListsWarmed
+            => EquipmentList.IsValueCreated && StackableList.IsValueCreated;
+
         public static ItemMetadata Resolve(int itemTemplateId)
         {
             return MetadataCache.GetOrAdd(
@@ -190,7 +197,8 @@ namespace DfoServer.Game.Inventory
             var equipmentEntry = EquipmentList.Value.GetById(itemTemplateId);
             if (equipmentEntry != null)
             {
-                var equipment = EquipmentFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("equipment", equipmentEntry.FilePath)));
+                if (!TryLoadEquipmentFile(itemTemplateId, out var equipment))
+                    return CreateUnknownMetadata();
                 ResolveNeedMaterial(equipment.NeedMaterial, out var equipmentNeedMatId, out var equipmentNeedMatCount);
                 // Keep legacy ordinary-NPC pricing intact.  Only entries that
                 // actually exchange [need material] use PVF's price correction.
@@ -230,7 +238,8 @@ namespace DfoServer.Game.Inventory
             var stackableEntry = StackableList.Value.GetById(itemTemplateId);
             if (stackableEntry != null)
             {
-                var stackable = StackableItemFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("stackable", stackableEntry.FilePath)));
+                if (!TryLoadStackableFile(itemTemplateId, out var stackable))
+                    return CreateUnknownMetadata();
                 var sellGold = stackable.Value >= 0
                     ? stackable.Value / 5
                     : (stackable.Price > 0 ? stackable.Price / 5 : 0);
@@ -276,6 +285,11 @@ namespace DfoServer.Game.Inventory
                 };
             }
 
+            return CreateUnknownMetadata();
+        }
+
+        private static ItemMetadata CreateUnknownMetadata()
+        {
             return new ItemMetadata
             {
                 ItemKind = "special",
@@ -331,13 +345,63 @@ namespace DfoServer.Game.Inventory
 
         public static bool TryLoadEquipmentFile(int itemTemplateId, out EquipmentFile equipment)
         {
-            equipment = null;
-            var equipmentEntry = EquipmentList.Value.GetById(itemTemplateId);
-            if (equipmentEntry == null)
-                return false;
+            equipment = EquipmentFileCache.GetOrAdd(
+                itemTemplateId,
+                id => new Lazy<EquipmentFile>(() => LoadEquipmentFile(id))).Value;
+            return equipment != null;
+        }
 
-            equipment = EquipmentFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("equipment", equipmentEntry.FilePath)));
-            return true;
+        internal static bool IsEquipmentUsableByJob(int itemTemplateId, byte characterJob)
+        {
+            if (!TryLoadEquipmentFile(itemTemplateId, out var equipment)
+                || equipment?.Root == null)
+            {
+                return false;
+            }
+
+            var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var usableJob in equipment.Root.GetChildren("usable job"))
+            {
+                foreach (var dataItem in usableJob.DataItems)
+                {
+                    foreach (Match match in Regex.Matches(
+                        dataItem.GetContent(equipment.Content) ?? string.Empty,
+                        @"\[(?<job>[^\]]+)\]",
+                        RegexOptions.IgnoreCase))
+                    {
+                        var label = match.Groups["job"].Value.Trim();
+                        if (label.Length > 0)
+                            labels.Add(label);
+                    }
+                }
+            }
+
+            if (labels.Count == 0 || labels.Contains("all"))
+                return true;
+
+            var jobLabel = ResolveCharacterJobLabel(characterJob);
+            return jobLabel.Length > 0 && labels.Contains(jobLabel);
+        }
+
+        private static string ResolveCharacterJobLabel(byte characterJob)
+        {
+            switch (characterJob)
+            {
+                case 0: return "swordman";
+                case 1: return "fighter";
+                case 2: return "gunner";
+                case 3: return "mage";
+                case 4: return "priest";
+                case 5: return "at gunner";
+                case 6: return "thief";
+                case 7: return "at fighter";
+                case 8: return "at mage";
+                case 9: return "demonic swordman";
+                case 10: return "creator mage";
+                case 11: return "at swordman";
+                case 12: return "knight";
+                default: return string.Empty;
+            }
         }
 
         public static bool TryLoadStackableFile(int itemTemplateId, out StackableItemFile stackable)
@@ -721,13 +785,10 @@ namespace DfoServer.Game.Inventory
 
         private static bool TryLoadStackable(int itemTemplateId, out StackableItemFile stackable)
         {
-            stackable = null;
-            var stackableEntry = StackableList.Value.GetById(itemTemplateId);
-            if (stackableEntry == null)
-                return false;
-
-            stackable = StackableItemFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("stackable", stackableEntry.FilePath)));
-            return true;
+            stackable = StackableFileCache.GetOrAdd(
+                itemTemplateId,
+                id => new Lazy<StackableItemFile>(() => LoadStackableFile(id))).Value;
+            return stackable != null;
         }
 
         private static bool TryGetEquipmentType(int itemTemplateId, out string equipmentType)
@@ -742,12 +803,27 @@ namespace DfoServer.Game.Inventory
 
         private static string LoadEquipmentType(LstFile equipmentList, int itemTemplateId)
         {
-            var equipmentEntry = equipmentList.GetById(itemTemplateId);
-            if (equipmentEntry == null)
+            if (!TryLoadEquipmentFile(itemTemplateId, out var equipment))
                 return null;
-
-            var equipment = EquipmentFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("equipment", equipmentEntry.FilePath)));
             return NormalizeEquipmentType(equipment.EquipmentType);
+        }
+
+        private static EquipmentFile LoadEquipmentFile(int itemTemplateId)
+        {
+            var entry = EquipmentList.Value.GetById(itemTemplateId);
+            return entry == null
+                ? null
+                : EquipmentFile.Parse(PvfArchiveAccessor.ReadText(
+                    Path.Combine("equipment", entry.FilePath)));
+        }
+
+        private static StackableItemFile LoadStackableFile(int itemTemplateId)
+        {
+            var entry = StackableList.Value.GetById(itemTemplateId);
+            return entry == null
+                ? null
+                : StackableItemFile.Parse(PvfArchiveAccessor.ReadText(
+                    Path.Combine("stackable", entry.FilePath)));
         }
 
         private static HashSet<string> ExtractAllowedEquipmentTypes(List<string> stringDataItems)

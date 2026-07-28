@@ -1,6 +1,7 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Session;
 using DfoServer.GameWorld;
@@ -16,6 +17,28 @@ namespace DfoServer.Network.Handlers
     {
         private static readonly TimeSpan PositionPersistThrottle = TimeSpan.FromSeconds(5);
 
+        private readonly struct TownProjectionGuard
+        {
+            private TownProjectionGuard(
+                DungeonRunIdentity endedRun,
+                DungeonSelectionContext selection)
+            {
+                EndedRun = endedRun;
+                Selection = selection;
+            }
+
+            internal DungeonRunIdentity EndedRun { get; }
+            internal DungeonSelectionContext Selection { get; }
+
+            internal static TownProjectionGuard ForEndedRun(
+                DungeonRunIdentity identity) =>
+                new TownProjectionGuard(identity, null);
+
+            internal static TownProjectionGuard ForSelection(
+                DungeonSelectionContext selection) =>
+                new TownProjectionGuard(default(DungeonRunIdentity), selection);
+        }
+
         private readonly ICharacterRepository _characterRepository;
         private readonly HonorLevelSyncService _honorLevel;
         private readonly GrowthCapsuleSyncService _growthCapsule;
@@ -24,12 +47,35 @@ namespace DfoServer.Network.Handlers
         private readonly Game.Party.PartyManager _partyManager;   // 可空: 副本退出/回城时把队员一起拉回城(跟随退出)
         // 可空: 会话目录(charId→session)。同屏区域查询与队员定位共用这一份注册表, 不另设区域广播器。
         private readonly Game.Session.ISessionDirectory _sessions;
+        private readonly DungeonInstanceRegistry _dungeonInstances;
 
         private readonly InventoryRefreshSender _refresh;
 
         public string ProtocolName => "GameProtocol";
 
-        public TownHandler(ICharacterRepository characterRepository, Game.SelectCharacter.SqliteSelectCharacterDataSource selectDataSource = null, Game.Party.PartyManager partyManager = null, Game.Session.ISessionDirectory sessions = null, InventoryRefreshSender refresh = null)
+        public TownHandler(
+            ICharacterRepository characterRepository,
+            Game.SelectCharacter.SqliteSelectCharacterDataSource selectDataSource = null,
+            Game.Party.PartyManager partyManager = null,
+            Game.Session.ISessionDirectory sessions = null,
+            InventoryRefreshSender refresh = null)
+            : this(
+                characterRepository,
+                selectDataSource,
+                partyManager,
+                sessions,
+                refresh,
+                dungeonInstances: null)
+        {
+        }
+
+        internal TownHandler(
+            ICharacterRepository characterRepository,
+            Game.SelectCharacter.SqliteSelectCharacterDataSource selectDataSource,
+            Game.Party.PartyManager partyManager,
+            Game.Session.ISessionDirectory sessions,
+            InventoryRefreshSender refresh,
+            DungeonInstanceRegistry dungeonInstances)
         {
             _characterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
             _honorLevel = new HonorLevelSyncService(_characterRepository);
@@ -41,6 +87,7 @@ namespace DfoServer.Network.Handlers
             _selectDataSource = selectDataSource;  // 可空: 用于同屏推送他人完整 USERINFO(subtype1, 让客户端认其可组队邀请)
             _partyManager = partyManager;          // 可空: 组队副本收尾 fan-out(跟随退出); 与副本共享同一 PartyManager
             _sessions = sessions;                  // 可空: 未注入时退化为单人(不广播)
+            _dungeonInstances = dungeonInstances;
         }
 
         // 构建某在线会话玩家的【完整 USERINFO subtype1】(0x0002 occ1, ~1458B: 属性/装备/技能)。
@@ -121,9 +168,23 @@ namespace DfoServer.Network.Handlers
             }
         }
 
-        public async Task Handle_ENUM_CMDPACKET_SET_USER_AREA(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        public Task Handle_ENUM_CMDPACKET_SET_USER_AREA(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+            => SetUserAreaCoreAsync(
+                session,
+                body,
+                default(TownProjectionGuard));
+
+        private async Task SetUserAreaCoreAsync(
+            EnhancedClientSession session,
+            byte[] body,
+            TownProjectionGuard projectionGuard)
         {
             if (body == null || body.Length < 6) return;
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return;
             var gotoTownId = body[0];
             var gotoAreaId = body[1];
             var gotoPosX = BitConverter.ToInt16(body, 2);
@@ -139,9 +200,16 @@ namespace DfoServer.Network.Handlers
             var selfSnapshot = TownAreaNotificationBuilder.CreateCurrentSnapshot(session.Player);
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0017, TownAreaNotificationBuilder.BuildUserArea(selfSnapshot)));
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return;
 
             // 联机同屏: 名册含同区域其它玩家, 并让已在场玩家看到新来的自己。
-            await BroadcastAreaRosterAsync(session, selfSnapshot);
+            await BroadcastAreaRosterAsync(
+                session,
+                selfSnapshot,
+                projectionGuard);
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return;
 
             PersistPosition(session, forceImmediate: true, source: "set_user_area");
         }
@@ -175,8 +243,13 @@ namespace DfoServer.Network.Handlers
         /// 城镇同屏核心: 收集同区域全部会话, 给每个人下发含全体的 AREA_USERS(0x0018)。
         /// _sessions 为空(单人/未注入)时退化为只发自己 —— 与既有单机行为等价。
         /// </summary>
-        private async Task BroadcastAreaRosterAsync(EnhancedClientSession session, TownUserSnapshot selfSnapshot)
+        private async Task BroadcastAreaRosterAsync(
+            EnhancedClientSession session,
+            TownUserSnapshot selfSnapshot,
+            TownProjectionGuard projectionGuard = default(TownProjectionGuard))
         {
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return;
             var townId = session.Player.CurTownId;
             var areaId = session.Player.CurAreaId;
 
@@ -198,14 +271,27 @@ namespace DfoServer.Network.Handlers
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0002,
                     Game.Appearance.AppearanceService.BuildNoti2Body(o.Player)));
+                if (!CanContinueTownProjection(session, projectionGuard))
+                    return;
                 var oFull = BuildFullUserInfoPacket(o);
-                if (oFull != null) await session.SendPacketAsync(oFull);
+                if (oFull != null)
+                {
+                    await session.SendPacketAsync(oFull);
+                    if (!CanContinueTownProjection(session, projectionGuard))
+                        return;
+                }
                 var oSnap = TownAreaNotificationBuilder.CreateCurrentSnapshot(o.Player);
                 foreach (var pkt in BuildCoPresenceInserts(oSnap))
+                {
                     await session.SendPacketAsync(pkt);
+                    if (!CanContinueTownProjection(session, projectionGuard))
+                        return;
+                }
             }
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0018,
                 TownAreaNotificationBuilder.BuildAreaUsers(townId, areaId, roster)));
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return;
 
             // 给每个已在场玩家推【新人】的 subtype0 + subtype1 + 0x0017(insert), 让他们生成并认可新人。
             var selfAppearance = GamePacketEnvelopeBuilder.Build(0x00, 0x0002, Game.Appearance.AppearanceService.BuildNoti2Body(session.Player));
@@ -213,10 +299,23 @@ namespace DfoServer.Network.Handlers
             var selfAreas = BuildCoPresenceInserts(selfSnapshot);
             foreach (var o in others)
             {
+                if (!CanContinueTownProjection(session, projectionGuard))
+                    return;
                 await o.SendPacketAsync(selfAppearance);
-                if (selfFull != null) await o.SendPacketAsync(selfFull);
+                if (!CanContinueTownProjection(session, projectionGuard))
+                    return;
+                if (selfFull != null)
+                {
+                    await o.SendPacketAsync(selfFull);
+                    if (!CanContinueTownProjection(session, projectionGuard))
+                        return;
+                }
                 foreach (var pkt in selfAreas)
+                {
                     await o.SendPacketAsync(pkt);
+                    if (!CanContinueTownProjection(session, projectionGuard))
+                        return;
+                }
             }
         }
 
@@ -289,41 +388,193 @@ namespace DfoServer.Network.Handlers
 
         public async Task Handle_ENUM_CMDPACKET_GIVEUP_GAME(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
-            await ReturnSelfToTownAsync(session, header);
-            await SendTownAccountStateAsync(session, "giveup-game");
+            var sourceRun = session?.Player?.CurrentRun;
+            if (sourceRun == null)
+            {
+                var selection = session?.Player?.CurrentDungeonSelection;
+                if (selection == null || !selection.TryBeginReturn())
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] RETURN_TO_TOWN rejected without run: " +
+                        $"type=0x{header.type:X4} cid={session?.Player?.CharacterId ?? 0} " +
+                        $"selection={(selection?.SelectionId ?? 0)}");
+                    return;
+                }
+
+                var selectionGuard = TownProjectionGuard.ForSelection(selection);
+                try
+                {
+                    if (!await ReturnSelectionToTownAsync(
+                            session,
+                            selection,
+                            selectionGuard))
+                    {
+                        selection.CancelReturn();
+                        return;
+                    }
+                    await SendTownAccountStateAsync(
+                        session,
+                        "leave-dungeon-selection",
+                        selectionGuard);
+                    if (!CanContinueTownProjection(session, selectionGuard))
+                        return;
+                    await session.SendPacketAsync(
+                        BuildReturnToTownSuccessPacket(header.type));
+                    if (CanContinueTownProjection(session, selectionGuard))
+                        session.Player.CompleteDungeonSelection(selection);
+                    FileLogger.Log(
+                        $"[{ProtocolName}] RETURN_TO_TOWN from selection: " +
+                        $"type=0x{header.type:X4} cid={session.Player.CharacterId} " +
+                        $"selection={selection.SelectionId}");
+                }
+                catch
+                {
+                    if (session?.Player?.IsCurrentDungeonSelection(selection) == true)
+                        selection.CancelReturn();
+                    throw;
+                }
+                return;
+            }
+
+            var sourceRunIdentity = sourceRun.CaptureIdentity();
+            var runGuard = TownProjectionGuard.ForEndedRun(sourceRunIdentity);
+            if (!await ReturnSelfToTownAsync(
+                    session,
+                    header,
+                    sourceRunIdentity,
+                    sourceRun.TownReturnAnchor))
+            {
+                return;
+            }
+            await SendTownAccountStateAsync(
+                session,
+                "giveup-game",
+                runGuard);
             // ★跟随退出(item17)只在【通关回城 BACK_2_VILLAGE 0x84】触发: 副本结束队长回城 → 队员跟随。
             //   ⚠️【放弃 GIVEUP_GAME 0x2A = 未完成中途退出】绝不 fan-out:
             //     放弃者独自回城、【留队】; 其余队员【继续留在副本、留队】(真机确认的正确语义)。
             //   0x2A/0x84 同路由到本 handler, 靠 header.type 区分。
             if (header.type == 0x0084)
-                await TryFanOutLeaderReturnToTownAsync(session, header);
+                await TryFanOutLeaderReturnToTownAsync(
+                    session,
+                    header,
+                    sourceRunIdentity);
             else
                 FileLogger.Log($"[{ProtocolName}] GIVEUP_GAME(type=0x{header.type:X2}): 未完成放弃退出, cid={session.Player?.CharacterId} 独自回城留队, 不拉队员(其余留本)");
+
+            if (!CanContinueTownProjection(session, runGuard))
+                return;
+            await session.SendPacketAsync(
+                BuildReturnToTownSuccessPacket(header.type));
         }
 
         // 把【单个会话】自己拉回城镇(EndRun + 城镇区域同步)。队长/队员复用同一序列。
-        private async Task ReturnSelfToTownAsync(EnhancedClientSession session, GamePacketHeader header)
+        private async Task<bool> ReturnSelfToTownAsync(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            DfoServer.Game.Dungeon.DungeonRunIdentity runIdentity,
+            DungeonTownReturnAnchor returnAnchor)
         {
-            await Dungeon.DungeonRunLifecycle.EndRunToTownAsync(session);
+            if (!await Dungeon.DungeonRunLifecycle.EndRunAsync(
+                    session,
+                    DfoServer.Game.Dungeon.DungeonRunEndReason.ReturnToTown,
+                    runIdentity,
+                    _dungeonInstances))
+            {
+                return false;
+            }
+            var projectionGuard = TownProjectionGuard.ForEndedRun(runIdentity);
+            if (!CanContinueTownProjection(session, projectionGuard))
+            {
+                return false;
+            }
+            ApplyTownReturnAnchor(session.Player, returnAnchor);
             session.Player.UserState = 0x00;
-
-            var list = new List<byte>();
-            list.Add(session.Player.CurTownId);
-            list.Add(session.Player.CurAreaId);
-            list.AddRange(BitConverter.GetBytes(session.Player.CurPosX));
-            list.AddRange(BitConverter.GetBytes(session.Player.CurPosY));
-            list.Add(session.Player.CurDirection);
-            list.Add(session.Player.CurTownId);
-            list.Add(session.Player.CurAreaState);
-            list.Add(session.Player.CurAreaId);
-            await Handle_ENUM_CMDPACKET_SET_USER_AREA(session, header, list.ToArray());
+            await SetUserAreaCoreAsync(
+                session,
+                BuildTownAreaProjectionBody(session.Player),
+                projectionGuard);
+            return CanContinueTownProjection(
+                session,
+                projectionGuard);
         }
+
+        private async Task<bool> ReturnSelectionToTownAsync(
+            EnhancedClientSession session,
+            DungeonSelectionContext selection,
+            TownProjectionGuard projectionGuard)
+        {
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return false;
+
+            ApplyTownReturnAnchor(session.Player, selection.ReturnAnchor);
+            session.Player.UserState = 0x00;
+            await SetUserAreaCoreAsync(
+                session,
+                BuildTownAreaProjectionBody(session.Player),
+                projectionGuard);
+            return CanContinueTownProjection(session, projectionGuard);
+        }
+
+        private static byte[] BuildTownAreaProjectionBody(PlayerContext player)
+        {
+            var list = new List<byte>();
+            list.Add(player.CurTownId);
+            list.Add(player.CurAreaId);
+            list.AddRange(BitConverter.GetBytes(player.CurPosX));
+            list.AddRange(BitConverter.GetBytes(player.CurPosY));
+            list.Add(player.CurDirection);
+            list.Add(player.CurTownId);
+            list.Add(player.CurAreaState);
+            list.Add(player.CurAreaId);
+            return list.ToArray();
+        }
+
+        private static void ApplyTownReturnAnchor(
+            PlayerContext player,
+            DungeonTownReturnAnchor returnAnchor)
+        {
+            if (!returnAnchor.IsValid
+                && Town.TryGetDungeonGateReturnInfo(
+                    player.CurTownId,
+                    player.CurAreaId,
+                    out var configured))
+            {
+                returnAnchor = new DungeonTownReturnAnchor(
+                    configured.Town,
+                    configured.Area,
+                    configured.X,
+                    configured.Y,
+                    player.CurDirection,
+                    player.CurAreaState);
+            }
+            if (!returnAnchor.IsValid)
+                return;
+
+            player.CurTownId = returnAnchor.TownId;
+            player.CurAreaId = returnAnchor.AreaId;
+            player.CurPosX = returnAnchor.X;
+            player.CurPosY = returnAnchor.Y;
+            player.CurDirection = returnAnchor.Direction;
+            player.CurAreaState = returnAnchor.AreaState;
+        }
+
+        internal static byte[] BuildReturnToTownSuccessPacket(ushort packetType) =>
+            GamePacketEnvelopeBuilder.Build(
+                0x01,
+                packetType,
+                CommonPacketBodyBuilder.BuildSuccessAck());
 
         // ★组队副本收尾 fan-out(⚠️协议/渲染, 待真机)。仅当【队长】+开 DFO_PARTY_DUNGEON_COOP + 队伍>1:
         //   把每个仍在副本内(CurrentRun!=null)的在线队员也拉回其城镇 → 客户端呈现"跟着队长退出"。
         //   非队长放弃(item16 个人退出)不 fan-out, 只回自己, 其余人继续留本。
-        private async Task TryFanOutLeaderReturnToTownAsync(EnhancedClientSession leader, GamePacketHeader header)
+        private async Task TryFanOutLeaderReturnToTownAsync(
+            EnhancedClientSession leader,
+            GamePacketHeader header,
+            DfoServer.Game.Dungeon.DungeonRunIdentity leaderRunIdentity)
         {
+            var leaderGuard = TownProjectionGuard.ForEndedRun(leaderRunIdentity);
+            if (!CanContinueTownProjection(leader, leaderGuard)) return;
             if (Environment.GetEnvironmentVariable("DFO_PARTY_DUNGEON_COOP") == "0") return;
             if (_partyManager == null || _sessions == null || leader?.Player == null) return;
 
@@ -334,14 +585,32 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log($"[{ProtocolName}] PARTY_RETURN_VILLAGE: leader={leader.Player.CharacterId} party={party.PartyId} members={party.Count} → fan-out 跟随退出");
             foreach (var m in party.MembersBySlot())
             {
+                if (!CanContinueTownProjection(leader, leaderGuard)) return;
                 if (m.UserId == leaderUid) continue;
                 _sessions.TryGet(m.CharacterId, out var bs);
                 if (bs?.Player == null || bs.TcpClient == null || !bs.TcpClient.Connected) continue;
-                if (bs.Player.CurrentRun == null) continue;   // 已在城镇, 不重复拉
+                var memberRun = bs.Player.CurrentRun;
+                if (memberRun == null
+                    || memberRun.PartyDungeonInstanceId
+                        != leaderRunIdentity.PartyDungeonInstanceId)
+                {
+                    continue;
+                }
+                var memberRunIdentity = memberRun.CaptureIdentity();
                 try
                 {
-                    await ReturnSelfToTownAsync(bs, header);
-                    await SendTownAccountStateAsync(bs, "party-return-village");
+                    if (!await ReturnSelfToTownAsync(
+                            bs,
+                            header,
+                            memberRunIdentity,
+                            memberRun.TownReturnAnchor))
+                    {
+                        continue;
+                    }
+                    await SendTownAccountStateAsync(
+                        bs,
+                        "party-return-village",
+                        TownProjectionGuard.ForEndedRun(memberRunIdentity));
                     FileLogger.Log($"[{ProtocolName}] PARTY_RETURN_VILLAGE: member cid={bs.Player.CharacterId} 跟随退出→城镇");
                 }
                 catch (Exception ex)
@@ -351,8 +620,13 @@ namespace DfoServer.Network.Handlers
             }
         }
 
-        private async Task SendTownAccountStateAsync(EnhancedClientSession session, string reason)
+        private async Task SendTownAccountStateAsync(
+            EnhancedClientSession session,
+            string reason,
+            TownProjectionGuard projectionGuard)
         {
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return;
             var accountId = session?.Account?.AccountId ?? 0;
             var characterId = session?.Player?.CharacterId ?? 0;
             if (accountId <= 0 || characterId <= 0)
@@ -366,8 +640,27 @@ namespace DfoServer.Network.Handlers
                 _honorLevel,
                 $"{reason} subtype0",
                 summary);
+            if (!CanContinueTownProjection(session, projectionGuard))
+                return;
 
             await _honorLevel.SendInfoAsync(session, ProtocolName, reason, summary);
+        }
+
+        private static bool CanContinueTownProjection(
+            EnhancedClientSession session,
+            TownProjectionGuard projectionGuard)
+        {
+            if (projectionGuard.Selection != null)
+            {
+                return projectionGuard.Selection.IsReturning
+                    && session?.Player?.IsCurrentDungeonSelection(
+                        projectionGuard.Selection) == true;
+            }
+
+            return !projectionGuard.EndedRun.IsValid
+                || Dungeon.DungeonRunLifecycle.CanProjectTownState(
+                    session,
+                    projectionGuard.EndedRun);
         }
     }
 }

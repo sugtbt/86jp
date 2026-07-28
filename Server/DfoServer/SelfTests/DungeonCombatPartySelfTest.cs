@@ -7,6 +7,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.DeathTower;
 using DfoServer.Game.Dungeon;
+using DfoServer.GameWorld;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Party;
 using DfoServer.Game.ReviveCoin;
@@ -76,6 +77,88 @@ namespace DfoServer.SelfTests
                     ref failures);
                 Check("ordinary party kill still propagates the room kill sequence",
                     memberRun.RoomKilledSeqIds.SetEquals(new[] { MonsterSequence }),
+                    ref failures);
+
+                var ordinaryKillerRun = fixture.Killer.Session.Player.CurrentRun;
+                var killerAfterFirstKill = fixture.Killer.Session.Player.Exp;
+                var memberAfterFirstKill = fixture.Member.Session.Player.Exp;
+                var killerTotalExp = ordinaryKillerRun.TotalExp;
+                var memberTotalExp = memberRun.TotalExp;
+                var killerTotalGold = ordinaryKillerRun.TotalGold;
+                var memberTotalGold = memberRun.TotalGold;
+                var killerDropCount = ordinaryKillerRun.Drops.Count;
+                var memberDropCount = memberRun.Drops.Count;
+                fixture.KillMonster();
+                Check("duplicate party kill does not repeat participant rewards",
+                    fixture.Killer.Session.Player.Exp == killerAfterFirstKill
+                    && fixture.Member.Session.Player.Exp == memberAfterFirstKill
+                    && ordinaryKillerRun.TotalExp == killerTotalExp
+                    && memberRun.TotalExp == memberTotalExp
+                    && ordinaryKillerRun.TotalGold == killerTotalGold
+                    && memberRun.TotalGold == memberTotalGold
+                    && ordinaryKillerRun.Drops.Count == killerDropCount
+                    && memberRun.Drops.Count == memberDropCount,
+                    ref failures);
+
+                fixture.PrepareTrainingPartyKill();
+                var killerRun = fixture.Killer.Session.Player.CurrentRun;
+                memberRun = fixture.Member.Session.Player.CurrentRun;
+                killerExp = fixture.Killer.Session.Player.Exp;
+                memberExp = fixture.Member.Session.Player.Exp;
+
+                fixture.KillMonster();
+
+                killerPackets = fixture.Killer.ReadAvailableTypes();
+                memberPackets = fixture.Member.ReadAvailableTypes();
+                Check("interactive training kill keeps death projection but grants no party EXP",
+                    fixture.Killer.Session.Player.Exp == killerExp
+                    && fixture.Member.Session.Player.Exp == memberExp
+                    && !killerPackets.Contains(0x0025)
+                    && !memberPackets.Contains(0x0025)
+                    && killerPackets.Contains(0x0026)
+                    && memberPackets.Contains(0x0026),
+                    ref failures);
+                Check("interactive training kill creates no drops, gold, or clear settlement",
+                    killerRun.TotalExp == 0
+                    && killerRun.TotalGold == 0
+                    && killerRun.Drops.Count == 0
+                    && memberRun.TotalExp == 0
+                    && memberRun.TotalGold == 0
+                    && memberRun.Drops.Count == 0
+                    && killerRun.RunState == DungeonRunState.Active
+                    && memberRun.RunState == DungeonRunState.Active,
+                    ref failures);
+                Check("interactive training kill still records the shared room death fact",
+                    killerRun.RoomKilledSeqIds.SetEquals(new[] { MonsterSequence })
+                    && memberRun.RoomKilledSeqIds.SetEquals(new[] { MonsterSequence }),
+                    ref failures);
+
+                fixture.PrepareTimeCrackPartyKill();
+                fixture.KillMonster();
+                var killerMechanismPackets = fixture.Killer.ReadAvailableTypes();
+                var memberMechanismPackets = fixture.Member.ReadAvailableTypes();
+                Check("party MonsterKilled enters the same special mechanism path",
+                    killerMechanismPackets.Contains(0x022D)
+                    && memberMechanismPackets.Contains(0x022D)
+                    && fixture.Killer.Session.Player.CurrentRun.SpecialDungeon.TimeCrackGauge == 30
+                    && fixture.Member.Session.Player.CurrentRun.SpecialDungeon.TimeCrackGauge == 30,
+                    ref failures);
+                fixture.KillMonster();
+                Check("duplicate party kill does not repeat per-participant mechanism effects",
+                    fixture.Killer.Session.Player.CurrentRun.SpecialDungeon.TimeCrackGauge == 30
+                    && fixture.Member.Session.Player.CurrentRun.SpecialDungeon.TimeCrackGauge == 30,
+                    ref failures);
+
+                fixture.PrepareDifferentInstancePartyKill();
+                memberRun = fixture.Member.Session.Player.CurrentRun;
+                memberExp = fixture.Member.Session.Player.Exp;
+                fixture.KillMonster();
+                memberPackets = fixture.Member.ReadAvailableTypes();
+                Check("same-party players in different dungeon instances receive no kill relay",
+                    fixture.Member.Session.Player.Exp == memberExp
+                    && memberRun.RoomKilledSeqIds.Count == 0
+                    && !memberPackets.Contains(0x0025)
+                    && !memberPackets.Contains(0x0026),
                     ref failures);
             }
 
@@ -208,8 +291,63 @@ namespace DfoServer.SelfTests
                 _killer.Session.Player.Exp = 0;
                 _member.Session.Player.Level = 50;
                 _member.Session.Player.Exp = 0;
-                _killer.Session.Player.CurrentRun = CreateRun(null, monsterType: 0, monsterCode: 1001);
-                _member.Session.Player.CurrentRun = CreateRun(null, monsterType: 0, monsterCode: 1001);
+                var runs = CreateSharedRuns(monsterType: 0, monsterCode: 1001);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void PrepareTimeCrackPartyKill()
+            {
+                var definition = new SpecialDungeonDefinitionBuilder
+                {
+                    TimeCrackSandGaugeMax = 100,
+                    TimeCrackSandGaugeGainOnKill = 10,
+                    TimeCrackSandGaugeGainOnChampion = 30,
+                };
+
+                var runs = CreateSharedRuns(monsterType: 1, monsterCode: 1001);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+                _killer.Session.Player.CurrentRun.SpecialDungeon = new SpecialDungeonRuntime(
+                    definition.Build(
+                        _killer.Session.Player.CurrentRun.DungeonId,
+                        SpecialDungeonKind.TimeCrack));
+                _member.Session.Player.CurrentRun.SpecialDungeon = new SpecialDungeonRuntime(
+                    definition.Build(
+                        _member.Session.Player.CurrentRun.DungeonId,
+                        SpecialDungeonKind.TimeCrack));
+            }
+
+            public void PrepareTrainingPartyKill()
+            {
+                _killer.ReadAvailableTypes();
+                _member.ReadAvailableTypes();
+                _killer.Session.Player.Level = 50;
+                _killer.Session.Player.Exp = 0;
+                _member.Session.Player.Level = 50;
+                _member.Session.Player.Exp = 0;
+                var runs = CreateSharedRuns(
+                    monsterType: 0,
+                    monsterCode: 1001,
+                    rewardPolicy: DungeonRewardPolicy.InteractiveTraining);
+                runs.Killer.BossMapPos = new[] { 1, 1 };
+                runs.Member.BossMapPos = new[] { 1, 1 };
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void PrepareDifferentInstancePartyKill()
+            {
+                _killer.ReadAvailableTypes();
+                _member.ReadAvailableTypes();
+                _killer.Session.Player.CurrentRun = CreateRun(
+                    null,
+                    monsterType: 0,
+                    monsterCode: 1001);
+                _member.Session.Player.CurrentRun = CreateRun(
+                    null,
+                    monsterType: 0,
+                    monsterCode: 1001);
             }
 
             public void KillMonster()
@@ -251,6 +389,77 @@ namespace DfoServer.SelfTests
                     RoomLcg = tower?.StageLcg ?? new DnfLcg(0x87654321),
                 };
                 return run;
+            }
+
+            private static (DungeonRun Killer, DungeonRun Member) CreateSharedRuns(
+                byte monsterType,
+                int monsterCode,
+                DungeonRewardPolicy rewardPolicy = null)
+            {
+                var instance = new DungeonInstance(
+                    11000,
+                    0,
+                    rewardPolicy ?? DungeonRewardPolicy.Standard);
+                var roomKey = new RoomKey(1, 1, 33060);
+                var monsters = new List<GameWorld.Dungeon.MonsterSumInfo>
+                {
+                    new GameWorld.Dungeon.MonsterSumInfo
+                    {
+                        Code = monsterCode,
+                        Level = 50,
+                        Type = monsterType,
+                        IsBlocking = true,
+                        TemplateOrder = 0,
+                        PacketIndex = MonsterSequence,
+                    },
+                };
+                var maze = new GameWorld.Dungeon.MazeSumInfo
+                {
+                    Index = 33060,
+                    X = 1,
+                    Y = 1,
+                    Monsters = monsters,
+                };
+                var room = instance.GetOrCreateRoom(
+                    roomKey,
+                    roomId => new DungeonInstanceRoom(
+                        roomId,
+                        roomKey,
+                        maze,
+                        0x87654321),
+                    out _);
+
+                DungeonRun CreateParticipant(long generation)
+                {
+                    var run = new DungeonRun(
+                        instance,
+                        DungeonIdentityGenerator.NextRunId(),
+                        generation,
+                        DungeonRunState.Active)
+                    {
+                        RoomKey = roomKey,
+                        RoomStartSequence = MonsterSequence,
+                        RoomMonsters = monsters,
+                        Seed = room.Seed,
+                        RoomLcg = new DnfLcg(room.Seed),
+                    };
+                    run.SetCurrentRoom(room);
+                    var roomState = new RoomState
+                    {
+                        InstanceRoom = room,
+                        Maze = maze,
+                        FirstSeqId = MonsterSequence,
+                        MonsterCount = 1,
+                        KilledSeqIds = run.RoomKilledSeqIds,
+                        Seed = room.Seed,
+                        Lcg = run.RoomLcg,
+                    };
+                    roomState.TryActivate();
+                    run.RoomStates[roomKey] = roomState;
+                    return run;
+                }
+
+                return (CreateParticipant(1), CreateParticipant(1));
             }
 
             private static PartyMember ToPartyMember(ConnectedSession connected)

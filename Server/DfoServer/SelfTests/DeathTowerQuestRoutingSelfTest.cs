@@ -64,7 +64,7 @@ namespace DfoServer.SelfTests
                     ref failures);
 
                 tower.SetFighting();
-                new DeathTowerHandler()
+                new DeathTowerCoordinator()
                     .HandleStageCommand(fixture.Session, new GamePacketHeader(), new byte[] { 2 })
                     .GetAwaiter()
                     .GetResult();
@@ -78,7 +78,7 @@ namespace DfoServer.SelfTests
                     ref failures);
 
                 tower.SetFighting();
-                new DeathTowerHandler()
+                new DeathTowerCoordinator()
                     .TryHandleMoveMap(fixture.Session)
                     .GetAwaiter()
                     .GetResult();
@@ -98,7 +98,7 @@ namespace DfoServer.SelfTests
                     ref failures);
 
                 tower.SetFighting();
-                new DeathTowerHandler()
+                new DeathTowerCoordinator()
                     .TryHandleMoveMap(fixture.Session)
                     .GetAwaiter()
                     .GetResult();

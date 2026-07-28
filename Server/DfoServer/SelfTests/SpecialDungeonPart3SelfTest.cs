@@ -1,6 +1,9 @@
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.CharacterData;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
+using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -19,6 +22,7 @@ namespace DfoServer.SelfTests
 
             TestProtocolBodies(ref failures);
             TestEmptySpecialPassiveObjectItem(ref failures);
+            TestAntonPermissionBatch(ref failures);
             TestAntonNormalPvfSequence(ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
@@ -89,6 +93,112 @@ namespace DfoServer.SelfTests
                     0xE1, 0x00, 0x03,
                     0xE2, 0x00, 0x02),
                 ref failures);
+        }
+
+        private static void TestAntonPermissionBatch(ref int failures)
+        {
+            const int accountId = 978031;
+            const int characterId = 978131;
+            const int rollbackCharacterId = 978132;
+            var databasePath = Path.Combine(
+                Path.GetTempPath(),
+                $"anton-permission-batch-{Guid.NewGuid():N}.db");
+
+            try
+            {
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+INSERT INTO accounts (account_id, m_id, password_hash)
+VALUES (@aid, 'anton-permission-selftest', '');
+INSERT INTO characters (character_id, account_id, name, level)
+VALUES (@cid, @aid, 'AntonPermissionMain', 86),
+       (@rollbackCid, @aid, 'AntonPermissionRollback', 86);";
+                        command.Parameters.AddWithValue("@aid", accountId);
+                        command.Parameters.AddWithValue("@cid", characterId);
+                        command.Parameters.AddWithValue(
+                            "@rollbackCid",
+                            rollbackCharacterId);
+                        command.ExecuteNonQuery();
+                    }
+                }
+
+                var repository = new SqliteCharacterStateRepository(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+                var snapshot = repository.ApplyDungeonPermissionBatch(
+                    characterId,
+                    BuildPermissions((225, 3), (226, 2), (228, 1)),
+                    out var changes);
+                Check(
+                    "Anton permission changes commit as one batch",
+                    Format(changes) == "225:3,226:2,228:1"
+                        && Format(snapshot) == "225:3,226:2,228:1",
+                    ref failures);
+
+                snapshot = repository.ApplyDungeonPermissionBatch(
+                    characterId,
+                    BuildPermissions((225, 2), (226, 1), (228, 1)),
+                    out changes);
+                Check(
+                    "Anton permission state is monotonic and replay is a no-op",
+                    changes.Count == 0
+                        && Format(snapshot) == "225:3,226:2,228:1",
+                    ref failures);
+
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = $@"
+CREATE TRIGGER fail_anton_permission_batch
+BEFORE INSERT ON character_dungeon_permissions
+WHEN NEW.character_id = {rollbackCharacterId}
+ AND NEW.dungeon_id = 228
+BEGIN
+    SELECT RAISE(ABORT, 'injected Anton permission failure');
+END;";
+                        command.ExecuteNonQuery();
+                    }
+                }
+
+                var failed = false;
+                try
+                {
+                    repository.ApplyDungeonPermissionBatch(
+                        rollbackCharacterId,
+                        BuildPermissions((225, 3), (228, 1)),
+                        out _);
+                }
+                catch (SqliteException)
+                {
+                    failed = true;
+                }
+
+                Check(
+                    "Anton permission batch rolls back every prior write on failure",
+                    failed
+                        && repository.LoadDungeonPermissions(
+                            rollbackCharacterId).Count == 0,
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[FAIL] Anton permission batch checks: {ex}");
+                failures++;
+            }
+            finally
+            {
+                DeleteDatabaseFiles(databasePath);
+            }
         }
 
         private static void TestAntonNormalPvfSequence(ref int failures)
@@ -252,6 +362,26 @@ namespace DfoServer.SelfTests
 
         private static bool BytesEqual(byte[] actual, params byte[] expected)
             => actual != null && actual.SequenceEqual(expected);
+
+        private static void DeleteDatabaseFiles(string databasePath)
+        {
+            foreach (var path in new[]
+            {
+                databasePath,
+                databasePath + "-wal",
+                databasePath + "-shm",
+            })
+            {
+                try
+                {
+                    if (File.Exists(path))
+                        File.Delete(path);
+                }
+                catch
+                {
+                }
+            }
+        }
 
         private static void Check(
             string name,

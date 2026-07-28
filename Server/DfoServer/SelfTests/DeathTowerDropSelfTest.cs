@@ -7,6 +7,7 @@ using DfoServer.Game.DeathTower;
 using DfoServer.Game.Dungeon;
 using DfoServer.GameWorld;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Handlers.Dungeon;
 using PvfLib;
 
 namespace DfoServer.SelfTests
@@ -43,7 +44,7 @@ namespace DfoServer.SelfTests
             Check("0x008F caps serialized monster records to its byte count",
                 StagePacketCapsMonsterCount(), ref failures);
 
-            var generateTowerDrops = typeof(DeathTowerHandler).GetMethod(
+            var generateTowerDrops = typeof(DeathTowerCoordinator).GetMethod(
                 "TryGenerateDropsForMonster",
                 BindingFlags.Public | BindingFlags.Instance);
             Check("tower DIE_MONSTER exposes drops without owning the whole combat pipeline",

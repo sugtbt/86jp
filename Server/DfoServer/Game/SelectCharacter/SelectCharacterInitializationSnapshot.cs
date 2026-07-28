@@ -28,6 +28,8 @@ namespace DfoServer.Game.SelectCharacter
         
         public List<DungeonPermissionEntrySnapshot> DungeonPermissions { get; } = new List<DungeonPermissionEntrySnapshot>();
 
+        public List<int> QuestNotifyIds { get; } = new List<int>();
+
         public byte HotkeyKeyType { get; set; }
 
         public List<ushort> HotkeyConfigSlots { get; } = new List<ushort>();
@@ -53,9 +55,15 @@ namespace DfoServer.Game.SelectCharacter
         
 
         
+        // Legacy seed field retained for character_init_flags compatibility. It is not
+        // the first uint32 of DAILY_CHALLENGE (0x0286).
         public uint RacingDungeonCurrentEnterCount { get; set; }
 
+        public uint DailyChallengeCharacterLevel { get; set; } = 1;
+
         public List<RacingDungeonGroupSnapshot> RacingDungeonGroups { get; } = new List<RacingDungeonGroupSnapshot>();
+
+        public byte[] DailyChallengeRewardClaimFlags { get; set; } = new byte[6];
 
         public List<uint> RacingDungeonTailIds { get; } = new List<uint>();
 

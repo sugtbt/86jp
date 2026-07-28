@@ -1,6 +1,7 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Appearance;
 using DfoServer.Game.Characters;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Lottery;
@@ -50,7 +51,10 @@ namespace DfoServer.Network
         private readonly ISessionDirectory _sessionDirectory;
         // 组队与城镇/副本共享同一个 PartyManager 实例: 副本 fan-out 与跟随退出都要看到同一份队伍状态。
         private readonly Game.Party.PartyManager _partyManager;
+        private readonly DungeonInstanceRegistry _dungeonInstances;
         private readonly PartyHandler _partyHandler;
+        private readonly Handlers.Dungeon.DungeonRejoinCoordinator
+            _dungeonRejoin;
         private readonly Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> _cmdDispatch;
 
         public override string ProtocolName => "GameProtocol";
@@ -67,6 +71,8 @@ namespace DfoServer.Network
             var dailyResetService = new Game.DailyReset.DailyResetService(databasePath, schemaFilePath);
 
             var connectionString = SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
+            var dungeonPersistentEffects =
+                new DungeonPersistentEffectApplicationService(connectionString);
             var inventoryLifecycle = new InventoryCharacterLifecycleService(
                 databasePath,
                 schemaFilePath,
@@ -91,14 +97,18 @@ namespace DfoServer.Network
             _characterRepository = characterRepository;
             _selectCharacterDataSource = sqliteSelectCharacterDataSource;
             _sessionDirectory = sessionDirectory;
+            _dungeonInstances = new DungeonInstanceRegistry(
+                ClockService.Instance);
             _loginHandler = new LoginHandler(accountRepository, characterRepository);
             var mercenaryRepository = new MercenaryRepository(databasePath, schemaFilePath);
             var mercenaryRestrictions = new MercenaryRestrictionService(mercenaryRepository);
             _characterSelectHandler = new CharacterSelectHandler(
+                dungeonPersistentEffects,
                 sqliteSelectCharacterDataSource,
                 characterRepository,
                 getUserInfoTemplate,
                 sessionDirectory,
+                _dungeonInstances,
                 mercenaryRestrictions);
             _inventoryRefreshSender = new InventoryRefreshSender(sqliteSelectCharacterDataSource, characterRepository);
             var knightShieldRepository = new KnightShieldDeckRepository(databasePath, schemaFilePath);
@@ -138,9 +148,16 @@ namespace DfoServer.Network
             _petCreatureHandler = new PetCreatureHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
             // 组队与城镇/副本共享同一个 PartyManager 实例: 跟随退出/副本 fan-out 都要看到同一份队伍状态。
             _partyManager = new Game.Party.PartyManager();
-            _townHandler = new TownHandler(characterRepository, sqliteSelectCharacterDataSource, _partyManager, sessionDirectory, _inventoryRefreshSender);
+            _townHandler = new TownHandler(
+                characterRepository,
+                sqliteSelectCharacterDataSource,
+                _partyManager,
+                sessionDirectory,
+                _inventoryRefreshSender,
+                _dungeonInstances);
             var reviveCoinService = new Game.ReviveCoin.ReviveCoinService(dailyResetService);
             _dungeonHandler = new DungeonHandler(
+                dungeonPersistentEffects,
                 reviveCoinService,
                 characterRepository,
                 sqliteSelectCharacterDataSource,
@@ -149,7 +166,8 @@ namespace DfoServer.Network
                 _inventoryRefreshSender,
                 _partyManager,
                 sessionDirectory,
-                mercenaryRestrictions: mercenaryRestrictions);
+                mercenaryRestrictions: mercenaryRestrictions,
+                instanceRegistry: _dungeonInstances);
             _secretShopHandler = new SecretShopHandler(_inventoryRefreshSender);
             _staminaHandler = new StaminaHandler(_inventoryRefreshSender);
             _settingsHandler = new SettingsHandler(sessionDirectory);
@@ -174,7 +192,16 @@ namespace DfoServer.Network
             _collectionBoxHandler = new CollectionBoxHandler(_inventoryRefreshSender);
             _shopCoinEventHandler = new ShopCoinEventHandler(reviveCoinService, _inventoryRefreshSender);
             _mercenaryHandler = new MercenaryHandler(characterRepository);
-            _partyHandler = new PartyHandler(_partyManager, characterRepository, sessionDirectory);
+            _partyHandler = new PartyHandler(
+                _partyManager,
+                characterRepository,
+                sessionDirectory,
+                _dungeonInstances);
+            _dungeonRejoin = new Handlers.Dungeon.DungeonRejoinCoordinator(
+                _dungeonInstances,
+                _partyHandler.TryRestoreDungeonParticipantAsync,
+                _partyHandler.RollbackDungeonParticipantRestoreAsync,
+                _townHandler.NotifyLeaveAsync);
             PetCreatureRuntimeService.EnsureClockRegistered();
             _growthCapsuleHandler = new GrowthCapsuleHandler(
                 _inventoryRefreshSender, characterRepository);
@@ -220,9 +247,21 @@ namespace DfoServer.Network
             // 联机同屏: 通知同区域其它玩家移除该玩家分身(USER_LEAVE 0x0006)。须在状态清理前发。
             await _townHandler.NotifyLeaveAsync(session);
             var charId = session.Player?.CharacterId ?? 0;
+            var detachedForRejoin =
+                Handlers.Dungeon.DungeonRunLifecycle
+                    .DetachRunOnNetworkDisconnect(
+                        session,
+                        _dungeonInstances);
             if (charId > 0) await _sessionDirectory.UnregisterAsync(charId);
             if (charId > 0) InventoryContext.Unregister(session.SessionId, charId);
-            Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(session, "disconnect");
+            if (!detachedForRejoin)
+            {
+                Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
+                    session,
+                    "disconnect",
+                    _dungeonInstances);
+            }
+            _dungeonRejoin.ClearSession(session.SessionId);
             _townHandler.PersistPosition(session, forceImmediate: true, source: "disconnect");
             _lotteryItemHandler.ClearSession(session.SessionId);
             _craneMiniGameHandler.ClearSession(session.SessionId);
@@ -274,6 +313,7 @@ namespace DfoServer.Network
         {
             d[0x0004] = async (s, h, b) =>
             {
+                _dungeonRejoin.ClearSession(s.SessionId);
                 var prevCharId = s.Player?.CharacterId ?? 0;
                 await _characterSelectHandler.Handle_ENUM_CMDPACKET_SELECT_CHARACTER(s, h, b);
                 if (s.Player != null && s.Player.CharacterId > 0)
@@ -290,6 +330,7 @@ namespace DfoServer.Network
                     await _inventoryRefreshSender.SendAllEquipmentItemLockListRefresh(s);
                     await s.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(null);
                     await PetCreatureRuntimeService.BeginTownAsync(s, "select_character");
+                    await _dungeonRejoin.ProjectCandidateAsync(s);
                 }
             };
             d[0x0005] = _characterSelectHandler.Handle_ENUM_CMDPACKET_CREATE_CHARACTER;
@@ -453,16 +494,19 @@ namespace DfoServer.Network
             d[0x00BF] = _dungeonHandler.Handle_ENUM_CMDPACKET_DUNGEON_EVENT_STORY_PAUSE; //191
             d[0x0128] = _secretShopHandler.HandleBuyRequest;
             d[0x0129] = _secretShopHandler.HandleOpenClose;
-            d[0x013C] = _dungeonHandler.Handle_SPECIAL_SEA_CHASE_OBSERVE;
+            d[0x013C] = _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x01E4] = _dungeonHandler.Handle_ENUM_CMDPACKET_TUTORIAL_LEVEL_UP;   //484
-            d[0x0211] = _dungeonHandler.Handle_SPECIAL_SUMMON_MONSTER;
-            d[0x026B] = _dungeonHandler.Handle_SPECIAL_TIMER_MODIFY_INFO;
-            d[0x026D] = _dungeonHandler.Handle_SPECIAL_SEA_CHASE_RESULT;
-            d[0x0270] = _dungeonHandler.Handle_SPECIAL_SEA_CHASE_OBSERVE;
+            d[0x0211] = _dungeonHandler.HandleDungeonMechanismCommand;
+            d[0x0253] = _dungeonHandler.HandleDungeonMechanismCommand;
+            d[0x026B] = _dungeonHandler.HandleDungeonMechanismCommand;
+            d[0x026D] = _dungeonHandler.HandleDungeonMechanismCommand;
+            d[0x0270] = _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x0312] = PremiumQueryHandler.Handle_PREMIUM_SERVICE;                //786
             d[0x03B6] = _dungeonHandler.Handle_ENUM_CMDPACKET_GORGEOUS_CHALLENGE_TOGGLE;
-            d[0x03AB] = _dungeonHandler.Handle_BREAK_TRAP_RESULT;                  //939
+            d[0x03AB] = _dungeonHandler.HandleDungeonMechanismCommand;             //939
             d[0x009F] = _dungeonHandler.Handle_ENUM_CMDPACKET_DEATH_TOWER_STAGE_CMD; // 159
+            d[0x02D7] = _dungeonRejoin.HandleRejoinAsync;
+            d[0x02D8] = _dungeonRejoin.HandleCancelAsync;
         }
 
         private void RegisterSkillHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
@@ -498,6 +542,17 @@ namespace DfoServer.Network
 
         private void RegisterQuestHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
+            d[(ushort)CmdPacketType.IMAGE_COMMUNICATION_EQUIPMENT_USE] =
+                async (s, h, b) =>
+                {
+                    if (s.GameSession != null)
+                    {
+                        await s.GameSession.QuestManager
+                            .HandleImageCommunicationEquipmentUseAsync(
+                                h.type,
+                                b);
+                    }
+                };
             d[0x001F] = async (s, h, b) => //31
             {
                 if (s.GameSession != null)
@@ -506,20 +561,81 @@ namespace DfoServer.Network
             d[0x0020] = async (s, h, b) => //32
             {
                 if (s.GameSession != null)
-                    await s.GameSession.QuestManager.HandleGiveupQuestAsync(h.type, b);
+                    await s.GameSession.QuestManager.HandleGiveupQuestAsync(
+                        h.type,
+                        b,
+                        s.SessionId);
             };
             d[0x0021] = async (s, h, b) => //33
             {
                 if (s.GameSession != null)
                 {
+                    var sourceRun = s.Player?.CurrentRun;
+                    var sourceEvent = sourceRun != null
+                        ? DungeonEventEnvelope.Create(
+                            sourceRun,
+                            s.Player.CharacterId,
+                            "client quest set-trigger")
+                        : null;
                     var result = await s.GameSession.QuestManager.HandleSetTriggerAsync(h.type, b);
-                    await _dungeonHandler.HandleQuestSetTriggerResultAsync(s, result);
+                    await _dungeonHandler.HandleQuestSetTriggerResultAsync(
+                        s,
+                        result,
+                        sourceEvent);
                 }
             };
             d[0x0022] = async (s, h, b) => //34
             {
                 if (s.GameSession != null)
                     await s.GameSession.QuestManager.HandleFinishQuestAsync(h.type, b);
+            };
+            d[0x01FB] = (s, h, b) =>
+            {
+                s.GameSession?.QuestManager.HandleSaveQuestNotify(b);
+                return Task.CompletedTask;
+            };
+            d[0x02BC] = async (s, h, b) =>
+            {
+                if (s.GameSession == null)
+                    return;
+
+                var result = s.GameSession.QuestManager.HandleDailyChallengeReward(
+                    s.SessionId,
+                    b);
+                await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    h.type,
+                    DailyChallengeRewardAckBuilder.Build(result)));
+
+                if (result?.GrantedReward == true && result.Changes.HasChanges)
+                {
+                    var slotsByList = new Dictionary<InventoryListType, List<short>>();
+                    foreach (var change in result.Changes.Slots)
+                    {
+                        if (!slotsByList.TryGetValue(change.ListType, out var slots))
+                        {
+                            slots = new List<short>();
+                            slotsByList[change.ListType] = slots;
+                        }
+                        slots.Add(change.SlotIndex);
+                    }
+
+                    foreach (var pair in slotsByList)
+                        await _inventoryRefreshSender.SendUpdateItemList(s, pair.Key, pair.Value);
+                }
+
+                if (result?.Snapshot != null)
+                {
+                    await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        0x0286,
+                        DailyChallengeBodyBuilder.Build(result.Snapshot)));
+                }
+
+                FileLogger.Log(
+                    $"[GameProtocol] DAILY_CHALLENGE_REWARD cid={s.Player?.CharacterId ?? 0} "
+                    + $"group={result?.GroupIndex ?? -1} status={result?.Status.ToString() ?? "null"} "
+                    + $"item={result?.ItemId ?? 0} count={result?.ItemCount ?? 0}");
             };
         }
 

@@ -1,14 +1,20 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Quests;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Handlers.Dungeon;
+using DfoServer.Network.Handlers.Pets;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
@@ -35,6 +41,58 @@ namespace DfoServer.SelfTests
                 && player.DeathTowerState == null
                 && !player.IsInDeathTower,
                 ref failures);
+
+            Check("town map dungeon gate resolves to an adjacent movable return point",
+                GameWorld.Town.TryFindDungeonGateReturnPosition(
+                    new[] { 1323, 157, 30, 258, 17, 1, 340, 218, 30, 120, -1, -1 },
+                    new[] { 617, 177, 750, 230, 346, 228, 280, 100, 555, 307, 280, 100 },
+                    out var dungeonGateX,
+                    out var dungeonGateY)
+                && dungeonGateX == 378
+                && dungeonGateY == 278,
+                ref failures);
+            Check("Saint Horn dungeon-gate return anchor is loaded through TOWN and MAP PVF data",
+                GameWorld.Town.TryGetDungeonGateReturnInfo(
+                    townId: 17,
+                    areaId: 2,
+                    out var saintHornReturn)
+                && saintHornReturn.Town == 17
+                && saintHornReturn.Area == 2
+                && saintHornReturn.X == 378
+                && saintHornReturn.Y == 278,
+                ref failures);
+
+            Check("ordinary quest-opened dungeons remain persistent products",
+                !GameWorld.WorldMap.IsTaskExclusiveDungeon(70)
+                && !GameWorld.WorldMap.IsTaskExclusiveDungeon(2014)
+                && GameWorld.WorldMap.ShouldPersistDungeonPermission(70)
+                && GameWorld.WorldMap.ShouldPersistDungeonPermission(2014),
+                ref failures);
+            Check("quest asset dungeons are transient and reject stale permissions",
+                GameWorld.WorldMap.IsTaskExclusiveDungeon(515)
+                && GameWorld.WorldMap.IsTaskExclusiveDungeon(518)
+                && GameWorld.WorldMap.IsTaskExclusiveDungeon(3066)
+                && GameWorld.WorldMap.IsTaskExclusiveDungeon(522)
+                && !GameWorld.WorldMap.ShouldPersistDungeonPermission(522)
+                && !GameWorld.WorldMap.IsTaskExclusiveDungeonAvailable(
+                    522,
+                    new HashSet<int>()),
+                ref failures);
+            Check("an active quest dungeon-info reference authorizes its transient dungeon",
+                GameWorld.QuestData.ReferencesDungeon(2602, 522)
+                && GameWorld.WorldMap.IsTaskExclusiveDungeonAvailable(
+                    522,
+                    new HashSet<int> { 2602 }),
+                ref failures);
+
+            var returnAck = Network.Handlers.TownHandler
+                .BuildReturnToTownSuccessPacket(0x002A);
+            Check("return-to-town CMD result keeps the A14 success envelope",
+                returnAck.Length == 16
+                && returnAck[0] == 0x01
+                && BitConverter.ToUInt16(returnAck, 1) == 0x002A
+                && returnAck[15] == 0x01,
+                ref failures);
             // 2. 新局字段默认值 = 旧版返城重置后的取值(常量表)
             var fresh = new DungeonRun();
             Check("fresh run fields carry legacy reset defaults",
@@ -60,16 +118,56 @@ namespace DfoServer.SelfTests
                 && fresh.Tower == null,
                 ref failures);
 
+            fresh.Selection.MazeIndex = 7;
+            fresh.Combat.TotalExp = 123;
+            fresh.Settlement.CardFlipCount = 2;
+            fresh.QuestBridge.Snapshot = QuestRunSnapshot.Empty;
+            Check("DungeonRun compatibility properties project composed state",
+                fresh.MazeIndex == 7
+                && fresh.TotalExp == 123
+                && fresh.CardFlipCount == 2
+                && ReferenceEquals(fresh.QuestSnapshot, QuestRunSnapshot.Empty)
+                && fresh.Timers != null
+                && fresh.Mechanisms != null,
+                ref failures);
+
             CheckTowerSettlementPolicy(ref failures);
             CheckTowerRewardGrantPersistence(ref failures);
-            // 3. BeginRun 建立新局
+            // 3. Selection identity exists before a run and its participant anchor
+            // is copied into the run that follows.
+            var selectionAnchor = new DungeonTownReturnAnchor(
+                townId: 13,
+                areaId: 2,
+                x: 378,
+                y: 278,
+                direction: 5,
+                areaState: 3);
+            var selection = player.BeginDungeonSelection(selectionAnchor);
+            Check("dungeon selection has a no-run identity and deduplicates return",
+                selection != null
+                && player.IsCurrentDungeonSelection(selection)
+                && selection.TryBeginReturn()
+                && !selection.TryBeginReturn(),
+                ref failures);
+            selection.CancelReturn();
+
+            // 4. BeginRun 建立新局
             DungeonRunLifecycle.BeginRun(session, 1002, 1);
             var run = player.CurrentRun;
             Check("BeginRun creates run with entry params",
                 run != null
                 && run.DungeonId == 1002
                 && run.Difficulty == 1
-                && run.Phase == DungeonRunPhase.InProgress,
+                && run.Phase == DungeonRunPhase.InProgress
+                && run.TownReturnAnchor.IsValid
+                && run.TownReturnAnchor.TownId == 13
+                && run.TownReturnAnchor.AreaId == 2
+                && run.TownReturnAnchor.X == 378
+                && run.TownReturnAnchor.Y == 278,
+                ref failures);
+            Check("new run invalidates the preceding dungeon selection identity",
+                player.CurrentDungeonSelection == null
+                && !player.IsCurrentDungeonSelection(selection),
                 ref failures);
 
             var markerRun = new DungeonRun(1002, 0);
@@ -79,8 +177,14 @@ namespace DfoServer.SelfTests
                 && markerRun.TryMarkClearMapQuestSynced(0, 33061)
                 && markerRun.TryMarkClearMapQuestSynced(1002, 33060),
                 ref failures);
+            markerRun.UnmarkClearMapQuestSynced(0, 33060);
+            Check("failed clear-map quest sync can release its run marker",
+                markerRun.TryMarkClearMapQuestSynced(0, 33060),
+                ref failures);
 
-            // 4. 跨局字段不随 run 重建
+            CheckP0StateAndEffectSemantics(session, ref failures);
+
+            // 5. 跨局字段不随 run 重建
             player.HellPartyGorgeousChallengeEnabled = true;
             DungeonRunLifecycle.EndRunOnTeardown(session, "selftest");
             Check("teardown clears run",
@@ -99,6 +203,22 @@ namespace DfoServer.SelfTests
             catch { idempotentOk = false; }
             Check("End without run is idempotent", idempotentOk, ref failures);
 
+            player.CharacterId = 1001;
+            LinkedDungeonEntryAuthorizationStore.Grant(
+                player,
+                sourceDungeonId: 76,
+                targetDungeonId: 301,
+                difficulty: 2);
+            player.CharacterId = 0;
+            DungeonRunLifecycle.EndRunToTownAsync(session).GetAwaiter().GetResult();
+            Check("town transition preserves one-shot linked authorization",
+                LinkedDungeonEntryAuthorizationStore.HasPending(player),
+                ref failures);
+            DungeonRunLifecycle.EndRunOnTeardown(session, "linked-auth-selftest");
+            Check("disconnect or character teardown clears linked authorization",
+                !LinkedDungeonEntryAuthorizationStore.HasPending(player),
+                ref failures);
+
             // 6. 翻牌定时器句柄: 取消置空 + 换局时旧句柄必被取消
             DungeonRunLifecycle.BeginRun(session, 1002, 0);
             var firstRun = player.CurrentRun;
@@ -106,12 +226,15 @@ namespace DfoServer.SelfTests
                 "selftest:auto-flip:" + Guid.NewGuid().ToString("N"),
                 DateTime.UtcNow.AddHours(1),
                 _ => { });
-            var versionBeforeCancel = firstRun.AutoFlipTimerVersion;
-            firstRun.AutoFlipTimerHandle = handle;
+            var autoFlipTicket = firstRun.Timers.Begin(
+                DungeonRunTimerKeys.SettlementCardAutoFlow);
+            firstRun.Timers.Attach(autoFlipTicket, handle);
             DungeonRunLifecycle.CancelAutoFlip(session);
-            Check("CancelAutoFlip cancels and clears the handle",
-                firstRun.AutoFlipTimerHandle == null
-                && firstRun.AutoFlipTimerVersion == versionBeforeCancel + 1
+            Check("CancelAutoFlip invalidates its registry ticket and cancels the handle",
+                !firstRun.Timers.IsCurrent(autoFlipTicket)
+                && firstRun.Timers.GetGeneration(
+                    DungeonRunTimerKeys.SettlementCardAutoFlow)
+                    == autoFlipTicket.Generation + 1
                 && !handle.Cancel(),
                 ref failures);
 
@@ -119,14 +242,17 @@ namespace DfoServer.SelfTests
                 "selftest:death-respawn:" + Guid.NewGuid().ToString("N"),
                 DateTime.UtcNow.AddHours(1),
                 _ => { });
-            var deathVersionBeforeCancel = firstRun.DeathRespawnTimerVersion;
             firstRun.IsWaitingDeathRespawn = true;
             firstRun.DeathRespawnAvailableAt = DateTime.UtcNow.AddHours(1);
-            firstRun.DeathRespawnTimerHandle = deathHandle;
+            var deathTicket = firstRun.Timers.Begin(
+                DungeonRunTimerKeys.CombatDeathRespawn);
+            firstRun.Timers.Attach(deathTicket, deathHandle);
             DungeonRunLifecycle.CancelDeathRespawn(session);
-            Check("CancelDeathRespawn cancels and clears the handle",
-                firstRun.DeathRespawnTimerHandle == null
-                && firstRun.DeathRespawnTimerVersion == deathVersionBeforeCancel + 1
+            Check("CancelDeathRespawn invalidates its registry ticket and state",
+                !firstRun.Timers.IsCurrent(deathTicket)
+                && firstRun.Timers.GetGeneration(
+                    DungeonRunTimerKeys.CombatDeathRespawn)
+                    == deathTicket.Generation + 1
                 && !firstRun.IsWaitingDeathRespawn
                 && firstRun.DeathRespawnAvailableAt == DateTime.MinValue
                 && !deathHandle.Cancel(),
@@ -140,16 +266,42 @@ namespace DfoServer.SelfTests
                 "selftest:death-respawn:" + Guid.NewGuid().ToString("N"),
                 DateTime.UtcNow.AddHours(1),
                 _ => { });
-            firstRun.AutoFlipTimerHandle = staleHandle;
+            var staleAutoFlipTicket = firstRun.Timers.Begin(
+                DungeonRunTimerKeys.SettlementCardAutoFlow);
+            firstRun.Timers.Attach(staleAutoFlipTicket, staleHandle);
             firstRun.IsWaitingDeathRespawn = true;
             firstRun.DeathRespawnAvailableAt = DateTime.UtcNow.AddHours(1);
-            firstRun.DeathRespawnTimerHandle = staleDeathHandle;
+            var staleDeathTicket = firstRun.Timers.Begin(
+                DungeonRunTimerKeys.CombatDeathRespawn);
+            firstRun.Timers.Attach(staleDeathTicket, staleDeathHandle);
+            var staleIdentity = firstRun.CaptureIdentity();
+            var staleGeneration = firstRun.RunGeneration;
             DungeonRunLifecycle.BeginRun(session, 1003, 0);
             Check("BeginRun cancels the previous run timer and swaps the run",
                 !staleHandle.Cancel()
                 && !staleDeathHandle.Cancel()
+                && !firstRun.Timers.IsCurrent(staleAutoFlipTicket)
+                && !firstRun.Timers.IsCurrent(staleDeathTicket)
                 && !ReferenceEquals(player.CurrentRun, firstRun)
                 && player.CurrentRun.DungeonId == 1003,
+                ref failures);
+            Check("new run generation permanently invalidates old continuations",
+                player.CurrentRun.RunGeneration > staleGeneration
+                && !player.IsCurrentDungeonRun(staleIdentity)
+                && firstRun.RunState == DungeonRunState.Ended
+                && !firstRun.TryActivate(),
+                ref failures);
+            var replacementRun = player.CurrentRun;
+            Check("stale end request cannot detach a replacement run",
+                !DungeonRunLifecycle.TryEndRunToTownAsync(session, staleIdentity)
+                    .GetAwaiter()
+                    .GetResult()
+                && ReferenceEquals(player.CurrentRun, replacementRun),
+                ref failures);
+            Check("stale pet continuation cannot finish town cleanup",
+                !PetCreatureRuntimeService.CanCompleteEndedRun(
+                    session,
+                    staleIdentity),
                 ref failures);
 
             // 7. 塔局: 挂 Tower 载荷, 返城随局消失
@@ -238,6 +390,362 @@ namespace DfoServer.SelfTests
             if (!tower.TryPickupGroundItem(11, out _))
                 throw new InvalidOperationException("tower lifecycle fixture pickup failed");
             return tower;
+        }
+
+        private static void CheckP0StateAndEffectSemantics(
+            EnhancedClientSession session,
+            ref int failures)
+        {
+            const int workerCount = 32;
+            var run = new DungeonRun(1002, 0);
+            var facts = new ConcurrentBag<DungeonClearedFact>();
+            var createdCount = 0;
+            Parallel.For(0, workerCount, index =>
+            {
+                var source = DungeonEventEnvelope.Create(
+                    run,
+                    sourcePlayerId: 1,
+                    cause: $"parallel-clear-{index}");
+                var fact = run.Instance.GetOrCreateClearedFact(
+                    new DungeonClearIntent(source, source.Cause, 0),
+                    out var created);
+                if (created)
+                    Interlocked.Increment(ref createdCount);
+                facts.Add(fact);
+            });
+
+            var clearFact = run.Instance.ClearedFact;
+            Check("concurrent clear intents create one shared DungeonCleared fact",
+                createdCount == 1
+                && clearFact != null
+                && facts.Count == workerCount
+                && facts.All(fact => ReferenceEquals(fact, clearFact)),
+                ref failures);
+
+            var clearTransitions = 0;
+            Parallel.For(0, workerCount, _ =>
+            {
+                if (run.TryBeginClearCommit(clearFact))
+                    Interlocked.Increment(ref clearTransitions);
+            });
+            Check("concurrent clear transition has one first caller and resumable token",
+                clearTransitions == 1
+                && run.CanResumeClearCommit(clearFact)
+                && run.TryCompleteClearCommit(clearFact)
+                && !run.TryCompleteClearCommit(clearFact),
+                ref failures);
+
+            var settlementTransitions = 0;
+            Parallel.For(0, workerCount, _ =>
+            {
+                if (run.TryBeginSettlementPreparation())
+                    Interlocked.Increment(ref settlementTransitions);
+            });
+            Check("duplicate settlement preparation is a no-op with one executor state",
+                settlementTransitions == 1
+                && run.CanResumeSettlementPreparation()
+                && run.TryMarkResultShown()
+                && !run.TryMarkResultShown()
+                && run.TryCompleteSettlement(),
+                ref failures);
+
+            var effectId = new DungeonEffectId(
+                clearFact.SourceEventId,
+                "parallel-effect",
+                DungeonEffectScope.Instance,
+                run.PartyDungeonInstanceId);
+            var reservations = new ConcurrentBag<DungeonEffectReservation>();
+            Parallel.For(0, workerCount, _ =>
+            {
+                if (run.Instance.Effects.TryReserve(effectId, out var reservation))
+                    reservations.Add(reservation);
+            });
+            var onlyReservation = reservations.SingleOrDefault();
+            Check("parallel effect reservation elects exactly one executor",
+                reservations.Count == 1
+                && onlyReservation.IsValid
+                && run.Instance.Effects.TryCommit(onlyReservation)
+                && !run.Instance.Effects.TryReserve(effectId, out _),
+                ref failures);
+
+            var retryEffectId = new DungeonEffectId(
+                Guid.NewGuid(),
+                "persistent-retry",
+                DungeonEffectScope.Persistent,
+                run.RunId);
+            var firstReserved = run.Effects.TryReserve(
+                retryEffectId,
+                out var failedReservation);
+            var failed = run.Effects.TryFail(failedReservation);
+            var retried = run.Effects.TryReserve(
+                retryEffectId,
+                out var retryReservation);
+            Check("failed effect releases its lease and retries with the same stable id",
+                firstReserved
+                && failed
+                && retried
+                && !run.Effects.TryCommit(failedReservation)
+                && run.Effects.TryCommit(retryReservation)
+                && run.Effects.GetState(retryEffectId) == DungeonEffectState.Committed,
+                ref failures);
+
+            var sharedInstance = new DungeonInstance(1003, 1);
+            var leaderRun = new DungeonRun(
+                sharedInstance,
+                DungeonIdentityGenerator.NextRunId(),
+                runGeneration: 1,
+                DungeonRunState.Active);
+            var memberRun = new DungeonRun(
+                sharedInstance,
+                DungeonIdentityGenerator.NextRunId(),
+                runGeneration: 1,
+                DungeonRunState.Active);
+            var actorMaze = new GameWorld.Dungeon.MazeSumInfo
+            {
+                X = 2,
+                Y = 0,
+                Index = 17714,
+                Monsters = new List<GameWorld.Dungeon.MonsterSumInfo>
+                {
+                    new GameWorld.Dungeon.MonsterSumInfo
+                    {
+                        Code = 56763,
+                        Level = 88,
+                        Type = 0,
+                    },
+                },
+            };
+            var actorRoomKey = new RoomKey(2, 0, -1);
+            var actorRoom = sharedInstance.GetOrCreateRoom(
+                actorRoomKey,
+                roomId => new DungeonInstanceRoom(
+                    roomId,
+                    actorRoomKey,
+                    actorMaze,
+                    seed: 1234,
+                    firstActorSequenceId: 43210),
+                out var actorRoomCreated);
+            var sameActorRoom = sharedInstance.GetOrCreateRoom(
+                actorRoomKey,
+                roomId => new DungeonInstanceRoom(
+                    roomId,
+                    actorRoomKey,
+                    actorMaze,
+                    seed: 5678,
+                    firstActorSequenceId: 12345),
+                out var sameActorRoomCreated);
+            var actorStartMap = Network.Builders.DungeonNotificationBuilder.BuildStartMap(
+                actorRoom.Maze,
+                actorRoom.FirstActorSequenceId,
+                randomSeed: (int)actorRoom.Seed);
+            Check("shared room freezes one actor sequence range for every participant",
+                actorRoomCreated
+                && !sameActorRoomCreated
+                && ReferenceEquals(actorRoom, sameActorRoom)
+                && actorRoom.FirstActorSequenceId == 43210
+                && BitConverter.ToUInt16(actorStartMap, 23) == 43210,
+                ref failures);
+            var bossPosition = new[] { 5, 4 };
+            var ridableObjects = new[]
+            {
+                new RidableObjectSpawnEntry { ObjectIndex = 11, MapX = 2, MapY = 1 },
+            };
+            var clearConditionEntry = new PvfLib.ClearConditionEntry
+            {
+                Type = 2,
+                TargetId = 123,
+                Count = 1,
+            };
+            var selection = new DungeonSelectionSnapshot
+            {
+                MazeIndex = 7,
+                MazeStartMapId = 33060,
+                MazeStartX = 2,
+                MazeStartY = 1,
+                BossMapPosition = bossPosition,
+                RidableObjects = ridableObjects,
+                ClearConditionTemplate = new ClearConditionState(
+                    new List<PvfLib.ClearConditionEntry> { clearConditionEntry }),
+            };
+            sharedInstance.TryFreezeSelection(selection);
+            bossPosition[0] = 99;
+            ridableObjects[0].ObjectIndex = 99;
+            clearConditionEntry.Count = 99;
+            var exposedBossPosition = sharedInstance.Selection.BossMapPosition;
+            exposedBossPosition[0] = 88;
+            sharedInstance.Selection.ClearConditionTemplate.Check(2, 123);
+            sharedInstance.Selection.ApplyTo(leaderRun);
+            sharedInstance.Selection.ApplyTo(memberRun);
+            leaderRun.QuestSnapshot = QuestRunSnapshot.Capture(
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest { Slot = 0, QuestId = 100, TriggerValue = 1 },
+                });
+            memberRun.QuestSnapshot = QuestRunSnapshot.Capture(
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest { Slot = 0, QuestId = 200, TriggerValue = 1 },
+                });
+
+            var worldEffectId = new DungeonEffectId(
+                Guid.NewGuid(),
+                "open-world-door",
+                DungeonEffectScope.Instance,
+                sharedInstance.PartyDungeonInstanceId);
+            var worldFirst = sharedInstance.Effects.TryReserve(
+                worldEffectId,
+                out var worldReservation);
+            var worldCommitted = sharedInstance.Effects.TryCommit(worldReservation);
+            var playerEventId = Guid.NewGuid();
+            var leaderEffectId = new DungeonEffectId(
+                playerEventId,
+                "quest-progress",
+                DungeonEffectScope.Player,
+                leaderRun.RunId);
+            var memberEffectId = new DungeonEffectId(
+                playerEventId,
+                "quest-progress",
+                DungeonEffectScope.Player,
+                memberRun.RunId);
+            var leaderReserved = leaderRun.Effects.TryReserve(
+                leaderEffectId,
+                out var leaderReservation);
+            var memberReserved = memberRun.Effects.TryReserve(
+                memberEffectId,
+                out var memberReservation);
+            Check("shared map stays identical while participant quest snapshots remain personal",
+                leaderRun.PartyDungeonInstanceId == memberRun.PartyDungeonInstanceId
+                && leaderRun.MazeIndex == memberRun.MazeIndex
+                && leaderRun.MazeStartMapId == memberRun.MazeStartMapId
+                && leaderRun.BossMapPos.SequenceEqual(memberRun.BossMapPos)
+                && leaderRun.BossMapPos.SequenceEqual(new[] { 5, 4 })
+                && leaderRun.RidableObjects.Count == 1
+                && leaderRun.RidableObjects[0].ObjectIndex == 11
+                && leaderRun.ClearCondition.TotalRequired == 1
+                && memberRun.ClearCondition.TotalRequired == 1
+                && leaderRun.QuestSnapshot.Contains(100)
+                && !leaderRun.QuestSnapshot.Contains(200)
+                && memberRun.QuestSnapshot.Contains(200)
+                && !memberRun.QuestSnapshot.Contains(100),
+                ref failures);
+            Check("world effect commits once and personal effect commits once per participant",
+                worldFirst
+                && worldCommitted
+                && !sharedInstance.Effects.TryReserve(worldEffectId, out _)
+                && leaderReserved
+                && memberReserved
+                && leaderRun.Effects.TryCommit(leaderReservation)
+                && memberRun.Effects.TryCommit(memberReservation),
+                ref failures);
+
+            var questRun = new DungeonRun(1002, 0);
+            var firstQuestRoom = new DungeonInstanceRoom(
+                1001,
+                new RoomKey(1, 1, 0),
+                default,
+                1);
+            var nextQuestRoom = new DungeonInstanceRoom(
+                1002,
+                new RoomKey(2, 1, 0),
+                default,
+                2);
+            questRun.SetCurrentRoom(firstQuestRoom);
+            var questSource = DungeonEventEnvelope.Create(
+                questRun,
+                sourcePlayerId: 1,
+                cause: "quest set-trigger selftest");
+            Check("quest completion accepts only its captured run and room",
+                DungeonSettlementHandler.IsQuestCompletionSourceCurrent(
+                    questRun,
+                    questSource),
+                ref failures);
+            questRun.SetCurrentRoom(nextQuestRoom);
+            Check("quest completion from a previous room cannot clear the current room",
+                !DungeonSettlementHandler.IsQuestCompletionSourceCurrent(
+                    questRun,
+                    questSource),
+                ref failures);
+            var replacementQuestRun = new DungeonRun(1002, 0);
+            replacementQuestRun.SetCurrentRoom(firstQuestRoom);
+            Check("quest completion from a previous run cannot clear a replacement run",
+                !DungeonSettlementHandler.IsQuestCompletionSourceCurrent(
+                    replacementQuestRun,
+                    questSource),
+                ref failures);
+
+            var checkpointRun = session.Player.CurrentRun;
+            var checkpointIdentity = checkpointRun.CaptureIdentity();
+            var persistedExecutions = 0;
+            var downstreamExecutions = 0;
+            var firstPersist = DungeonSettlementHandler
+                .ExecuteSettlementEffectAsync(
+                    session,
+                    checkpointRun,
+                    checkpointIdentity,
+                    "selftest-persistent-checkpoint",
+                    () =>
+                    {
+                        Interlocked.Increment(ref persistedExecutions);
+                        return Task.CompletedTask;
+                    })
+                .GetAwaiter()
+                .GetResult();
+            var downstreamFailed = false;
+            try
+            {
+                DungeonSettlementHandler.ExecuteSettlementEffectAsync(
+                        session,
+                        checkpointRun,
+                        checkpointIdentity,
+                        "selftest-downstream-checkpoint",
+                        () =>
+                        {
+                            Interlocked.Increment(ref downstreamExecutions);
+                            throw new InvalidOperationException(
+                                "injected downstream failure");
+                        })
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            catch (InvalidOperationException)
+            {
+                downstreamFailed = true;
+            }
+
+            var replayPersist = DungeonSettlementHandler
+                .ExecuteSettlementEffectAsync(
+                    session,
+                    checkpointRun,
+                    checkpointIdentity,
+                    "selftest-persistent-checkpoint",
+                    () =>
+                    {
+                        Interlocked.Increment(ref persistedExecutions);
+                        return Task.CompletedTask;
+                    })
+                .GetAwaiter()
+                .GetResult();
+            var retryDownstream = DungeonSettlementHandler
+                .ExecuteSettlementEffectAsync(
+                    session,
+                    checkpointRun,
+                    checkpointIdentity,
+                    "selftest-downstream-checkpoint",
+                    () =>
+                    {
+                        Interlocked.Increment(ref downstreamExecutions);
+                        return Task.CompletedTask;
+                    })
+                .GetAwaiter()
+                .GetResult();
+            Check("settlement retry skips committed persistence and resumes failed downstream effect",
+                firstPersist
+                && downstreamFailed
+                && replayPersist
+                && retryDownstream
+                && persistedExecutions == 1
+                && downstreamExecutions == 2,
+                ref failures);
         }
 
         private static void CheckTowerSettlementPolicy(ref int failures)
