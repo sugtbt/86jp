@@ -69,8 +69,8 @@ namespace DfoServer.GameWorld
             MapMonsterCodeCache =
                 new ConcurrentDictionary<int, HashSet<int>>();
 
-        private static readonly ConcurrentDictionary<int, DungeonMapDirectoryIndex> DirIndexCache =
-            new ConcurrentDictionary<int, DungeonMapDirectoryIndex>();
+        private static readonly ConcurrentDictionary<long, DungeonMapDirectoryIndex> DirIndexCache =
+            new ConcurrentDictionary<long, DungeonMapDirectoryIndex>();
 
         internal static int ResolveMapId(int dungeonId, int x, int y, MazeInfo maze, int mazeIndex, int[] bossPos)
         {
@@ -92,7 +92,11 @@ namespace DfoServer.GameWorld
             bool isBossRoom = effectiveBoss != null && effectiveBoss[0] == x && effectiveBoss[1] == y;
             bool isQuestConnected = maze.QuestConnection != null && maze.QuestConnection.Length >= 2;
 
-            var index = GetOrBuildIndex(dungeonId, maplst, mapDirCandidates);
+            var index = GetOrBuildIndex(
+                dungeonId,
+                mazeIndex,
+                maplst,
+                mapDirCandidates);
 
             // A boss specification belongs to the selected maze, while the directory
             // index is shared by every maze in the dungeon. Resolve the maze-local
@@ -454,9 +458,16 @@ namespace DfoServer.GameWorld
 
         // --- Index building ---
 
-        private static DungeonMapDirectoryIndex GetOrBuildIndex(int dungeonId, LstFile maplst, List<string> mapDirCandidates)
+        private static DungeonMapDirectoryIndex GetOrBuildIndex(
+            int dungeonId,
+            int mazeIndex,
+            LstFile maplst,
+            List<string> mapDirCandidates)
         {
-            return DirIndexCache.GetOrAdd(dungeonId, _ => BuildIndex(maplst, mapDirCandidates));
+            var cacheKey = ((long)(uint)dungeonId << 32) | (uint)mazeIndex;
+            return DirIndexCache.GetOrAdd(
+                cacheKey,
+                _ => BuildIndex(maplst, mapDirCandidates));
         }
 
         internal static DungeonMapDirectoryIndex BuildIndex(LstFile maplst, IReadOnlyList<string> mapDirCandidates)

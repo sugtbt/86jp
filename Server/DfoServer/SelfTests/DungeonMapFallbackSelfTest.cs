@@ -14,6 +14,36 @@ namespace DfoServer.SelfTests
             Console.WriteLine("=== DUNGEON_MAP_FALLBACK selftest ===");
             var failures = 0;
 
+            var northGatePreviousQuestSelection = DungeonData.SelectDungeonMaze(
+                dungeonId: 88,
+                difficulty: 0,
+                activeQuestIds: new HashSet<int> { 2160 });
+            var northGatePreviousQuestStart =
+                DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 88,
+                    x: 0xFF,
+                    y: 0xFF,
+                    mazeIndex: northGatePreviousQuestSelection.Index);
+            var northGateEnemySelection = DungeonData.SelectDungeonMaze(
+                dungeonId: 88,
+                difficulty: 0,
+                activeQuestIds: new HashSet<int> { 2161 });
+            var northGateEnemyStart =
+                DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 88,
+                    x: 0xFF,
+                    y: 0xFF,
+                    mazeIndex: northGateEnemySelection.Index);
+            Check(
+                "north gate quest 2161 does not reuse previous quest maze map index",
+                northGatePreviousQuestSelection.Index == 2
+                && northGatePreviousQuestStart.Index == 22428
+                && northGateEnemySelection.Index == 0
+                && northGateEnemyStart.Index == 22428
+                && CountMonster(northGateEnemyStart, 61801) == 3
+                && CountMonster(northGateEnemyStart, 61803) == 2,
+                ref failures);
+
             var mapSpecs = new List<MapSpecificationItem>
             {
                 new MapSpecificationItem { Type = "map", X = 0, Y = 0, Index = 13417 },
