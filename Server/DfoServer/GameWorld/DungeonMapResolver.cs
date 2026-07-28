@@ -131,6 +131,23 @@ namespace DfoServer.GameWorld
             if (mapId > 0)
                 return mapId;
 
+            // Quest mazes often describe only their special start/boss rooms and
+            // rely on [greed] to reuse ordinary rooms from the default maze.
+            // Their coordinates are local to the quest layout, so falling back to
+            // the directory entry at the same coordinate can select a room with a
+            // different door shape. Nightmare Source quest 2072, for example,
+            // needs an FF room at (2,1), while the default maze's (2,1) is CC.
+            if (isQuestConnected)
+            {
+                mapId = ResolveQuestConnectedMapByGreed(
+                    loaded.File,
+                    maze,
+                    x,
+                    y);
+                if (mapId > 0)
+                    return mapId;
+            }
+
             // Multi-room Tower of Despair floors use the base map for room zero and
             // same-floor "_x" map variants for later rooms. Keep the base map as a
             // fallback only after explicit MapSpecification candidates were checked.
@@ -148,6 +165,120 @@ namespace DfoServer.GameWorld
 
             FileLogger.Log($"[DungeonMapResolver] UNRESOLVED: dungeon={dungeonId} maze={mazeIndex} room=({x},{y}) start={isStartRoom} boss={isBossRoom} quest={isQuestConnected} dirEntries={CountIndexEntries(index)}");
             return -1;
+        }
+
+        private static int ResolveQuestConnectedMapByGreed(
+            DungeonFile dungeon,
+            MazeInfo selectedMaze,
+            int x,
+            int y)
+        {
+            if (dungeon?.Mazes == null
+                || !TryGetMazeGreedCode(selectedMaze, x, y, out var expectedCode))
+            {
+                return -1;
+            }
+
+            var candidates = new List<int>();
+            var seen = new HashSet<int>();
+            foreach (var templateMaze in dungeon.Mazes)
+            {
+                if (templateMaze == null
+                    || ReferenceEquals(templateMaze, selectedMaze)
+                    || templateMaze.QuestConnection != null
+                    || templateMaze.MapSpecifications == null)
+                {
+                    continue;
+                }
+
+                foreach (var spec in templateMaze.MapSpecifications)
+                {
+                    if (spec == null
+                        || !string.Equals(
+                            spec.Type,
+                            "map",
+                            StringComparison.OrdinalIgnoreCase)
+                        || !TryGetMazeGreedCode(
+                            templateMaze,
+                            spec.X,
+                            spec.Y,
+                            out var candidateCode)
+                        || candidateCode != expectedCode)
+                    {
+                        continue;
+                    }
+
+                    if (spec.MapCandidates != null
+                        && spec.MapCandidates.Length > 0)
+                    {
+                        foreach (var candidate in spec.MapCandidates)
+                        {
+                            if (candidate > 0 && seen.Add(candidate))
+                                candidates.Add(candidate);
+                        }
+                    }
+                    else if (spec.Index > 0 && seen.Add(spec.Index))
+                    {
+                        candidates.Add(spec.Index);
+                    }
+                }
+            }
+
+            if (candidates.Count == 0)
+                return -1;
+
+            return candidates.Count > 1
+                ? candidates[Infrastructure.ServerRandom.Next(candidates.Count)]
+                : candidates[0];
+        }
+
+        internal static bool TryGetMazeGreedCode(
+            MazeInfo maze,
+            int x,
+            int y,
+            out char code)
+        {
+            code = '\0';
+            if (maze == null
+                || maze.Width <= 0
+                || maze.Height <= 0
+                || x < 0
+                || y < 0
+                || x >= maze.Width
+                || y >= maze.Height
+                || string.IsNullOrWhiteSpace(maze.Greed))
+            {
+                return false;
+            }
+
+            var compact = new List<char>();
+            foreach (var ch in maze.Greed)
+            {
+                if (!char.IsWhiteSpace(ch) && ch != '`' && ch != ',')
+                    compact.Add(ch);
+            }
+
+            var cellCount = maze.Width * maze.Height;
+            var cellIndex = y * maze.Width + x;
+            var usesRepeatedPairs = compact.Count >= cellCount * 2;
+            if (usesRepeatedPairs)
+            {
+                for (var index = 0; index < cellCount; index++)
+                {
+                    if (compact[index * 2] == compact[index * 2 + 1])
+                        continue;
+
+                    usesRepeatedPairs = false;
+                    break;
+                }
+            }
+
+            var valueIndex = usesRepeatedPairs ? cellIndex * 2 : cellIndex;
+            if (valueIndex < 0 || valueIndex >= compact.Count)
+                return false;
+
+            code = char.ToUpperInvariant(compact[valueIndex]);
+            return code != '0' && code != '.' && code != 'X';
         }
 
         internal static bool HasExplicitBossCandidatePool(

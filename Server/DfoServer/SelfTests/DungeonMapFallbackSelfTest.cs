@@ -25,6 +25,22 @@ namespace DfoServer.SelfTests
             };
             var mapDirs = new List<string> { "eternal_dream" };
 
+            var multiRowMaze = DungeonFile.Parse(
+                "[maze info]\n" +
+                "[size]\n2 2\n" +
+                "[greed]\n`JJMM\nCCDD`\n" +
+                "[start map]\n0 0\n[/start map]\n");
+            Check("dungeon parser keeps every row of multiline greed",
+                multiRowMaze.Mazes.Count == 1
+                && multiRowMaze.Mazes[0].Greed == "JJMM CCDD"
+                && DfoServer.GameWorld.DungeonMapResolver.TryGetMazeGreedCode(
+                    multiRowMaze.Mazes[0],
+                    1,
+                    1,
+                    out var lowerRightGreed)
+                && lowerRightGreed == 'D',
+                ref failures);
+
             var mapId = DfoServer.GameWorld.DungeonMapResolver.SelectFallbackMapIdForUnresolvedRoom(
                 dungeonId: 1004,
                 mazeIndex: 0,
@@ -370,6 +386,45 @@ namespace DfoServer.SelfTests
             catch (Exception ex)
             {
                 Console.WriteLine($"[FAIL] issue 189 quest maze start room uses map specification: {ex.Message}");
+                failures++;
+            }
+
+            try
+            {
+                var nightmareQuestMiddleA = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 171,
+                    x: 2,
+                    y: 1,
+                    mazeIndex: 3);
+                var nightmareQuestMiddleB = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 171,
+                    x: 3,
+                    y: 1,
+                    mazeIndex: 3);
+                var nightmareQuestRight = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 171,
+                    x: 4,
+                    y: 1,
+                    mazeIndex: 3);
+                var nightmareQuestBoss = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 171,
+                    x: 4,
+                    y: 0,
+                    mazeIndex: 3,
+                    bossPos: new[] { 4, 0 });
+
+                Check("quest 2072 reuses FF rooms instead of coordinate-mismatched maps",
+                    nightmareQuestMiddleA.Index == 14313
+                    && nightmareQuestMiddleB.Index == 14313,
+                    ref failures);
+                Check("quest 2072 route reaches its explicit right and boss rooms",
+                    nightmareQuestRight.Index == 14317
+                    && nightmareQuestBoss.Index == 13063,
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] quest 2072 Nightmare Source route map selection: {ex.Message}");
                 failures++;
             }
 
