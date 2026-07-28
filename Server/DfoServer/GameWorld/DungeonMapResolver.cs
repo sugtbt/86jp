@@ -93,6 +93,7 @@ namespace DfoServer.GameWorld
             bool isQuestConnected = maze.QuestConnection != null && maze.QuestConnection.Length >= 2;
 
             var index = GetOrBuildIndex(dungeonId, maplst, mapDirCandidates);
+            var mapSpecificationId = -1;
 
             // A boss specification belongs to the selected maze, while the directory
             // index is shared by every maze in the dungeon. Resolve the maze-local
@@ -111,6 +112,23 @@ namespace DfoServer.GameWorld
                     return explicitBossMapId;
             }
 
+            // Some dungeons contain several mazes that reuse the same start coordinate.
+            // If the selected maze explicitly points at a start-typed map, that file is
+            // authoritative. Looking in the dungeon-wide directory index first can pick
+            // another maze's start room with a different door layout (for example
+            // Twilight City maze 2: 14221 has no upper exit, while its spec selects 14289).
+            if (!isQuestConnected && isStartRoom)
+            {
+                mapSpecificationId = ResolveFromMapSpecification(
+                    maplst,
+                    maze,
+                    x,
+                    y,
+                    isBossRoom: false);
+                if (IsMapFileType(maplst, mapSpecificationId, MapFileType.Start))
+                    return mapSpecificationId;
+            }
+
             // For non-quest start/boss rooms, a typed directory file at the exact
             // coordinate takes priority over generic MapSpecification (the start/boss
             // variant has different NPCs/layout from the ordinary "map" type spec).
@@ -127,7 +145,9 @@ namespace DfoServer.GameWorld
             }
 
             // Step 1: MapSpecification
-            int mapId = ResolveFromMapSpecification(maplst, maze, x, y, isBossRoom);
+            int mapId = mapSpecificationId > 0
+                ? mapSpecificationId
+                : ResolveFromMapSpecification(maplst, maze, x, y, isBossRoom);
             if (mapId > 0)
                 return mapId;
 
@@ -148,6 +168,22 @@ namespace DfoServer.GameWorld
 
             FileLogger.Log($"[DungeonMapResolver] UNRESOLVED: dungeon={dungeonId} maze={mazeIndex} room=({x},{y}) start={isStartRoom} boss={isBossRoom} quest={isQuestConnected} dirEntries={CountIndexEntries(index)}");
             return -1;
+        }
+
+        private static bool IsMapFileType(
+            LstFile maplst,
+            int mapId,
+            MapFileType expectedType)
+        {
+            if (mapId <= 0 || maplst == null)
+                return false;
+
+            var entry = maplst.GetById(mapId);
+            if (entry == null || string.IsNullOrWhiteSpace(entry.FilePath))
+                return false;
+
+            var stem = Path.GetFileNameWithoutExtension(entry.FilePath) ?? string.Empty;
+            return ClassifyFileType(stem) == expectedType;
         }
 
         internal static bool HasExplicitBossCandidatePool(

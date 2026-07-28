@@ -637,6 +637,28 @@ namespace DfoServer.SelfTests
 
             try
             {
+                var twilightMaze = DungeonData.GetDungeonMaze(169, 2);
+                var twilightStart = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId: 169,
+                    x: twilightMaze.StartMap[0],
+                    y: twilightMaze.StartMap[1],
+                    mazeIndex: 2);
+
+                Check("twilight city maze 2 keeps its explicit upper-exit start map",
+                    twilightMaze.StartMap[0] == 0
+                    && twilightMaze.StartMap[1] == 1
+                    && twilightStart.Index == 14289
+                    && CountMonster(twilightStart, 69558) == 5,
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] twilight city maze 2 start map selection: {ex.Message}");
+                failures++;
+            }
+
+            try
+            {
                 var issue167Boss = DungeonData.GetDungeonMapMonsterSummaryInformation(
                     dungeonId: 89,
                     x: 0,
