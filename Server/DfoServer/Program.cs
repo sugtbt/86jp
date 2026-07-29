@@ -39,6 +39,7 @@ namespace DfoServer
             ("--selftest-card-reward-flow", SelfTests.CardRewardFlowSelfTest.Run),
             ("--selftest-dungeon-persistent-effects", SelfTests.DungeonPersistentEffectSelfTest.Run),
             ("--selftest-monster-card-drop", SelfTests.MonsterCardDropSelfTest.Run),
+            ("--selftest-monster-card-bind", SelfTests.MonsterCardBindSelfTest.Run),
             ("--selftest-dungeon-npc-item-drop", SelfTests.DungeonNpcItemDropSelfTest.Run),
             ("--selftest-quest-dungeon-drop", SelfTests.QuestDungeonDropSelfTest.Run),
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),

@@ -242,6 +242,7 @@ namespace PvfLib
         public string NeedSkill { get; set; }
         public string NeedMaterial { get; set; }
         public int MonsterCardId { get; set; } = -1;
+        public int MonsterCardBind { get; set; } = -1;
         public List<int> TargetItemIds { get; set; } = new List<int>();
 
         #endregion
@@ -368,6 +369,7 @@ namespace PvfLib
                     case "need skill": stk.NeedSkill = data; break;
                     case "need material": stk.NeedMaterial = data; break;
                     case "monster card id": stk.MonsterCardId = ParseInt(data); break;
+                    case "monstercard bind": stk.MonsterCardBind = ParseInt(data); break;
                     case "target item id": stk.TargetItemIds = ParseIntList(node, content); break;
 
                     

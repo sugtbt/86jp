@@ -46,6 +46,7 @@ namespace DfoServer.Network
         private readonly GrowthCapsuleHandler _growthCapsuleHandler;
         private readonly GoldLimitHandler _goldLimitHandler;
         private readonly CraneMiniGameHandler _craneMiniGameHandler;
+        private readonly MonsterCardBindHandler _monsterCardBindHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
         private readonly ISessionDirectory _sessionDirectory;
@@ -209,6 +210,7 @@ namespace DfoServer.Network
                 new Game.Currency.CharacterGoldLimitRepository(databasePath, schemaFilePath),
                 _inventoryRefreshSender);
             _craneMiniGameHandler = new CraneMiniGameHandler(_inventoryRefreshSender);
+            _monsterCardBindHandler = new MonsterCardBindHandler();
 
             _cmdDispatch = new Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>>();
             RegisterLoginHandlers(_cmdDispatch);
@@ -394,6 +396,7 @@ namespace DfoServer.Network
             d[0x00D9] = _lotteryItemHandler.HandleOverflowInfo;
             d[(ushort)CmdPacketType.CRANE_START_USE] = _craneMiniGameHandler.HandleStartUse;
             d[(ushort)CmdPacketType.CRANE_PICKUP] = _craneMiniGameHandler.HandlePickup;
+            d[(ushort)CmdPacketType.MONSTERCARD_BIND] = _monsterCardBindHandler.Handle;
             d[0x0050] = _inventoryHandler.Handle_ENUM_CMDPACKET_UPGRADE_ITEM;      //80
             d[(ushort)CmdPacketType.UPGRADE_ITEM_SEPARATE] = _inventoryHandler.Handle_UPGRADE_ITEM_SEPARATE;
             d[0x0051] = _inventoryHandler.Handle_ENUM_CMDPACKET_RESET_ITEM_ATTR;   //81 装备品级调整箱(万花镜)
