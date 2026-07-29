@@ -36,6 +36,7 @@ namespace DfoServer.SelfTests
             TestDetailCodec();
             TestListBatching();
             TestOverflowAttachmentSplitting();
+            TestMailboxAlarmPacket();
             TestSenderHardDeleteMigration();
 
             var dbPath = Path.Combine(
@@ -337,6 +338,13 @@ namespace DfoServer.SelfTests
                     attachment.ItemId == stackLimitOneItemId
                     && attachment.ItemCount == 1
                     && ItemCore.FromBytes(attachment.ItemCoreData)?.Count == 1));
+        }
+
+        private static void TestMailboxAlarmPacket()
+        {
+            var body = MailboxHandler.BuildMailboxAlarmNotification(1);
+            Check("0x0063 online mail alarm carries one UInt16 count",
+                body.Length == 2 && BitConverter.ToUInt16(body, 0) == 1);
         }
 
         private static int FindStackLimitOneStackableItemId()

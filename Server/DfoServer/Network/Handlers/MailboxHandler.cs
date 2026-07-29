@@ -579,10 +579,11 @@ namespace DfoServer.Network.Handlers
 
             try
             {
-                var writer = new GamePacketWriter();
-                writer.WriteUInt16(count);
                 await receiverSession.SendPacketAsync(
-                    GamePacketEnvelopeBuilder.Build(0x00, MailboxAlarmNotificationType, writer.ToArray())).ConfigureAwait(false);
+                    GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        MailboxAlarmNotificationType,
+                        BuildMailboxAlarmNotification(count))).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -590,6 +591,13 @@ namespace DfoServer.Network.Handlers
                 FileLogger.Log($"[Mailbox] SEND receiver alarm failed cid={receiverCharacterId}: {ex.Message}");
                 await _sessionDirectory.UnregisterAsync(receiverCharacterId).ConfigureAwait(false);
             }
+        }
+
+        internal static byte[] BuildMailboxAlarmNotification(ushort count)
+        {
+            var writer = new GamePacketWriter();
+            writer.WriteUInt16(count);
+            return writer.ToArray();
         }
 
         private async Task SendMailboxListRefresh(EnhancedClientSession session, int characterId, string reason)
@@ -1300,9 +1308,25 @@ namespace DfoServer.Network.Handlers
             writer.WriteInt32((int)(entry?.MessageId ?? 0));
             writer.WriteInt32(senderCharacterId);
             WriteMailboxString(writer, senderName, MailboxSenderNameSize);
-            WriteMailboxString(writer, entry?.Body ?? string.Empty, MailboxLetterTextSize);
+            WriteMailboxString(writer, BuildMailboxDisplayText(entry), MailboxLetterTextSize);
             writer.WriteInt32(createdAtUnixSeconds);
             writer.WriteUInt16((ushort)letterStat);
+        }
+
+        private static string BuildMailboxDisplayText(MailboxListEntry entry)
+        {
+            if (entry == null)
+                return string.Empty;
+
+            if (string.IsNullOrWhiteSpace(entry.Title)
+                || string.Equals(entry.Title, entry.Body, StringComparison.Ordinal))
+            {
+                return entry.Body ?? string.Empty;
+            }
+
+            return string.IsNullOrWhiteSpace(entry.Body)
+                ? entry.Title
+                : entry.Title + "\n" + entry.Body;
         }
 
         private static int GetMailboxSenderCharacterId(MailboxListEntry entry)

@@ -24,6 +24,8 @@ namespace DfoServer.Game.CraneMiniGame
         public int ViewCount { get; private set; }
         public int MaterialItemId { get; private set; }
         public int MaterialCount { get; private set; }
+        public int ExchangeMaterialItemId { get; private set; }
+        public int ExchangeMaterialCount { get; private set; }
         public IReadOnlyList<CraneMiniGameItem> Items { get; private set; }
 
         internal static CraneMiniGameCatalog Load()
@@ -35,16 +37,34 @@ namespace DfoServer.Game.CraneMiniGame
             CraneMiniGameItem current = null;
             var catalog = new CraneMiniGameCatalog();
             string pendingField = null;
+            var readingNeedMaterial = false;
 
             foreach (var rawLine in (text ?? string.Empty).Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 var match = FieldRegex.Match(rawLine);
+                if (readingNeedMaterial)
+                {
+                    if (match.Success && match.Groups["name"].Value.Trim().Equals("/need material", StringComparison.OrdinalIgnoreCase))
+                    {
+                        readingNeedMaterial = false;
+                        continue;
+                    }
+
+                    ParseExchangeMaterialPairs(rawLine, catalog);
+                    continue;
+                }
                 string name;
                 string valueText;
                 if (match.Success)
                 {
                     name = match.Groups["name"].Value.Trim().ToLowerInvariant();
                     valueText = match.Groups["value"].Value;
+                    if (name == "need material")
+                    {
+                        ParseExchangeMaterialPairs(valueText, catalog);
+                        readingNeedMaterial = true;
+                        continue;
+                    }
                     if (name.StartsWith("/", StringComparison.Ordinal))
                     {
                         pendingField = null;
@@ -120,6 +140,35 @@ namespace DfoServer.Game.CraneMiniGame
             }
 
             return catalog;
+        }
+
+        internal bool TryResolveCoinExchange(int itemTemplateId, out int materialItemId, out int materialCount)
+        {
+            materialItemId = 0;
+            materialCount = 0;
+            if (itemTemplateId != MaterialItemId)
+                return false;
+
+            materialItemId = ExchangeMaterialItemId;
+            materialCount = ExchangeMaterialCount;
+            return materialItemId > 0 && materialCount > 0;
+        }
+
+        private static void ParseExchangeMaterialPairs(string text, CraneMiniGameCatalog catalog)
+        {
+            if (catalog == null || string.IsNullOrWhiteSpace(text))
+                return;
+
+            var values = Regex.Matches(text, @"-?\d+");
+            for (var index = 0; index + 1 < values.Count; index += 2)
+            {
+                if (TryInt(values, index, out var itemId)
+                    && TryInt(values, index + 1, out var count))
+                {
+                    catalog.ExchangeMaterialItemId = itemId;
+                    catalog.ExchangeMaterialCount = count;
+                }
+            }
         }
 
         private static bool TryInt(MatchCollection values, int index, out int value)
