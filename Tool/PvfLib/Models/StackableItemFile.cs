@@ -234,6 +234,7 @@ namespace PvfLib
         public string PackageData { get; set; }
         public List<BoosterRewardEntry> PackageRewards { get; set; } = new List<BoosterRewardEntry>();
         public List<BoosterRewardEntry> RandomBoxRewards { get; set; } = new List<BoosterRewardEntry>();
+        public List<BoosterRewardEntry> LegacyRewards { get; set; } = new List<BoosterRewardEntry>();
         public List<BoosterRewardEntry> UpgradableLegacyRewards { get; set; } = new List<BoosterRewardEntry>();
         public List<RandomBoxRemovalItemEntry> RandomBoxRemovalItems { get; set; } = new List<RandomBoxRemovalItemEntry>();
         public string OutputItem { get; set; }
@@ -386,6 +387,7 @@ namespace PvfLib
                 root.GetChildren("package data"),
                 root.GetChildren("package data include usable period"),
                 content);
+            stk.LegacyRewards = ParseLegacyRewards(stk.IntData);
             stk.UpgradableLegacyRewards = ParseUpgradableLegacyRewards(stk.IntData);
             var randomBox = root.GetChild("RANDOMBOX");
             stk.RandomBoxRewards = ParseRandomBoxRewards(randomBox, content);
@@ -513,6 +515,29 @@ namespace PvfLib
                     ItemId = ints[i],
                     Weight = Math.Max(0, ints[i + 1]),
                     Count = Math.Max(1, ints[i + 2]),
+                });
+            }
+
+            return rewards;
+        }
+
+        private static List<BoosterRewardEntry> ParseLegacyRewards(string intData)
+        {
+            var rewards = new List<BoosterRewardEntry>();
+            var ints = ParseInts(intData);
+            // [legacy] pots store rewards as itemId/weight pairs in [int data].
+            for (var i = 0; i + 1 < ints.Count; i += 2)
+            {
+                if (ints[i] <= 0)
+                    continue;
+
+                rewards.Add(new BoosterRewardEntry
+                {
+                    RewardKind = "legacy",
+                    Group = 0,
+                    ItemId = ints[i],
+                    Weight = Math.Max(0, ints[i + 1]),
+                    Count = 1,
                 });
             }
 

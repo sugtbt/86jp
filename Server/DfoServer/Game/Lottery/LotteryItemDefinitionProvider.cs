@@ -43,12 +43,23 @@ namespace DfoServer.Game.Lottery
                 return false;
 
             var stackableType = StackableItemProvider.NormalizeType(stackable.StackableType);
-            if (!stackableType.Equals(
-                    StackableItemProvider.UpgradableLegacyType,
+            IReadOnlyList<PvfLib.BoosterRewardEntry> rewardPool;
+            if (stackableType.Equals(
+                    StackableItemProvider.LegacyType,
                     StringComparison.OrdinalIgnoreCase))
+            {
+                rewardPool = stackable.LegacyRewards;
+            }
+            else if (stackableType.Equals(
+                         StackableItemProvider.UpgradableLegacyType,
+                         StringComparison.OrdinalIgnoreCase))
+            {
+                rewardPool = stackable.UpgradableLegacyRewards;
+            }
+            else
+            {
                 return false;
-
-            IReadOnlyList<PvfLib.BoosterRewardEntry> rewardPool = stackable.UpgradableLegacyRewards;
+            }
 
             var validRewards = (rewardPool ?? Array.Empty<PvfLib.BoosterRewardEntry>())
                 .Where(reward => reward != null

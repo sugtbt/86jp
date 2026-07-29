@@ -7,6 +7,7 @@ namespace DfoServer.Game.Inventory
 {
     internal static class StackableItemProvider
     {
+        internal const string LegacyType = "[legacy]";
         internal const string UpgradableLegacyType = "[upgradable legacy]";
         internal const string RandomUpgradableLegacyType = "[random upgradable legacy]";
         private static readonly object CacheLock = new object();

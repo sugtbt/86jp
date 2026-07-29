@@ -27,6 +27,7 @@ namespace DfoServer.SelfTests
         private const short AncientHeroLotterySlot = 109;
         private const short ConcurrentLotterySlot = 110;
         private const short RequiredItemLotterySlot = 111;
+        private const short MagicCapsuleSlot = 112;
         private const short RequiredItemSlot = 157;
         private const short RewardSlot = 120;
         private const int SampleLotteryItemId = 10014964;
@@ -36,6 +37,9 @@ namespace DfoServer.SelfTests
         private const int AncientHeroLotteryItemId = 8213;
         private const int RequiredItemLotteryItemId = 10007501;
         private const int RequiredLotteryMaterialItemId = 10007498;
+        private const int MagicCapsuleItemId = 10089090;
+        private const int MagicCapsulePrimaryRewardItemId = 10089088;
+        private const int MagicCapsuleSecondaryRewardItemId = 3116;
         private const int CannedAvatarItemId = 39075;
         private const int LegacyEquipmentItemId = 100150516;
         private const int EpicEquipmentItemId = 101000004;
@@ -207,6 +211,19 @@ namespace DfoServer.SelfTests
             Check("PVF magic box is not a lottery", !definitions.TryGet(
                 MagicBoxItemId,
                 out _), ref failures);
+            Check("PVF magic capsule legacy definition", definitions.TryGet(
+                MagicCapsuleItemId,
+                out var magicCapsuleDefinition)
+                && magicCapsuleDefinition.StackableType == StackableItemProvider.LegacyType
+                && magicCapsuleDefinition.RewardPool.Count == 2
+                && magicCapsuleDefinition.RewardPool.Any(reward =>
+                    reward.ItemId == MagicCapsulePrimaryRewardItemId
+                    && reward.Weight == 80000
+                    && reward.Count == 1)
+                && magicCapsuleDefinition.RewardPool.Any(reward =>
+                    reward.ItemId == MagicCapsuleSecondaryRewardItemId
+                    && reward.Weight == 20000
+                    && reward.Count == 1), ref failures);
             Check("hero lottery gold cost comes from PVF", definitions.TryGet(
                 HeroLotteryItemId,
                 out var heroDefinition)
@@ -334,6 +351,23 @@ namespace DfoServer.SelfTests
                 && normalResult.SourceRemainingStackCount == 0
                 && normalResult.Rewards.Count > 0
                 && !normalResult.UsedDoubleReward, ref failures);
+
+            Check("magic capsule phase0 precheck", service.CanOpen(
+                inventory,
+                MagicCapsuleSlot,
+                out var magicCapsuleSource)
+                && magicCapsuleSource.ItemTemplateId == MagicCapsuleItemId, ref failures);
+            Check("magic capsule opens and consumes one", service.TryOpen(
+                inventory,
+                MagicCapsuleSlot,
+                false,
+                RejectingInventoryOverflowRewardSink.Instance,
+                out var magicCapsuleResult)
+                && magicCapsuleResult.SourceRemainingStackCount == 0
+                && magicCapsuleResult.Rewards.Count == 1
+                && (magicCapsuleResult.Rewards[0].ItemTemplateId == MagicCapsulePrimaryRewardItemId
+                    || magicCapsuleResult.Rewards[0].ItemTemplateId == MagicCapsuleSecondaryRewardItemId),
+                ref failures);
 
             var startConcurrentOpen = new ManualResetEventSlim(false);
             var concurrentResults = new bool[2];
@@ -547,6 +581,7 @@ VALUES (@accountId, @premiumType, @endTime);
             AttachStackable(inventory, AncientHeroLotterySlot, AncientHeroLotteryItemId, 1);
             AttachStackable(inventory, ConcurrentLotterySlot, SampleLotteryItemId, 1);
             AttachStackable(inventory, RequiredItemLotterySlot, RequiredItemLotteryItemId, 1);
+            AttachStackable(inventory, MagicCapsuleSlot, MagicCapsuleItemId, 1);
             AttachStackable(inventory, RequiredItemSlot, RequiredLotteryMaterialItemId, 1);
             inventory.ClearDirtyState();
             return inventory;
