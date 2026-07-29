@@ -210,8 +210,10 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
+            ItemCore targetItemSnapshot;
             if (destroyed)
             {
+                targetItemSnapshot = target.Copy();
                 if (!inventory.RemoveItem(InventoryListType.Main, command.TargetSlotIndex))
                 {
                     result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorInvalidTarget);
@@ -227,6 +229,7 @@ namespace DfoServer.Game.Inventory
                     result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorInvalidTarget);
                     return false;
                 }
+                targetItemSnapshot = updatedTarget;
             }
 
             ItemUpgradeSlotCount destroyRewardUpdate = null;
@@ -275,6 +278,7 @@ namespace DfoServer.Game.Inventory
                 NoticeRequired = success
                     ? ItemUpgradeTableProvider.IsNoticeLevel(tableKind, newLevel)
                     : ItemUpgradeTableProvider.IsNoticeLevel(tableKind, oldLevel),
+                TargetItemSnapshot = targetItemSnapshot,
             };
 
             AddRefreshSlot(upgradeResult.MainRefreshSlots, command.TargetSlotIndex);

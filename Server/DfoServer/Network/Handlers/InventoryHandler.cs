@@ -47,6 +47,31 @@ namespace DfoServer.Network.Handlers
         public static (int characterId, int accountId) ResolveOwner(EnhancedClientSession session)
             => SessionOwnerResolver.Resolve(session);
 
+        private async Task BroadcastItemNotice(
+            EnhancedClientSession session,
+            string operation,
+            Func<ushort, byte[]> buildBody,
+            string details)
+        {
+            if (_broadcastGamePacket == null || buildBody == null)
+                return;
+
+            try
+            {
+                var userUniqueId = session?.Player?.UserId ?? 0;
+                if (userUniqueId == 0 && session?.Player?.CharacterId > 0)
+                    userUniqueId = (ushort)session.Player.CharacterId;
+
+                await _broadcastGamePacket(GamePacketEnvelopeBuilder.Build(
+                    0x00, 0x0056, buildBody(userUniqueId)));
+                FileLogger.Log($"[{ProtocolName}] {operation}: notice broadcast type=0x0056 uniqueId={userUniqueId} {details}");
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"[{ProtocolName}] {operation}: notice broadcast failed: {ex.Message}");
+            }
+        }
+
         public static bool TryParseDeleteOrSellRequest(byte[] body, out InventoryListType listType, out short slotIndex, out short itemCount)
         {
             listType = InventoryListType.Main;

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.ItemUpgrade
 {
@@ -48,6 +49,7 @@ namespace DfoServer.Game.ItemUpgrade
         public int GoldCost { get; set; }
         public int UpdatedGold { get; set; }
         public bool NoticeRequired { get; set; }
+        internal ItemCore TargetItemSnapshot { get; set; }
 
         public static ItemUpgradeResult Error(ItemUpgradeCommand command, byte errorCode)
         {

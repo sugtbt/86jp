@@ -395,6 +395,7 @@ namespace DfoServer.Network
             d[(ushort)CmdPacketType.CRANE_START_USE] = _craneMiniGameHandler.HandleStartUse;
             d[(ushort)CmdPacketType.CRANE_PICKUP] = _craneMiniGameHandler.HandlePickup;
             d[0x0050] = _inventoryHandler.Handle_ENUM_CMDPACKET_UPGRADE_ITEM;      //80
+            d[(ushort)CmdPacketType.UPGRADE_ITEM_SEPARATE] = _inventoryHandler.Handle_UPGRADE_ITEM_SEPARATE;
             d[0x0051] = _inventoryHandler.Handle_ENUM_CMDPACKET_RESET_ITEM_ATTR;   //81 装备品级调整箱(万花镜)
             d[0x00A0] = _inventoryHandler.Handle_OPEN_SELECTABLE_PACKAGE;
             d[(ushort)CmdPacketType.UPGRADE_CHRONICLE] = _inventoryHandler.Handle_UPGRADE_CHRONICLE;

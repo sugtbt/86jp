@@ -14,6 +14,7 @@ namespace DfoServer
             ("--selftest-auction-service", SelfTests.AuctionServiceNotificationSelfTest.Run),
             ("--selftest-chronicle-growth", SelfTests.ChronicleGrowthSelfTest.Run),
             ("--selftest-chronicle-refine", SelfTests.ChronicleRefineSelfTest.Run),
+            ("--selftest-separate-upgrade", SelfTests.SeparateUpgradeSelfTest.Run),
             ("--selftest-avatar-compound", SelfTests.AvatarCompoundSelfTest.Run),
             ("--selftest-cerashop", SelfTests.CeraShopSelfTest.Run),
             ("--selftest-pet-consumable", SelfTests.PetConsumableSelfTest.Run),

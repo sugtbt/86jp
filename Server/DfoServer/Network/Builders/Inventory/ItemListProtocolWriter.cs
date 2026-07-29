@@ -188,29 +188,7 @@ namespace DfoServer.Network.Builders
 
         private static void WriteNoti2RandomOptionBlock(GamePacketWriter writer, ItemCore core)
         {
-            var options = core.RandomOptions;
-            var count = Math.Min(3, options.Count);
-            writer.WriteByte((byte)count);
-            for (var index = 0; index < count; index++)
-            {
-                writer.WriteByte(options[index].Type);
-                writer.WriteByte(options[index].Value1);
-                writer.WriteByte(options[index].Value2);
-            }
-
-            if (count <= 0)
-                return;
-
-            var changedIndex = ResolveNoti2RandomOptionChangedIndex(core);
-            writer.WriteByte(core.RandomOptionState);
-            writer.WriteByte(changedIndex);
-            if (changedIndex == ItemCore.RandomOptionChangedIndexDefault)
-                return;
-
-            writer.WriteByte(core.RandomOptionChangeState);
-            writer.WriteByte(core.RandomOptionChange.Type);
-            writer.WriteByte(core.RandomOptionChange.Value1);
-            writer.WriteByte(core.RandomOptionChange.Value2);
+            RandomOptionProtocolWriter.WriteDynamic(writer, core);
         }
 
         private static void WriteNoti2TailBlock(GamePacketWriter writer, ItemCore core)
@@ -275,23 +253,6 @@ namespace DfoServer.Network.Builders
             return core.ExpireTime > 0
                 ? CreatureDetail.GetRemainDate(core.ExpireTime)
                 : 0;
-        }
-
-        private static byte ResolveNoti2RandomOptionChangedIndex(ItemCore core)
-        {
-            return HasExplicitNoti2RandomOptionTail(core)
-                ? core.RandomOptionChangedIndex
-                : ItemCore.RandomOptionChangedIndexDefault;
-        }
-
-        private static bool HasExplicitNoti2RandomOptionTail(ItemCore core)
-        {
-            return core.RandomOptionState != 0
-                || core.RandomOptionChangedIndex != 0
-                || core.RandomOptionChangeState != 0
-                || core.RandomOptionChange.Type != 0
-                || core.RandomOptionChange.Value1 != 0
-                || core.RandomOptionChange.Value2 != 0;
         }
 
         private static void WriteChronicleBlock(GamePacketWriter writer, ItemCore core)

@@ -224,23 +224,14 @@ namespace DfoServer.Network.Handlers
 
         private async Task BroadcastItemUpgradeNotice(EnhancedClientSession session, ItemUpgradeResult result)
         {
-            if (_broadcastGamePacket == null || result == null)
+            if (result == null)
                 return;
 
-            try
-            {
-                var userUniqueId = session?.Player?.UserId ?? 0;
-                if (userUniqueId == 0 && session?.Player?.CharacterId > 0)
-                    userUniqueId = (ushort)session.Player.CharacterId;
-
-                var body = ItemUpgradeNoticeBuilder.Build(result, userUniqueId);
-                await _broadcastGamePacket(GamePacketEnvelopeBuilder.Build(0x00, 0x0056, body));
-                FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: notice broadcast type=0x0056 uniqueId={userUniqueId} item=0x{result.TargetItemTemplateId:X8} level={result.NewLevel} mode={result.Mode}");
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: notice broadcast failed: {ex.Message}");
-            }
+            await BroadcastItemNotice(
+                session,
+                "UPGRADE_ITEM",
+                userUniqueId => ItemUpgradeNoticeBuilder.Build(result, userUniqueId),
+                $"item=0x{result.TargetItemTemplateId:X8} level={result.NewLevel} mode={result.Mode}");
         }
 
         public async Task Handle_EQUIPMENT_SOCKET_OPEN(EnhancedClientSession session, GamePacketHeader header, byte[] body)
