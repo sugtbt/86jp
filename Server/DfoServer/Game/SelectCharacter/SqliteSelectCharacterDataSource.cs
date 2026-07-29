@@ -24,6 +24,7 @@ namespace DfoServer.Game.SelectCharacter
         private readonly KnightShieldDeckRepository _knightShieldDeckRepository;
         private readonly SqliteUserInfoBlobRepository _userInfoBlobRepository;
         private readonly ICharacterStateRepository _initFlagsRepository;
+        private readonly IExpertJobStateRepository _expertJobStateRepository;
         private readonly Quests.QuestNotifySelectionRepository _questNotifySelectionRepository;
         private readonly ICharacterRepository _characterRepository;
         private readonly AccountSettingsRepository _accountSettingsRepository;
@@ -65,6 +66,9 @@ namespace DfoServer.Game.SelectCharacter
             _knightShieldDeckRepository = KnightShieldDeckRepository.FromConnectionString(_connectionString);
             _userInfoBlobRepository = new SqliteUserInfoBlobRepository(databasePath, schemaFilePath);
             _initFlagsRepository = new SqliteCharacterStateRepository(databasePath, schemaFilePath);
+            _expertJobStateRepository = new SqliteExpertJobStateRepository(
+                databasePath,
+                schemaFilePath);
             _questNotifySelectionRepository = new Quests.QuestNotifySelectionRepository(_connectionString);
             _characterRepository = characterRepository;
             _accountSettingsRepository = new AccountSettingsRepository(databasePath, schemaFilePath);
@@ -316,6 +320,15 @@ namespace DfoServer.Game.SelectCharacter
                     _databasePath, _schemaFilePath).Load(characterId);
                 if (tailSnap != null)
                     characterRecord.Subtype0Tail = tailSnap;
+
+                var expertJobType = characterRecord.Subtype0Tail?.ExpertJobType ?? 0;
+                var expertJobState = _expertJobStateRepository.Load(
+                    characterId,
+                    expertJobType);
+                ExpertJobStateCodec.ProjectToSnapshot(
+                    expertJobType,
+                    expertJobState,
+                    initSnapshot.ExpertJobInfo);
 
                 if (characterRecord.Subtype0Tail != null)
                 {

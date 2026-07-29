@@ -388,6 +388,24 @@ CREATE TABLE IF NOT EXISTS character_creature_uid_sequence (
     creature_uid INTEGER PRIMARY KEY AUTOINCREMENT
 );
 
+-- Current job type/experience remain in character_subtype0_fields. This table owns
+-- profession-specific state and is projected to NOTI 0x00CD at runtime.
+CREATE TABLE IF NOT EXISTS character_expert_job (
+    character_id INTEGER PRIMARY KEY,
+    giveup_count INTEGER NOT NULL DEFAULT 0 CHECK(giveup_count >= 0 AND giveup_count <= 65535),
+    disjoint_machine_grade INTEGER NOT NULL DEFAULT 0 CHECK(disjoint_machine_grade >= 0), -- one-based; 0 means not initialized
+    disjoint_machine_endurance INTEGER NOT NULL DEFAULT 0 CHECK(disjoint_machine_endurance >= 0),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS character_expert_job_recipes (
+    character_id INTEGER NOT NULL,
+    recipe_id INTEGER NOT NULL CHECK(recipe_id > 0),
+    PRIMARY KEY (character_id, recipe_id),
+    FOREIGN KEY (character_id) REFERENCES character_expert_job(character_id) ON DELETE CASCADE
+);
+
 -- Removed 18 columns verified via seed DB (DfoDbGenerator) as safe:
 --   A) Overwritten by account_settings/account_premiums: hotkey_key_type, main_game_option_blob,
 --      quickchat_bank0, quickchat_bank1, ack_premium_blob
@@ -398,7 +416,6 @@ CREATE TABLE IF NOT EXISTS character_creature_uid_sequence (
 CREATE TABLE IF NOT EXISTS character_init_flags (
     character_id INTEGER PRIMARY KEY,
     pc_room_state INTEGER NOT NULL DEFAULT 0,                       -- seed=2
-    expert_job_blob BLOB,                                           -- QuestService writes on job change
     champion_break_key_id INTEGER NOT NULL DEFAULT 0,               -- NOTI 0x025B: i32 key + u8 mode + i32 value
     champion_break_mode INTEGER NOT NULL DEFAULT 0,
     champion_break_value INTEGER NOT NULL DEFAULT 0,

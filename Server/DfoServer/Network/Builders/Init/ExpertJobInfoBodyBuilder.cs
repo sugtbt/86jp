@@ -22,8 +22,8 @@ namespace DfoServer.Network.Builders
             }
             else if (info.Mode == 3)
             {
-                writer.WriteInt32(info.ValueA);
-                writer.WriteInt32(info.ValueB);
+                writer.WriteInt32(info.DisjointMachineGrade);
+                writer.WriteInt32(info.DisjointMachineEndurance);
             }
 
             body = writer.ToArray();

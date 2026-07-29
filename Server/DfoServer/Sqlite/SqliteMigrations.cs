@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using DfoServer.Game.Currency;
+using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.TitleBook;
 using Microsoft.Data.Sqlite;
@@ -636,7 +637,140 @@ CREATE TABLE IF NOT EXISTS account_dungeon_permissions (
     PRIMARY KEY (account_id, dungeon_id),
     FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
 );")),
+
+            (48, "character expert job domain state", MigrateExpertJobState),
         };
+
+        private static void MigrateExpertJobState(SqliteConnection connection)
+        {
+            ExecuteBatch(connection, @"
+CREATE TABLE IF NOT EXISTS character_expert_job (
+    character_id INTEGER PRIMARY KEY,
+    giveup_count INTEGER NOT NULL DEFAULT 0 CHECK(giveup_count >= 0 AND giveup_count <= 65535),
+    disjoint_machine_grade INTEGER NOT NULL DEFAULT 0 CHECK(disjoint_machine_grade >= 0),
+    disjoint_machine_endurance INTEGER NOT NULL DEFAULT 0 CHECK(disjoint_machine_endurance >= 0),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS character_expert_job_recipes (
+    character_id INTEGER NOT NULL,
+    recipe_id INTEGER NOT NULL CHECK(recipe_id > 0),
+    PRIMARY KEY (character_id, recipe_id),
+    FOREIGN KEY (character_id) REFERENCES character_expert_job(character_id) ON DELETE CASCADE
+);");
+
+            var legacyStates = new List<(int CharacterId, byte Mode, ExpertJobState State)>();
+            var hasLegacyBlob = ColumnExists(
+                connection,
+                "character_init_flags",
+                "expert_job_blob");
+            var hasSubtype0Fields = TableExists(
+                connection,
+                "character_subtype0_fields");
+            if (hasLegacyBlob)
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT character_id, expert_job_blob
+FROM character_init_flags
+WHERE expert_job_blob IS NOT NULL;";
+                    using (var reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            var blob = reader.IsDBNull(1) ? null : (byte[])reader[1];
+                            if (!ExpertJobStateCodec.TryDecodeLegacyBlob(
+                                    blob,
+                                    out var mode,
+                                    out var state))
+                            {
+                                throw new InvalidOperationException(
+                                    $"invalid legacy expert job state: " +
+                                    $"cid={reader.GetInt32(0)} length={blob?.Length ?? 0}");
+                            }
+
+                            if (mode == 0)
+                                continue;
+                            legacyStates.Add((reader.GetInt32(0), mode, state));
+                        }
+                    }
+                }
+            }
+
+            using (var transaction = connection.BeginTransaction())
+            {
+                if (hasSubtype0Fields)
+                {
+                    ExecuteBatch(connection, transaction, @"
+INSERT OR IGNORE INTO character_expert_job (character_id)
+SELECT character_id
+FROM character_subtype0_fields
+WHERE expert_job_type > 0;");
+                }
+
+                foreach (var legacy in legacyStates)
+                {
+                    var machine = legacy.State.DisjointMachine;
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.Transaction = transaction;
+                        command.CommandText = @"
+INSERT INTO character_expert_job (
+    character_id, giveup_count,
+    disjoint_machine_grade, disjoint_machine_endurance, updated_at)
+VALUES (@cid, @giveup, @grade, @endurance, CURRENT_TIMESTAMP)
+ON CONFLICT(character_id) DO UPDATE SET
+    giveup_count=excluded.giveup_count,
+    disjoint_machine_grade=excluded.disjoint_machine_grade,
+    disjoint_machine_endurance=excluded.disjoint_machine_endurance,
+    updated_at=CURRENT_TIMESTAMP;";
+                        command.Parameters.AddWithValue("@cid", legacy.CharacterId);
+                        command.Parameters.AddWithValue("@giveup", legacy.State.GiveUpCount);
+                        command.Parameters.AddWithValue(
+                            "@grade",
+                            legacy.Mode == ExpertJobStateCodec.DisjointerMode
+                                ? machine?.MachineGrade ?? 0
+                                : 0);
+                        command.Parameters.AddWithValue(
+                            "@endurance",
+                            legacy.Mode == ExpertJobStateCodec.DisjointerMode
+                                ? machine?.Endurance ?? 0
+                                : 0);
+                        command.ExecuteNonQuery();
+                    }
+
+                    if (legacy.Mode == ExpertJobStateCodec.DisjointerMode)
+                        continue;
+
+                    foreach (var recipeId in legacy.State.LearnedRecipeIds)
+                    {
+                        if (recipeId <= 0)
+                            continue;
+                        using (var command = connection.CreateCommand())
+                        {
+                            command.Transaction = transaction;
+                            command.CommandText = @"
+INSERT OR IGNORE INTO character_expert_job_recipes (character_id, recipe_id)
+VALUES (@cid, @recipe);";
+                            command.Parameters.AddWithValue("@cid", legacy.CharacterId);
+                            command.Parameters.AddWithValue("@recipe", recipeId);
+                            command.ExecuteNonQuery();
+                        }
+                    }
+                }
+
+                transaction.Commit();
+            }
+
+            if (hasLegacyBlob)
+            {
+                SqliteSchemaMigrator.DropColumnsIfExist(
+                    connection,
+                    "character_init_flags",
+                    "expert_job_blob");
+            }
+        }
 
         private static void MigrateMercenaryExpedition(SqliteConnection connection)
         {

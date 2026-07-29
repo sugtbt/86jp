@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using DfoServer.Game.Currency;
+using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using Microsoft.Data.Sqlite;
 
@@ -778,20 +779,22 @@ namespace DfoServer.Game.Quests
             int characterId,
             int expertJobType)
         {
-            var expertJobBlob = BuildExpertJobBlob(1, 1, expertJobType);
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
                 command.CommandText = @"
                     INSERT INTO character_subtype0_fields (character_id, expert_job_type) VALUES (@cid, @ejt)
-                    ON CONFLICT(character_id) DO UPDATE SET expert_job_type=@ejt;
-                    INSERT INTO character_init_flags (character_id, expert_job_blob) VALUES (@cid, @blob)
-                    ON CONFLICT(character_id) DO UPDATE SET expert_job_blob=@blob;";
+                    ON CONFLICT(character_id) DO UPDATE SET expert_job_type=@ejt;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 command.Parameters.AddWithValue("@ejt", expertJobType);
-                command.Parameters.AddWithValue("@blob", expertJobBlob);
                 command.ExecuteNonQuery();
             }
+
+            SqliteExpertJobStateRepository.InitializeInTransaction(
+                connection,
+                transaction,
+                characterId,
+                expertJobType);
         }
 
         private static void UpdateSlotExpansion(
@@ -819,23 +822,6 @@ namespace DfoServer.Game.Quests
 
         private static int ResolveSlotExpansionFlag(int slotId)
             => slotId < 21 || slotId > 23 ? 0 : 1 << (slotId - 21);
-
-        private static byte[] BuildExpertJobBlob(
-            byte state0,
-            byte mode,
-            int expertJobType)
-        {
-            var bytes = new List<byte>
-            {
-                state0,
-                mode,
-            };
-            bytes.AddRange(BitConverter.GetBytes(0));
-            bytes.AddRange(BitConverter.GetBytes(0));
-            bytes.Add(1);
-            bytes.AddRange(BitConverter.GetBytes(expertJobType));
-            return bytes.ToArray();
-        }
 
         private static int GetMainItemIdentityKey(int itemId)
         {

@@ -5,6 +5,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
@@ -27,6 +28,7 @@ namespace DfoServer.Game.Quests
         private readonly HonorLevelSyncService _honorLevel;
         private readonly SqliteSubtype0FieldsRepository _subtype0Repository;
         private readonly GrowthCapsuleProgressRepository _growthCapsuleRepository;
+        private readonly IExpertJobStateRepository _expertJobStateRepository;
 
         internal QuestNotificationProjector(
             ISessionPacketSender sender,
@@ -50,6 +52,9 @@ namespace DfoServer.Game.Quests
                 ?? throw new ArgumentNullException(nameof(subtype0Repository));
             _growthCapsuleRepository = growthCapsuleRepository
                 ?? throw new ArgumentNullException(nameof(growthCapsuleRepository));
+            _expertJobStateRepository = new SqliteExpertJobStateRepository(
+                databasePath,
+                ServerPaths.SchemaFilePath);
         }
 
         // The client replaces its skill table on this notification, so job-change
@@ -401,14 +406,20 @@ namespace DfoServer.Game.Quests
                 HonorLevelDataProvider.ApplyToSubtype0Tail(tail, honorLevel);
                 record.Subtype0Tail = tail;
 
-                var writer = new Network.GamePacketWriter();
-                writer.WriteByte(1);
-                writer.WriteByte(1);
-                writer.WriteByte(1);
-                writer.WriteInt32(expertJobType);
-                await _sender.SendNotiAsync(0x00CD, writer.ToArray());
+                var expertJobSnapshot = new SelectCharacterDataSnapshot();
+                var expertInfo = expertJobSnapshot.InitializationSnapshot.ExpertJobInfo;
+                var expertJobState = _expertJobStateRepository.Load(
+                    characterId,
+                    expertJobType);
+                ExpertJobStateCodec.ProjectToSnapshot(
+                    expertJobType,
+                    expertJobState,
+                    expertInfo);
+                var expertJobBuilder = new ExpertJobInfoBodyBuilder();
+                expertJobBuilder.TryBuild(expertJobSnapshot, 0, out var expertJobBody);
+                await _sender.SendNotiAsync(expertJobBuilder.NotiType, expertJobBody);
 
-                writer = new Network.GamePacketWriter();
+                var writer = new Network.GamePacketWriter();
                 writer.WriteByte(0);
                 writer.WriteUInt16(1);
                 writer.WriteUInt16((ushort)record.CharacterId);

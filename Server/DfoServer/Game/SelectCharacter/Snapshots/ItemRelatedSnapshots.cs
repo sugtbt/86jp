@@ -10,9 +10,9 @@ namespace DfoServer.Game.SelectCharacter
 
         public List<int> Entries { get; } = new List<int>();
 
-        public int ValueA { get; set; }
+        public int DisjointMachineGrade { get; set; }
 
-        public int ValueB { get; set; }
+        public int DisjointMachineEndurance { get; set; }
     }
 
     public sealed class ItemLockEntrySnapshot

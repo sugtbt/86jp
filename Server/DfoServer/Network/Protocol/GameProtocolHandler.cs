@@ -2,6 +2,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.Appearance;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Lottery;
@@ -46,6 +47,7 @@ namespace DfoServer.Network
         private readonly GrowthCapsuleHandler _growthCapsuleHandler;
         private readonly GoldLimitHandler _goldLimitHandler;
         private readonly CraneMiniGameHandler _craneMiniGameHandler;
+        private readonly ExpertJobStoreHandler _expertJobStoreHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
         private readonly ISessionDirectory _sessionDirectory;
@@ -148,6 +150,22 @@ namespace DfoServer.Network
             _petCreatureHandler = new PetCreatureHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
             // 组队与城镇/副本共享同一个 PartyManager 实例: 跟随退出/副本 fan-out 都要看到同一份队伍状态。
             _partyManager = new Game.Party.PartyManager();
+            var subtype0Repository = new Game.CharacterData.SqliteSubtype0FieldsRepository(
+                databasePath,
+                schemaFilePath);
+            var honorLevel = new HonorLevelSyncService(
+                characterRepository,
+                databasePath,
+                schemaFilePath);
+            _expertJobStoreHandler = new ExpertJobStoreHandler(
+                new ExpertJobStoreRuntimeService(),
+                _partyManager,
+                sessionDirectory,
+                new SqliteExpertJobStateRepository(databasePath, schemaFilePath),
+                characterRepository,
+                subtype0Repository,
+                honorLevel,
+                new ExpertJobPersistenceService(databasePath, schemaFilePath));
             _townHandler = new TownHandler(
                 characterRepository,
                 sqliteSelectCharacterDataSource,
@@ -230,6 +248,7 @@ namespace DfoServer.Network
             RegisterCollectionBoxHandlers(_cmdDispatch);
             RegisterMercenaryHandlers(_cmdDispatch);
             RegisterPartyHandlers(_cmdDispatch);
+            RegisterExpertJobHandlers(_cmdDispatch);
             RegisterMiscHandlers(_cmdDispatch);
             _cmdDispatch[0x00CF] = _shopCoinEventHandler.HandleShopCoinEvent;   // 207 SHOP_COIN_EVENT 每日免费复活币
         }
@@ -244,6 +263,7 @@ namespace DfoServer.Network
         public override async Task OnClientDisconnected(EnhancedClientSession session)
         {
             FileLogger.Log($"[{ProtocolName}] Admin client disconnected: {session.SessionId}");
+            await _expertJobStoreHandler.CloseSessionAsync(session, includeOwner: false);
             // 联机同屏: 通知同区域其它玩家移除该玩家分身(USER_LEAVE 0x0006)。须在状态清理前发。
             await _townHandler.NotifyLeaveAsync(session);
             var charId = session.Player?.CharacterId ?? 0;
@@ -315,6 +335,8 @@ namespace DfoServer.Network
             {
                 _dungeonRejoin.ClearSession(s.SessionId);
                 var prevCharId = s.Player?.CharacterId ?? 0;
+                if (prevCharId > 0)
+                    await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
                 await _characterSelectHandler.Handle_ENUM_CMDPACKET_SELECT_CHARACTER(s, h, b);
                 if (s.Player != null && s.Player.CharacterId > 0)
                 {
@@ -338,6 +360,7 @@ namespace DfoServer.Network
             d[0x0007] = async (s, h, b) =>
             {
                 var charId = s.Player?.CharacterId ?? 0;
+                if (charId > 0) await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
                 if (charId > 0) await _sessionDirectory.UnregisterAsync(charId);
                 if (charId > 0) InventoryContext.Unregister(s.SessionId, charId);
                 _townHandler.PersistPosition(s, forceImmediate: true, source: "return_select");
@@ -525,7 +548,13 @@ namespace DfoServer.Network
         private void RegisterTownHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
             d[0x0023] = _townHandler.Handle_ENUM_CMDPACKET_SET_USER_POSITION;
-            d[0x0024] = _townHandler.Handle_ENUM_CMDPACKET_SET_USER_AREA;
+            d[0x0024] = async (s, h, b) =>
+            {
+                if (b != null && b.Length >= 6)
+                    await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
+                await _townHandler.Handle_ENUM_CMDPACKET_SET_USER_AREA(s, h, b);
+                await _expertJobStoreHandler.SendAreaStoresToAsync(s);
+            };
             d[0x0025] = _townHandler.Handle_ENUM_CMDPACKET_FINISH_LOADING;
             d[0x002A] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
             d[0x0084] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
@@ -679,6 +708,26 @@ namespace DfoServer.Network
             d[0x0373] = _luckyStarHandler.HandleShopPurchasePacket;
             d[(ushort)CmdPacketType.GET_EXPAND_EXP_GAGE_REWARD] = _growthCapsuleHandler.HandleClaimAsync;
             d[(ushort)CmdPacketType.UPGRADE_CARRY_GOLD] = _goldLimitHandler.HandleUpgradeAsync;
+        }
+
+        private void RegisterExpertJobHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
+        {
+            d[(ushort)CmdPacketType.CREATE_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleCreate;
+            d[(ushort)CmdPacketType.ENTER_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleEnter;
+            d[(ushort)CmdPacketType.CLOSE_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleClose;
+            d[(ushort)CmdPacketType.REPAIR_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleRepair;
+            d[(ushort)CmdPacketType.UPGRADE_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleUpgrade;
+            d[(ushort)CmdPacketType.REQUEST_DISJOINT_ITEM] = HandleSharedDisjointOrHellParty;
+        }
+
+        private Task HandleSharedDisjointOrHellParty(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            return _expertJobStoreHandler.HasEnteredStore(session)
+                ? _expertJobStoreHandler.HandleDisjoint(session, header, body)
+                : _dungeonHandler.Handle_ENUM_CMDPACKET_HELLPARTY_START(session, header, body);
         }
 
         #endregion
