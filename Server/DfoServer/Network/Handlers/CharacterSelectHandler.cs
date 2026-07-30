@@ -80,6 +80,42 @@ namespace DfoServer.Network.Handlers
             return null;
         }
 
+        /// <summary>
+        /// 构造在线目标的完整 USERINFO subtype1，供城镇右键查询恢复可组队对象所需的属性与身份状态。
+        /// 仅回 subtype0 外观会让客户端显示角色却把其判定为不在城镇，因而必须与外观包连续发送。
+        /// </summary>
+        /// <param name="target">被查询的在线目标会话。</param>
+        /// <returns>完整 subtype1 封包；无法读取目标快照时返回 null。</returns>
+        private byte[] BuildDetailedOnlineUserInfoPacket(EnhancedClientSession target)
+        {
+            if (target?.Player == null || target.Player.CharacterId <= 0)
+                return null;
+
+            try
+            {
+                var accountId = target.Account?.AccountId ?? 1;
+                var snapshot = _selectCharacterDataSource.Load(target.Player.CharacterId, accountId);
+                if (snapshot?.CharacterRecord == null
+                    || snapshot.InitializationSnapshot?.UserInfoAddition == null
+                    || !new UserInfoBodyBuilder().TryBuild(snapshot, 1, out var body)
+                    || body == null
+                    || body.Length < 5)
+                {
+                    return null;
+                }
+
+                // subtype1 自带的角色编号要与城镇名册使用的 UserId 对齐，避免客户端创建两个不同对象。
+                BitConverter.GetBytes(target.Player.UserId).CopyTo(body, 3);
+                return GamePacketEnvelopeBuilder.Build(0x00, 0x0002, body);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] BuildDetailedOnlineUserInfoPacket cid={target.Player.CharacterId} 失败: {ex.Message}");
+                return null;
+            }
+        }
+
         private static int ResolveAccountId(EnhancedClientSession session, CharacterRecord record)
         {
             if (session?.Account?.AccountId > 0)
@@ -334,10 +370,16 @@ namespace DfoServer.Network.Handlers
                         var target = FindOnlineByUserId(reqUid);
                         if (target != null)
                         {
-                            // ⚠️ 待真机验证: inspect(mode=3)可能需要【完整明细 subtype-1】而不只精简外观 subtype-0。
-                            //    先发 subtype-0(与同屏他人外观同源, 已验证能渲染外观); 若信息窗仍空, 晨间加发 subtype-1。
+                            // 右键城镇角色会以 mode=3 拉取资料；先回外观、再回完整 subtype1，
+                            // 保持与进入城镇时相同的对象初始化顺序，避免客户端本地拒绝组队。
                             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0002, Game.Appearance.AppearanceService.BuildNoti2Body(target.Player)));
-                            FileLogger.Log($"[{ProtocolName}] GET_USERINFO other MATCH reqUid={reqUid} mode={mode} -> USERINFO(0x0002 subtype0) sent (targetCid={target.Player.CharacterId})");
+                            var detailedPacket = BuildDetailedOnlineUserInfoPacket(target);
+                            if (detailedPacket != null)
+                                await session.SendPacketAsync(detailedPacket);
+                            FileLogger.Log(
+                                $"[{ProtocolName}] GET_USERINFO other MATCH reqUid={reqUid} mode={mode} " +
+                                $"-> USERINFO subtype0+subtype1={(detailedPacket != null ? 1 : 0)} sent " +
+                                $"(targetCid={target.Player.CharacterId})");
                             return;
                         }
                         // 未匹配 → 枚举在线 uid, 让真机日志直接显示 reqUid 是否=某在线目标的 UserId(诊断 uid 映射)
