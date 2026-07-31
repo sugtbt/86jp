@@ -2558,20 +2558,9 @@ INSERT INTO mailbox_attachments (
 
         private void ReloadOnlineInventoryAfterRollback(InventoryLease lease)
         {
-            if (lease?.Inventory == null)
-                return;
-
-            lease.Inventory.ClearDirtyState();
-            if (!InventoryContext.TryGetLease(lease.CharacterId, out var current)
-                || !ReferenceEquals(current, lease))
-                return;
-
-            using (var connection = new SqliteConnection(_connectionString))
-            {
-                connection.Open();
-                var reloaded = InventoryService.LoadFromDb(connection, lease.CharacterId, lease.AccountId);
-                InventoryContext.Register(lease.SessionId, reloaded);
-            }
+            InventoryRollbackRecoveryService.ReloadOnlineInventory(
+                _connectionString,
+                lease);
         }
 
         private sealed class ClaimMailState

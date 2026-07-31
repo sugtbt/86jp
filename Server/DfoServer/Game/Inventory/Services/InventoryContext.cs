@@ -124,6 +124,36 @@ namespace DfoServer.Game.Inventory
             }
         }
 
+        internal static bool TryReplaceCurrentLease(
+            InventoryLease expected,
+            InventoryService replacement,
+            out InventoryLease lease)
+        {
+            lease = null;
+            if (expected == null || replacement == null)
+            {
+                return false;
+            }
+
+            lock (expected.SyncRoot)
+            lock (SyncRoot)
+            {
+                if (replacement.CharacterId != expected.CharacterId
+                    || replacement.AccountId != expected.AccountId
+                    || !CharacterLeases.TryGetValue(expected.CharacterId, out var current)
+                    || !ReferenceEquals(current, expected)
+                    || !SessionOwnership.TryGetValue(expected.SessionId, out var characterId)
+                    || characterId != expected.CharacterId)
+                {
+                    return false;
+                }
+
+                expected.ReplaceInventory(replacement);
+                lease = expected;
+                return true;
+            }
+        }
+
         public static IReadOnlyList<InventoryLease> GetLeasesSnapshot()
         {
             lock (SyncRoot)

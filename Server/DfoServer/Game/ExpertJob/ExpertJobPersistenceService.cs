@@ -26,24 +26,32 @@ namespace DfoServer.Game.ExpertJob
 
             try
             {
+                bool saved;
                 if (ReferenceEquals(requesterLease, ownerLease))
                 {
                     lock (requesterLease.SyncRoot)
-                        return SaveLocked(requesterLease, null, saveExpertJobState);
+                        saved = SaveLocked(requesterLease, null, saveExpertJobState);
+                }
+                else
+                {
+                    var first = requesterLease.CharacterId < ownerLease.CharacterId
+                        ? requesterLease
+                        : ownerLease;
+                    var second = ReferenceEquals(first, requesterLease)
+                        ? ownerLease
+                        : requesterLease;
+                    lock (first.SyncRoot)
+                    lock (second.SyncRoot)
+                        saved = SaveLocked(requesterLease, ownerLease, saveExpertJobState);
                 }
 
-                var first = requesterLease.CharacterId < ownerLease.CharacterId
-                    ? requesterLease
-                    : ownerLease;
-                var second = ReferenceEquals(first, requesterLease)
-                    ? ownerLease
-                    : requesterLease;
-                lock (first.SyncRoot)
-                lock (second.SyncRoot)
-                    return SaveLocked(requesterLease, ownerLease, saveExpertJobState);
+                if (!saved)
+                    ReloadOnlineInventoriesAfterRollback(requesterLease, ownerLease);
+                return saved;
             }
             catch (Exception ex)
             {
+                ReloadOnlineInventoriesAfterRollback(requesterLease, ownerLease);
                 FileLogger.Log(
                     $"[ExpertJobPersistence] save failed requester={requesterLease.CharacterId} " +
                     $"owner={ownerLease.CharacterId}: {ex.Message}");
@@ -56,32 +64,61 @@ namespace DfoServer.Game.ExpertJob
             InventoryLease ownerLease,
             Func<SqliteConnection, SqliteTransaction, bool> saveExpertJobState)
         {
+            var persisted = false;
             using (var connection = new SqliteConnection(_connectionString))
             {
                 connection.Open();
                 using (var transaction = connection.BeginTransaction())
                 {
-                    if (!InventoryPersistenceService.SaveDirtyInTransaction(
+                    var saved = InventoryPersistenceService.SaveDirtyInTransaction(
                             connection,
                             transaction,
                             requesterLease)
-                        || (ownerLease != null
-                            && !InventoryPersistenceService.SaveDirtyInTransaction(
+                        && (ownerLease == null
+                            || InventoryPersistenceService.SaveDirtyInTransaction(
                                 connection,
                                 transaction,
                                 ownerLease))
-                        || !saveExpertJobState(connection, transaction))
+                        && saveExpertJobState(connection, transaction);
+                    if (saved)
                     {
-                        return false;
+                        transaction.Commit();
+                        persisted = true;
                     }
-
-                    transaction.Commit();
                 }
             }
+
+            if (!persisted)
+                return false;
 
             requesterLease.Inventory.ClearDirtyState();
             ownerLease?.Inventory.ClearDirtyState();
             return true;
+        }
+
+        private void ReloadOnlineInventoriesAfterRollback(
+            InventoryLease requesterLease,
+            InventoryLease ownerLease)
+        {
+            TryReloadOnlineInventory(requesterLease);
+            if (!ReferenceEquals(requesterLease, ownerLease))
+                TryReloadOnlineInventory(ownerLease);
+        }
+
+        private void TryReloadOnlineInventory(InventoryLease lease)
+        {
+            try
+            {
+                InventoryRollbackRecoveryService.ReloadOnlineInventory(
+                    _connectionString,
+                    lease);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[ExpertJobPersistence] inventory rollback reload failed " +
+                    $"cid={lease?.CharacterId ?? 0}: {ex.Message}");
+            }
         }
     }
 }

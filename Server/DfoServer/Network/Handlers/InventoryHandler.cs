@@ -1,6 +1,7 @@
 using DfoServer.Game.Appearance;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Mercenary;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Network.Builders;
@@ -21,6 +22,9 @@ namespace DfoServer.Network.Handlers
         private readonly ExperienceItemNotificationService _experienceItemNotifications;
         private readonly Func<byte[], Task> _broadcastGamePacket;
         private readonly IMercenaryRestrictionService _mercenaryRestrictions;
+        private readonly IEnchanterMachineStateRepository _enchanterStates;
+        private readonly ExpertJobPersistenceService _expertJobPersistence;
+        private readonly ExpertJobOperationCoordinator _expertJobOperations;
 
         public string ProtocolName => "GameProtocol";
 
@@ -30,6 +34,9 @@ namespace DfoServer.Network.Handlers
             ICharacterRepository characterRepository,
             InventoryRefreshSender refreshSender,
             ExperienceItemNotificationService experienceItemNotifications,
+            IEnchanterMachineStateRepository enchanterStates,
+            ExpertJobPersistenceService expertJobPersistence,
+            ExpertJobOperationCoordinator expertJobOperations,
             Func<byte[], Task> broadcastGamePacket = null,
             IMercenaryRestrictionService mercenaryRestrictions = null)
         {
@@ -42,6 +49,12 @@ namespace DfoServer.Network.Handlers
                 ?? throw new ArgumentNullException(nameof(experienceItemNotifications));
             _broadcastGamePacket = broadcastGamePacket;
             _mercenaryRestrictions = mercenaryRestrictions;
+            _enchanterStates = enchanterStates
+                ?? throw new ArgumentNullException(nameof(enchanterStates));
+            _expertJobPersistence = expertJobPersistence
+                ?? throw new ArgumentNullException(nameof(expertJobPersistence));
+            _expertJobOperations = expertJobOperations
+                ?? throw new ArgumentNullException(nameof(expertJobOperations));
         }
 
         public static (int characterId, int accountId) ResolveOwner(EnhancedClientSession session)

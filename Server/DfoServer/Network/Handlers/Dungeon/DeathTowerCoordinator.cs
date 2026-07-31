@@ -414,7 +414,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01,
                     0x002C,
-                    UseStackableAckBuilder.BuildError((byte)listType, expectedItemId, instanceValue)));
+                    UseStackableAckBuilder.BuildError((byte)listType, instanceValue, expectedItemId)));
                 FileLogger.Log($"[DeathTower] USE_STACKABLE rejected: cid={session.Player.CharacterId} list={listType} slot={slot} item={expectedItemId}");
                 return true;
             }

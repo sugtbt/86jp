@@ -1,4 +1,5 @@
 using DfoServer.Game.Currency;
+using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Mailbox;
 using DfoServer.Network.Builders;
@@ -25,6 +26,10 @@ namespace DfoServer.Network.Handlers
             var itemCode = body.Length >= 11 ? BitConverter.ToInt32(body, 7) : 0;
 
             var (cid, aid) = ResolveOwner(session);
+
+            if (await TryHandleEnchanterRecipeLearning(
+                    session, cid, listType, slotIndex, instanceValue, itemCode))
+                return;
 
             AccountCargoUpgradeToolResult accountCargoToolResult = null;
             bool accountCargoToolHandled = false;
@@ -112,6 +117,123 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log($"[{ProtocolName}] USE_STACKABLE: consumed 1x item 0x{itemCode:X8} from slot {slotIndex}, remaining={result.RemainingStackCount}{petSatietyLog}");
         }
 
+        private async Task<bool> TryHandleEnchanterRecipeLearning(
+            EnhancedClientSession session,
+            int characterId,
+            InventoryListType listType,
+            short slotIndex,
+            int instanceValue,
+            int itemCode)
+        {
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+                return false;
+
+            var sourceItemId = itemCode;
+            lock (lease.SyncRoot)
+                sourceItemId = lease.Inventory.GetItem(listType, slotIndex)?.ItemId ?? sourceItemId;
+            if (!EnchanterConfigProvider.Config.RecipesByItemId.ContainsKey(sourceItemId))
+                return false;
+            if (session.Player?.Subtype0Tail?.ExpertJobType != ExpertJobStateCodec.EnchanterType)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x002C,
+                    UseStackableAckBuilder.BuildError(
+                        EnchanterRecipeLearningService.ErrorRequirementsNotMet,
+                        (byte)listType,
+                        instanceValue,
+                        sourceItemId)));
+                return true;
+            }
+
+            var operationGate = _expertJobOperations.GetGate(characterId);
+            await operationGate.WaitAsync();
+            try
+            {
+                var state = _enchanterStates.Load(
+                    characterId,
+                    ExpertJobStateCodec.EnchanterType);
+                EnchanterRecipeLearningResult result;
+                lock (lease.SyncRoot)
+                {
+                    result = EnchanterRecipeLearningService.TryLearn(
+                        lease.Inventory,
+                        listType,
+                        slotIndex,
+                        sourceItemId,
+                        session.Player.Subtype0Tail.ExpertJobExp,
+                        state);
+                }
+                if (!result.Handled)
+                    return false;
+
+                if (!result.Success)
+                {
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x01,
+                        0x002C,
+                        UseStackableAckBuilder.BuildError(
+                            result.ErrorCode != 0
+                                ? result.ErrorCode
+                                : EnchanterRecipeLearningService.ErrorRequirementsNotMet,
+                            (byte)listType,
+                            instanceValue,
+                            sourceItemId)));
+                    return true;
+                }
+
+                var ack = UseStackableAckBuilder.BuildSuccess(
+                    slotIndex,
+                    (byte)listType,
+                    instanceValue,
+                    sourceItemId);
+
+                if (!_expertJobPersistence.Save(
+                        lease,
+                        lease,
+                        (connection, transaction) => _enchanterStates.SaveRecipeInTransaction(
+                            connection,
+                            transaction,
+                            characterId,
+                            result.RecipeId)))
+                {
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x01,
+                        0x002C,
+                        UseStackableAckBuilder.BuildError(
+                            EnchanterRecipeLearningService.ErrorRequirementsNotMet,
+                            (byte)listType,
+                            instanceValue,
+                            sourceItemId)));
+                    return true;
+                }
+
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x002C, ack));
+                await _refresh.SendUpdateItemList(session, listType, slotIndex);
+                await SendEnchanterRecipeInfo(session, state);
+                FileLogger.Log(
+                    $"[{ProtocolName}] ENCHANTER_RECIPE cid={characterId} " +
+                    $"item={sourceItemId} recipe={result.RecipeId} " +
+                    $"remaining={result.RemainingCount}");
+                return true;
+            }
+            finally
+            {
+                operationGate.Release();
+            }
+        }
+
+        private static async Task SendEnchanterRecipeInfo(
+            EnhancedClientSession session,
+            ExpertJobState state)
+        {
+            var body = ExpertJobInfoBodyBuilder.BuildProjectedBody(
+                ExpertJobStateCodec.EnchanterType,
+                state,
+                session.Player.Subtype0Tail.ExpertJobExp);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00CD, body));
+        }
+
         public async Task Handle_ADD_EQUIPMENT_EFFECT(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             FileLogger.Log($"[{ProtocolName}] ADD_EQUIPMENT_EFFECT 0x0342 raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")}");
@@ -189,7 +311,7 @@ namespace DfoServer.Network.Handlers
             var responseInstanceValue = instanceValue != 0 ? instanceValue : result.SourceInstanceValue;
             var ackBody = ackOverride ?? (result.Success
                 ? UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, responseInstanceValue, responseItemCode)
-                : UseStackableAckBuilder.BuildError((byte)listType, responseItemCode, responseInstanceValue));
+                : UseStackableAckBuilder.BuildError((byte)listType, responseInstanceValue, responseItemCode));
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, responseType, ackBody));
 
@@ -225,7 +347,7 @@ namespace DfoServer.Network.Handlers
             var responseItemCode = itemCode != 0 ? itemCode : result.ItemTemplateId;
             var ackBody = result.Success
                 ? UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, instanceValue, responseItemCode)
-                : UseStackableAckBuilder.BuildError((byte)listType, responseItemCode, instanceValue);
+                : UseStackableAckBuilder.BuildError((byte)listType, instanceValue, responseItemCode);
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x002C, ackBody));
 
@@ -253,7 +375,7 @@ namespace DfoServer.Network.Handlers
             var responseItemCode = itemCode != 0 ? itemCode : result.ItemTemplateId;
             var ackBody = result.Success
                 ? UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, instanceValue, responseItemCode)
-                : UseStackableAckBuilder.BuildError((byte)listType, responseItemCode, instanceValue);
+                : UseStackableAckBuilder.BuildError((byte)listType, instanceValue, responseItemCode);
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x002C, ackBody));
 
@@ -285,7 +407,7 @@ namespace DfoServer.Network.Handlers
             var responseInstanceValue = instanceValue != 0 ? instanceValue : result?.InstanceValue ?? 0;
             var ackBody = consumed || stalePetConsumable
                 ? UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, responseInstanceValue, responseItemCode)
-                : UseStackableAckBuilder.BuildError((byte)listType, responseItemCode, responseInstanceValue);
+                : UseStackableAckBuilder.BuildError((byte)listType, responseInstanceValue, responseItemCode);
 
             return new UseStackableResponsePlan
             {

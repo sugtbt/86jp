@@ -639,7 +639,38 @@ CREATE TABLE IF NOT EXISTS account_dungeon_permissions (
 );")),
 
             (48, "character expert job domain state", MigrateExpertJobState),
+            (49, "附魔师设备耐久", MigrateEnchanterEndurance),
         };
+
+        private static void MigrateEnchanterEndurance(SqliteConnection connection)
+        {
+            SqliteSchemaMigrator.EnsureColumns(
+                connection,
+                "character_expert_job",
+                new[]
+                {
+                    ("enchanter_endurance", "INTEGER NOT NULL DEFAULT 0 CHECK(enchanter_endurance >= 0)"),
+                });
+            if (!TableExists(connection, "character_subtype0_fields"))
+                return;
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = @"
+UPDATE character_expert_job
+SET enchanter_endurance=@endurance,
+    updated_at=CURRENT_TIMESTAMP
+WHERE enchanter_endurance=0
+  AND character_id IN (
+      SELECT character_id
+      FROM character_subtype0_fields
+      WHERE expert_job_type=1
+  );";
+                command.Parameters.AddWithValue(
+                    "@endurance",
+                    EnchanterConfigProvider.Config.InitialEndurance);
+                command.ExecuteNonQuery();
+            }
+        }
 
         private static void MigrateExpertJobState(SqliteConnection connection)
         {

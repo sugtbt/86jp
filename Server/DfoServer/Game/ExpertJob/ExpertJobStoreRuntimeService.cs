@@ -9,7 +9,6 @@ namespace DfoServer.Game.ExpertJob
         public const byte ErrorInvalidState = 19;
         public const byte ErrorStoreBusy = 190;
 
-        private const byte DisjointerExpertJobType = 3;
         private readonly object _syncRoot = new object();
         private readonly Dictionary<int, ExpertJobStoreSession> _storesByOwnerCharacterId =
             new Dictionary<int, ExpertJobStoreSession>();
@@ -27,6 +26,35 @@ namespace DfoServer.Game.ExpertJob
             bool isInParty,
             ExpertJobStoreCreateCommand command,
             DisjointMachineState disjointMachineState,
+            out ExpertJobStoreSession store,
+            out byte errorCode)
+            => TryCreate(
+                ownerSessionId,
+                ownerCharacterId,
+                ownerUserId,
+                expertJobType,
+                townId,
+                areaId,
+                isInDungeon,
+                isInParty,
+                command,
+                disjointMachineState,
+                null,
+                out store,
+                out errorCode);
+
+        public bool TryCreate(
+            Guid ownerSessionId,
+            int ownerCharacterId,
+            ushort ownerUserId,
+            byte expertJobType,
+            byte townId,
+            byte areaId,
+            bool isInDungeon,
+            bool isInParty,
+            ExpertJobStoreCreateCommand command,
+            DisjointMachineState disjointMachineState,
+            EnchanterStoreState enchanterState,
             out ExpertJobStoreSession store,
             out byte errorCode)
         {
@@ -49,7 +77,7 @@ namespace DfoServer.Game.ExpertJob
                 return false;
             }
 
-            if (!TryValidateKind(expertJobType, command, disjointMachineState))
+            if (!TryValidateKind(expertJobType, command, disjointMachineState, enchanterState))
             {
                 errorCode = ErrorInvalidState;
                 return false;
@@ -77,6 +105,14 @@ namespace DfoServer.Game.ExpertJob
                         {
                             MachineGrade = disjointMachineState.MachineGrade,
                             Endurance = disjointMachineState.Endurance,
+                        }
+                        : null,
+                    Enchanter = command.Kind == ExpertJobStoreKind.EnchantShop
+                        ? new EnchanterStoreState
+                        {
+                            Endurance = enchanterState.Endurance,
+                            CardQualificationLevels = new List<byte>(
+                                enchanterState.CardQualificationLevels),
                         }
                         : null,
                     TownId = townId,
@@ -270,18 +306,26 @@ namespace DfoServer.Game.ExpertJob
         private static bool TryValidateKind(
             byte expertJobType,
             ExpertJobStoreCreateCommand command,
-            DisjointMachineState disjointMachineState)
+            DisjointMachineState disjointMachineState,
+            EnchanterStoreState enchanterState)
         {
             switch (command.Kind)
             {
                 case ExpertJobStoreKind.DisjointMachine:
-                    return expertJobType == DisjointerExpertJobType
+                    return expertJobType == ExpertJobStateCodec.DisjointerType
                         && command.Cost <= DisjointMachineConfigProvider.Config.MaximumStoreCharge
                         && disjointMachineState != null
                         && disjointMachineState.MachineGrade > 0
                         && disjointMachineState.MachineGrade
                             <= DisjointMachineConfigProvider.Config.RepairRules.Count
                         && disjointMachineState.Endurance > 0;
+                case ExpertJobStoreKind.EnchantShop:
+                    return expertJobType == ExpertJobStateCodec.EnchanterType
+                        && command.Cost <= EnchanterConfigProvider.Config.MaximumStoreCharge
+                        && enchanterState != null
+                        && enchanterState.Endurance > 0
+                        && enchanterState.CardQualificationLevels != null
+                        && enchanterState.CardQualificationLevels.Count > 0;
                 default:
                     return false;
             }

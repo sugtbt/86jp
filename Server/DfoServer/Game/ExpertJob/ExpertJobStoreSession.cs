@@ -20,6 +20,8 @@ namespace DfoServer.Game.ExpertJob
 
         public DisjointMachineState DisjointMachine { get; set; }
 
+        public EnchanterStoreState Enchanter { get; set; }
+
         public byte TownId { get; set; }
 
         public byte AreaId { get; set; }

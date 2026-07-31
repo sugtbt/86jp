@@ -1,6 +1,6 @@
 namespace DfoServer.Game.ExpertJob
 {
-    internal sealed class DisjointMachineRepairResult
+    internal sealed class ExpertJobMachineRepairResult
     {
         internal byte ErrorCode { get; set; }
         internal int Gold { get; set; }

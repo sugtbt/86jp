@@ -7,10 +7,6 @@ namespace DfoServer.Game.ExpertJob
 {
     internal static class DisjointMachineResultCalculator
     {
-        internal const int NormalEquipmentState = 0;
-        internal const int UnidentifiedAmplifyState = 1;
-        internal const int ChronicleEquipmentState = 2;
-
         internal static DisjointMachineResultRule ResolveRule(
             ItemCore source,
             ItemMetadata metadata,
@@ -22,7 +18,7 @@ namespace DfoServer.Game.ExpertJob
             return DisjointMachineConfigProvider.Config.GetResult(
                 machineGrade - 1,
                 metadata.Rarity,
-                ResolveEquipmentState(source));
+                ExpertJobEquipmentStateResolver.Resolve(source));
         }
 
         internal static List<DisjointMaterialResult> Calculate(
@@ -52,7 +48,7 @@ namespace DfoServer.Game.ExpertJob
             var selections = bigWin ? config.BigWinResults : config.AdditionalResults;
             if (selections.TryGetValue(table, out var rows))
             {
-                var selected = SelectAdditionalResult(rows, metadata.Grade);
+                var selected = ExpertJobSelectionRuleSelector.Select(rows, metadata.Grade);
                 if (selected != null)
                 {
                     var count = selected.CountDivisor > 0
@@ -71,33 +67,6 @@ namespace DfoServer.Game.ExpertJob
             }
 
             return result;
-        }
-
-        private static int ResolveEquipmentState(ItemCore source)
-        {
-            // Current disjointer.exj uses 1 for unidentified amplify equipment and 2 for chronicle equipment.
-            if ((source.AmplifyType & 0x80) != 0)
-                return UnidentifiedAmplifyState;
-            if (source.ChronicleOptionCount > 0)
-                return ChronicleEquipmentState;
-            return NormalEquipmentState;
-        }
-
-        internal static DisjointMachineSelectionRule SelectAdditionalResult(
-            IReadOnlyList<DisjointMachineSelectionRule> rows,
-            int equipmentGrade)
-        {
-            var roll = ServerRandom.Next(10000);
-            var accumulated = 0;
-            foreach (var row in rows)
-            {
-                if (equipmentGrade < row.MinimumLevel || equipmentGrade > row.MaximumLevel)
-                    continue;
-                accumulated += Math.Max(0, row.Weight);
-                if (roll < accumulated)
-                    return row;
-            }
-            return null;
         }
 
         private static void Add(List<DisjointMaterialResult> result, int itemId, int count)

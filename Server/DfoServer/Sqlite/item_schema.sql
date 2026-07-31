@@ -395,6 +395,7 @@ CREATE TABLE IF NOT EXISTS character_expert_job (
     giveup_count INTEGER NOT NULL DEFAULT 0 CHECK(giveup_count >= 0 AND giveup_count <= 65535),
     disjoint_machine_grade INTEGER NOT NULL DEFAULT 0 CHECK(disjoint_machine_grade >= 0), -- one-based; 0 means not initialized
     disjoint_machine_endurance INTEGER NOT NULL DEFAULT 0 CHECK(disjoint_machine_endurance >= 0),
+    enchanter_endurance INTEGER NOT NULL DEFAULT 0 CHECK(enchanter_endurance >= 0),
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );

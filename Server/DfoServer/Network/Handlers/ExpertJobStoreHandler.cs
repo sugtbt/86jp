@@ -18,44 +18,59 @@ namespace DfoServer.Network.Handlers
         private const ushort CreateCommand = (ushort)CmdPacketType.CREATE_EXPERT_JOB_STORE;
         private const ushort EnterCommand = (ushort)CmdPacketType.ENTER_EXPERT_JOB_STORE;
         private const ushort CreateNotification = (ushort)NotiPacketType.CREATE_DISJOINT_STORE;
+        private const ushort CreateExpertJobNotification =
+            (ushort)NotiPacketType.CREATE_EXPERT_JOB_STORE;
         private const ushort CloseNotification = (ushort)NotiPacketType.CLOSE_DISJOINT_STORE;
+        private const ushort CloseExpertJobNotification =
+            (ushort)NotiPacketType.CLOSE_EXPERT_JOB_STORE;
         private const ushort DisjointCommand = (ushort)CmdPacketType.REQUEST_DISJOINT_ITEM;
         private const ushort DisjointNotification = (ushort)NotiPacketType.REQUEST_DISJOINT_ITEM;
         private const ushort RepairCommand = (ushort)CmdPacketType.REPAIR_DISJOINT_MACHINE;
         private const ushort UpgradeCommand = (ushort)CmdPacketType.UPGRADE_DISJOINT_MACHINE;
+        private const ushort EnchantCommand = (ushort)CmdPacketType.USE_ENCHANT_STORE;
+        private const ushort EnchantNotification = (ushort)NotiPacketType.USE_ENCHANT_STORE;
 
         private readonly ExpertJobStoreRuntimeService _stores;
         private readonly PartyManager _parties;
         private readonly ISessionDirectory _sessions;
         private readonly IDisjointMachineStateRepository _disjointMachineStates;
+        private readonly IEnchanterMachineStateRepository _enchanterMachineStates;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSubtype0FieldsRepository _subtype0Repository;
         private readonly HonorLevelSyncService _honorLevel;
         private readonly ExpertJobPersistenceService _persistence;
-        private readonly ExpertJobOperationCoordinator _operations =
-            new ExpertJobOperationCoordinator();
+        private readonly ExpertJobOperationCoordinator _operations;
+        private readonly InventoryRefreshSender _inventoryRefresh;
 
-        public ExpertJobStoreHandler(
+        internal ExpertJobStoreHandler(
             ExpertJobStoreRuntimeService stores,
             PartyManager parties,
             ISessionDirectory sessions,
             IDisjointMachineStateRepository disjointMachineStates,
+            IEnchanterMachineStateRepository enchanterMachineStates,
             ICharacterRepository characterRepository,
             SqliteSubtype0FieldsRepository subtype0Repository,
             HonorLevelSyncService honorLevel,
-            ExpertJobPersistenceService persistence)
+            ExpertJobPersistenceService persistence,
+            ExpertJobOperationCoordinator operations,
+            InventoryRefreshSender inventoryRefresh)
         {
             _stores = stores ?? throw new ArgumentNullException(nameof(stores));
             _parties = parties ?? throw new ArgumentNullException(nameof(parties));
             _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
             _disjointMachineStates = disjointMachineStates
                 ?? throw new ArgumentNullException(nameof(disjointMachineStates));
+            _enchanterMachineStates = enchanterMachineStates
+                ?? throw new ArgumentNullException(nameof(enchanterMachineStates));
             _characterRepository = characterRepository
                 ?? throw new ArgumentNullException(nameof(characterRepository));
             _subtype0Repository = subtype0Repository
                 ?? throw new ArgumentNullException(nameof(subtype0Repository));
             _honorLevel = honorLevel ?? throw new ArgumentNullException(nameof(honorLevel));
             _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
+            _operations = operations ?? throw new ArgumentNullException(nameof(operations));
+            _inventoryRefresh = inventoryRefresh
+                ?? throw new ArgumentNullException(nameof(inventoryRefresh));
         }
 
         public async Task HandleCreate(
@@ -87,6 +102,15 @@ namespace DfoServer.Network.Handlers
                 var state = command.Kind == ExpertJobStoreKind.DisjointMachine
                     ? _disjointMachineStates.Resolve(player.CharacterId)
                     : null;
+                var enchanterState = command.Kind == ExpertJobStoreKind.EnchantShop
+                    ? new EnchanterStoreState
+                    {
+                        Endurance = _enchanterMachineStates.ResolveEnchanter(
+                            player.CharacterId).Endurance,
+                        CardQualificationLevels = EnchanterConfigProvider.Config.GetCardQualificationLevels(
+                            player.Subtype0Tail?.ExpertJobExp ?? 0),
+                    }
+                    : null;
                 if (!_stores.TryCreate(
                         session.SessionId,
                         player.CharacterId,
@@ -98,6 +122,7 @@ namespace DfoServer.Network.Handlers
                         isInParty,
                         command,
                         state,
+                        enchanterState,
                         out store,
                         out errorCode))
                 {
@@ -117,20 +142,18 @@ namespace DfoServer.Network.Handlers
 
             player.CurPosX = store.PositionX;
             player.CurPosY = store.PositionY;
-            var notification = GamePacketEnvelopeBuilder.Build(
-                0x00,
-                CreateNotification,
-                ExpertJobStorePacketBuilder.BuildCreateNotification(store));
-            await session.SendPacketAsync(notification);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                CreateCommand,
+                CommonPacketBodyBuilder.BuildSuccessAck()));
+            var notification = BuildCreateNotification(store);
+            if (store.Kind == ExpertJobStoreKind.EnchantShop)
+                await session.SendPacketAsync(notification);
             await _sessions.BroadcastToAreaAsync(
                 store.TownId,
                 store.AreaId,
                 store.OwnerCharacterId,
                 notification);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x01,
-                CreateCommand,
-                CommonPacketBodyBuilder.BuildSuccessAck()));
             FileLogger.Log(
                 $"[ExpertJobStore] CREATE owner={store.OwnerCharacterId} uid={store.OwnerUserId} " +
                 $"kind={store.Kind} cost={store.Cost} town={store.TownId} area={store.AreaId} " +
@@ -221,6 +244,7 @@ namespace DfoServer.Network.Handlers
             await operationGate.WaitAsync();
             try
             {
+                var originalEndurance = store.DisjointMachine.Endurance;
                 if (ReferenceEquals(requesterLease, ownerLease))
                 {
                     lock (requesterLease.SyncRoot)
@@ -271,8 +295,11 @@ namespace DfoServer.Network.Handlers
                             store.DisjointMachine,
                             result.ExperienceGain)))
                 {
-                    throw new InvalidOperationException(
-                        $"failed to persist disjoint operation owner={store.OwnerCharacterId}");
+                    store.DisjointMachine.Endurance = originalEndurance;
+                    await SendDisjointError(
+                        session,
+                        ExpertJobStoreRuntimeService.ErrorInvalidState);
+                    return;
                 }
 
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
@@ -318,6 +345,189 @@ namespace DfoServer.Network.Handlers
             }
         }
 
+        public async Task HandleEnchant(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            if (!EnchanterStoreUseRequest.TryParse(body, out var command))
+            {
+                await SendEnchantError(session, EnchanterStoreUseService.ErrorInvalidItem);
+                return;
+            }
+
+            var player = session.Player;
+            if (player == null
+                || player.CurrentRun != null
+                || !_stores.TryGetEnteredStore(
+                    session.SessionId, player.CharacterId, out var store)
+                || store.Kind != ExpertJobStoreKind.EnchantShop
+                || store.OwnerUserId != command.OwnerUserId
+                || store.TownId != player.CurTownId
+                || store.AreaId != player.CurAreaId
+                || !_sessions.TryGet(store.OwnerCharacterId, out var ownerSession)
+                || ownerSession.SessionId != store.OwnerSessionId
+                || ownerSession.Player?.Subtype0Tail?.ExpertJobType
+                    != ExpertJobStateCodec.EnchanterType
+                || !InventoryContext.TryGetLease(player.CharacterId, out var requesterLease)
+                || !requesterLease.IsOwnedBy(session.SessionId)
+                || !InventoryContext.TryGetLease(store.OwnerCharacterId, out var ownerLease)
+                || !ownerLease.IsOwnedBy(ownerSession.SessionId))
+            {
+                await SendEnchantError(session, EnchanterStoreUseService.ErrorInvalidState);
+                return;
+            }
+
+            var operationGate = _operations.GetGate(store.OwnerCharacterId);
+            await operationGate.WaitAsync();
+            var persisted = false;
+            try
+            {
+                if (!_stores.TryGetEnteredStore(
+                        session.SessionId, player.CharacterId, out var currentStore)
+                    || !ReferenceEquals(currentStore, store)
+                    || !_stores.TryGetOwnedStore(
+                        store.OwnerSessionId, store.OwnerCharacterId, out currentStore)
+                    || !ReferenceEquals(currentStore, store))
+                {
+                    await SendEnchantError(session, EnchanterStoreUseService.ErrorInvalidState);
+                    return;
+                }
+
+                var originalEndurance = store.Enchanter.Endurance;
+                var previousExperience = ownerSession.Player.Subtype0Tail.ExpertJobExp;
+                var isSelfService = ReferenceEquals(requesterLease, ownerLease);
+                var ownerGoldCarryLimit = isSelfService
+                    ? int.MaxValue
+                    : InventoryGoldCarryLimitLoader.Load(ownerLease.CharacterId);
+                EnchanterStoreUseResult result;
+                bool success;
+                if (isSelfService)
+                {
+                    lock (requesterLease.SyncRoot)
+                    {
+                        success = EnchanterStoreUseService.TryEnchant(
+                            requesterLease.Inventory, ownerLease.Inventory, store, command,
+                            previousExperience, ownerGoldCarryLimit, out result);
+                    }
+                }
+                else
+                {
+                    var first = requesterLease.CharacterId < ownerLease.CharacterId
+                        ? requesterLease
+                        : ownerLease;
+                    var second = ReferenceEquals(first, requesterLease)
+                        ? ownerLease
+                        : requesterLease;
+                    lock (first.SyncRoot)
+                    lock (second.SyncRoot)
+                    {
+                        success = EnchanterStoreUseService.TryEnchant(
+                            requesterLease.Inventory, ownerLease.Inventory, store, command,
+                            previousExperience, ownerGoldCarryLimit, out result);
+                    }
+                }
+
+                if (!success)
+                {
+                    await SendEnchantError(session, result.ErrorCode);
+                    return;
+                }
+
+                var config = EnchanterConfigProvider.Config;
+                var machineState = new EnchanterMachineState
+                {
+                    Endurance = result.Endurance,
+                };
+                if (!_persistence.Save(
+                        requesterLease,
+                        ownerLease,
+                        (connection, transaction) =>
+                            _enchanterMachineStates.SaveEnchanterInTransaction(
+                                connection, transaction, store.OwnerCharacterId, machineState,
+                                result.ExperienceGain,
+                                config.GetNewAutoLearnRecipeIds(
+                                    previousExperience,
+                                    result.FinalExperience))))
+                {
+                    store.Enchanter.Endurance = originalEndurance;
+                    await SendEnchantError(session, EnchanterStoreUseService.ErrorInvalidState);
+                    return;
+                }
+
+                ownerSession.Player.Subtype0Tail.ExpertJobExp = result.FinalExperience;
+                store.Enchanter.CardQualificationLevels =
+                    config.GetCardQualificationLevels(result.FinalExperience);
+                persisted = true;
+                await _inventoryRefresh.SendUpdateItemList(
+                    session, result.CardListType, result.CardSlotIndex);
+                if (result.EnchantSucceeded)
+                {
+                    await _inventoryRefresh.SendUpdateItemList(
+                        session, result.TargetListType, result.TargetSlotIndex);
+                }
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    EnchantCommand,
+                    ExpertJobStorePacketBuilder.BuildEnchantSuccess(result)));
+                if (!isSelfService)
+                {
+                    await ownerSession.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        EnchantNotification,
+                        ExpertJobStorePacketBuilder.BuildOwnerEnchantNotification(
+                            result.OwnerGold,
+                            result.Endurance)));
+                    await _inventoryRefresh.SendGoldUpdate(session);
+                    await _inventoryRefresh.SendGoldUpdate(ownerSession);
+                }
+                if (result.ExperienceGain > 0)
+                {
+                    await UserInfoBroadcastService.SendSubtype0Async(
+                        ownerSession, _characterRepository, _subtype0Repository, _honorLevel,
+                        "EXPERT_JOB_EXP_REFRESH");
+                }
+                if (config.GetLevel(previousExperience)
+                    != config.GetLevel(result.FinalExperience))
+                {
+                    var refreshedState = _enchanterMachineStates.Load(
+                        store.OwnerCharacterId,
+                        ExpertJobStateCodec.EnchanterType);
+                    await ownerSession.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        0x00CD,
+                        ExpertJobInfoBodyBuilder.BuildProjectedBody(
+                            ExpertJobStateCodec.EnchanterType,
+                            refreshedState,
+                            result.FinalExperience)));
+                }
+                FileLogger.Log(
+                    $"[ExpertJobStore] ENCHANT requester={player.CharacterId} " +
+                    $"owner={store.OwnerCharacterId} cardSlot={result.CardSlotIndex} " +
+                    $"targetSlot={result.TargetSlotIndex} success={result.EnchantSucceeded} " +
+                    $"cost={(player.CharacterId == store.OwnerCharacterId ? 0 : store.Cost)} " +
+                    $"endurance={result.Endurance} exp={result.ExperienceGain}");
+
+                if (result.Endurance <= 0
+                    && _stores.TryClose(
+                        store.OwnerSessionId, store.OwnerCharacterId, out var exhaustedStore))
+                {
+                    await BroadcastClose(ownerSession, exhaustedStore, includeOwner: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[ExpertJobStore] ENCHANT failed owner={store.OwnerCharacterId}: {ex.Message}");
+                if (!persisted)
+                    await SendEnchantError(session, EnchanterStoreUseService.ErrorInvalidState);
+            }
+            finally
+            {
+                operationGate.Release();
+            }
+        }
+
         public async Task HandleRepair(
             EnhancedClientSession session,
             GamePacketHeader header,
@@ -337,7 +547,7 @@ namespace DfoServer.Network.Handlers
 
             var operationGate = _operations.GetGate(player.CharacterId);
             await operationGate.WaitAsync();
-            DisjointMachineRepairResult result;
+            ExpertJobMachineRepairResult result;
             bool success;
             try
             {
@@ -372,8 +582,10 @@ namespace DfoServer.Network.Handlers
                             state,
                             0)))
                 {
-                    throw new InvalidOperationException(
-                        $"failed to persist repaired disjoint machine state owner={player.CharacterId}");
+                    await SendRepairError(
+                        session,
+                        DisjointMachineRepairService.ErrorInvalidState);
+                    return;
                 }
 
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
@@ -450,8 +662,10 @@ namespace DfoServer.Network.Handlers
                             state,
                             0)))
                 {
-                    throw new InvalidOperationException(
-                        $"failed to persist upgraded disjoint machine state owner={player.CharacterId}");
+                    await SendUpgradeError(
+                        session,
+                        DisjointMachineUpgradeService.ErrorCannotUpgrade);
+                    return;
                 }
 
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
@@ -552,10 +766,10 @@ namespace DfoServer.Network.Handlers
 
             foreach (var store in _stores.GetStoresInArea(player.CurTownId, player.CurAreaId))
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                    0x00,
-                    CreateNotification,
-                    ExpertJobStorePacketBuilder.BuildCreateNotification(store)));
+                if (store.OwnerCharacterId == player.CharacterId)
+                    continue;
+
+                await session.SendPacketAsync(BuildCreateNotification(store));
             }
         }
 
@@ -566,7 +780,9 @@ namespace DfoServer.Network.Handlers
         {
             var notification = GamePacketEnvelopeBuilder.Build(
                 0x00,
-                CloseNotification,
+                store.Kind == ExpertJobStoreKind.EnchantShop
+                    ? CloseExpertJobNotification
+                    : CloseNotification,
                 ExpertJobStorePacketBuilder.BuildCloseNotification(store.OwnerUserId));
             if (includeOwner)
                 await ownerSession.SendPacketAsync(notification);
@@ -584,6 +800,19 @@ namespace DfoServer.Network.Handlers
                 0x01,
                 type,
                 CommonPacketBodyBuilder.BuildCmdError(errorCode)));
+        }
+
+        private static byte[] BuildCreateNotification(ExpertJobStoreSession store)
+        {
+            return store.Kind == ExpertJobStoreKind.EnchantShop
+                ? GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    CreateExpertJobNotification,
+                    ExpertJobStorePacketBuilder.BuildCreateExpertJobNotification(store))
+                : GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    CreateNotification,
+                    ExpertJobStorePacketBuilder.BuildCreateNotification(store));
         }
 
         private static Task SendDisjointError(EnhancedClientSession session, byte errorCode)
@@ -607,5 +836,11 @@ namespace DfoServer.Network.Handlers
                 0x01,
                 UpgradeCommand,
                 ExpertJobStorePacketBuilder.BuildUpgradeError(errorCode)));
+
+        private static Task SendEnchantError(EnhancedClientSession session, byte errorCode)
+            => session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                EnchantCommand,
+                CommonPacketBodyBuilder.BuildCmdError(errorCode)));
     }
 }

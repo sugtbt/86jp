@@ -68,7 +68,7 @@ namespace DfoServer.Network.Handlers.Pets
 
             var ackBody = consumed || IsPetConsumableSlot(listType, slotIndex)
                 ? UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, instanceValue, itemCode)
-                : UseStackableAckBuilder.BuildError((byte)listType, itemCode, instanceValue);
+                : UseStackableAckBuilder.BuildError((byte)listType, instanceValue, itemCode);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, header.type, ackBody));
 
             if (!consumed)

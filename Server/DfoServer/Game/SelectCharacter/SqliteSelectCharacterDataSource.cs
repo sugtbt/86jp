@@ -328,7 +328,8 @@ namespace DfoServer.Game.SelectCharacter
                 ExpertJobStateCodec.ProjectToSnapshot(
                     expertJobType,
                     expertJobState,
-                    initSnapshot.ExpertJobInfo);
+                    initSnapshot.ExpertJobInfo,
+                    characterRecord.Subtype0Tail?.ExpertJobExp ?? 0);
 
                 if (characterRecord.Subtype0Tail != null)
                 {

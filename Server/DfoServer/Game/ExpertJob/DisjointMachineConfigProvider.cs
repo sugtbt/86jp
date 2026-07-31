@@ -16,12 +16,8 @@ namespace DfoServer.Game.ExpertJob
         internal int BigWinChancePercent { get; set; }
     }
 
-    internal sealed class DisjointMachineSelectionRule
+    internal sealed class DisjointMachineSelectionRule : ExpertJobSelectionRule
     {
-        internal int MinimumLevel { get; set; }
-        internal int MaximumLevel { get; set; }
-        internal int ItemId { get; set; }
-        internal int Weight { get; set; }
         internal double CountDivisor { get; set; }
     }
 

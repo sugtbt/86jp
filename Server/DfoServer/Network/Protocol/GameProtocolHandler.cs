@@ -48,6 +48,7 @@ namespace DfoServer.Network
         private readonly GoldLimitHandler _goldLimitHandler;
         private readonly CraneMiniGameHandler _craneMiniGameHandler;
         private readonly ExpertJobStoreHandler _expertJobStoreHandler;
+        private readonly EnchanterHandler _enchanterHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
         private readonly ISessionDirectory _sessionDirectory;
@@ -122,12 +123,21 @@ namespace DfoServer.Network
                 characterRepository,
                 databasePath,
                 schemaFilePath);
+            var expertJobStateRepository = new SqliteExpertJobStateRepository(
+                databasePath,
+                schemaFilePath);
+            var expertJobPersistence = new ExpertJobPersistenceService(databasePath, schemaFilePath);
+            var expertJobStores = new ExpertJobStoreRuntimeService();
+            var expertJobOperations = new ExpertJobOperationCoordinator();
             _inventoryHandler = new InventoryHandler(
                 experienceItemUseService,
                 sqliteSelectCharacterDataSource,
                 characterRepository,
                 _inventoryRefreshSender,
                 experienceItemNotifications,
+                expertJobStateRepository,
+                expertJobPersistence,
+                expertJobOperations,
                 broadcastGamePacket,
                 mercenaryRestrictions);
             var lotteryDoubleRewardPolicy = new LotteryDoubleRewardPolicy(
@@ -158,14 +168,26 @@ namespace DfoServer.Network
                 databasePath,
                 schemaFilePath);
             _expertJobStoreHandler = new ExpertJobStoreHandler(
-                new ExpertJobStoreRuntimeService(),
+                expertJobStores,
                 _partyManager,
                 sessionDirectory,
-                new SqliteExpertJobStateRepository(databasePath, schemaFilePath),
+                expertJobStateRepository,
+                expertJobStateRepository,
                 characterRepository,
                 subtype0Repository,
                 honorLevel,
-                new ExpertJobPersistenceService(databasePath, schemaFilePath));
+                expertJobPersistence,
+                expertJobOperations,
+                _inventoryRefreshSender);
+            _enchanterHandler = new EnchanterHandler(
+                expertJobStores,
+                expertJobStateRepository,
+                characterRepository,
+                subtype0Repository,
+                honorLevel,
+                expertJobPersistence,
+                _inventoryRefreshSender,
+                expertJobOperations);
             _townHandler = new TownHandler(
                 characterRepository,
                 sqliteSelectCharacterDataSource,
@@ -718,6 +740,11 @@ namespace DfoServer.Network
             d[(ushort)CmdPacketType.REPAIR_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleRepair;
             d[(ushort)CmdPacketType.UPGRADE_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleUpgrade;
             d[(ushort)CmdPacketType.REQUEST_DISJOINT_ITEM] = HandleSharedDisjointOrHellParty;
+            d[(ushort)CmdPacketType.EXPERT_EXTRACTION] = _enchanterHandler.HandleExtraction;
+            d[(ushort)CmdPacketType.REPAIR_EXPERT_JOB_STORE] = _enchanterHandler.HandleRepair;
+            d[(ushort)CmdPacketType.USE_ENCHANT_STORE] = _expertJobStoreHandler.HandleEnchant;
+            d[(ushort)CmdPacketType.COMPOUND_ITEM_BY_EXPERT_JOB] =
+                _enchanterHandler.HandleCompound;
         }
 
         private Task HandleSharedDisjointOrHellParty(

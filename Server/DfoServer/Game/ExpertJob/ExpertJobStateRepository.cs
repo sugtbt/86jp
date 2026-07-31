@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 
@@ -21,8 +22,35 @@ namespace DfoServer.Game.ExpertJob
             int experienceGain);
     }
 
+    public interface IEnchanterMachineStateRepository : IExpertJobStateRepository
+    {
+        EnchanterMachineState ResolveEnchanter(int characterId);
+
+        bool SaveEnchanterProgressInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int experienceGain,
+            IReadOnlyCollection<int> learnedRecipeIds);
+
+        bool SaveEnchanterInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            EnchanterMachineState state,
+            int experienceGain,
+            IReadOnlyCollection<int> learnedRecipeIds);
+
+        bool SaveRecipeInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int recipeId);
+    }
+
     public sealed class SqliteExpertJobStateRepository
-        : IExpertJobStateRepository, IDisjointMachineStateRepository
+        : IExpertJobStateRepository, IDisjointMachineStateRepository,
+          IEnchanterMachineStateRepository
     {
         private readonly string _connectionString;
 
@@ -45,7 +73,8 @@ namespace DfoServer.Game.ExpertJob
                     using (var command = connection.CreateCommand())
                     {
                         command.CommandText = @"
-SELECT giveup_count, disjoint_machine_grade, disjoint_machine_endurance
+SELECT giveup_count, disjoint_machine_grade, disjoint_machine_endurance,
+       enchanter_endurance
 FROM character_expert_job
 WHERE character_id=@cid;";
                         command.Parameters.AddWithValue("@cid", characterId);
@@ -63,6 +92,11 @@ WHERE character_id=@cid;";
                                         state.DisjointMachine.MachineGrade = (byte)grade;
                                         state.DisjointMachine.Endurance = endurance;
                                     }
+                                }
+                                else if (expertJobType == ExpertJobStateCodec.EnchanterType)
+                                {
+                                    var endurance = reader.GetInt32(3);
+                                    state.EnchanterMachine.Endurance = Math.Max(0, endurance);
                                 }
                             }
                         }
@@ -82,6 +116,8 @@ ORDER BY recipe_id;";
                                 state.LearnedRecipeIds.Add(reader.GetInt32(0));
                         }
                     }
+                    if (expertJobType == ExpertJobStateCodec.EnchanterType)
+                        ReconcileEnchanterRecipes(connection, characterId, state);
                 }
             }
             catch (Exception ex)
@@ -95,6 +131,59 @@ ORDER BY recipe_id;";
 
         public DisjointMachineState Resolve(int characterId)
             => Load(characterId, ExpertJobStateCodec.DisjointerType).DisjointMachine;
+
+        public EnchanterMachineState ResolveEnchanter(int characterId)
+            => Load(characterId, ExpertJobStateCodec.EnchanterType).EnchanterMachine;
+
+        public bool SaveEnchanterInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            EnchanterMachineState state,
+            int experienceGain,
+            IReadOnlyCollection<int> learnedRecipeIds)
+        {
+            if (connection == null || transaction == null || characterId <= 0
+                || state == null || state.Endurance < 0)
+                return false;
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+INSERT INTO character_expert_job (character_id, enchanter_endurance, updated_at)
+VALUES (@cid, @endurance, CURRENT_TIMESTAMP)
+ON CONFLICT(character_id) DO UPDATE SET
+    enchanter_endurance=excluded.enchanter_endurance,
+    updated_at=CURRENT_TIMESTAMP;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@endurance", state.Endurance);
+                if (command.ExecuteNonQuery() != 1)
+                    return false;
+            }
+            return SaveProgressInTransaction(
+                connection, transaction, characterId, experienceGain, learnedRecipeIds);
+        }
+
+        public bool SaveEnchanterProgressInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int experienceGain,
+            IReadOnlyCollection<int> learnedRecipeIds)
+            => SaveProgressInTransaction(
+                connection, transaction, characterId, experienceGain, learnedRecipeIds);
+
+        public bool SaveRecipeInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int recipeId)
+            => SaveRecipesInTransaction(
+                connection,
+                transaction,
+                characterId,
+                new[] { recipeId });
 
         public bool SaveInTransaction(
             SqliteConnection connection,
@@ -130,21 +219,63 @@ ON CONFLICT(character_id) DO UPDATE SET
                     return false;
             }
 
-            var normalizedExperienceGain = Math.Max(0, experienceGain);
-            if (normalizedExperienceGain == 0)
-                return true;
+            return SaveExperienceInTransaction(
+                connection,
+                transaction,
+                characterId,
+                experienceGain);
+        }
 
-            using (var command = connection.CreateCommand())
+        private static bool SaveProgressInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int experienceGain,
+            IReadOnlyCollection<int> learnedRecipeIds)
+        {
+            if (connection == null || transaction == null || characterId <= 0)
+                return false;
+
+            if (!SaveExperienceInTransaction(
+                    connection,
+                    transaction,
+                    characterId,
+                    experienceGain))
+                return false;
+
+            return SaveRecipesInTransaction(
+                connection,
+                transaction,
+                characterId,
+                learnedRecipeIds);
+        }
+
+        private static bool SaveRecipesInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            IReadOnlyCollection<int> recipeIds)
+        {
+            if (connection == null || transaction == null || characterId <= 0)
+                return false;
+            if (recipeIds == null)
+                return true;
+            foreach (var recipeId in recipeIds)
             {
-                command.Transaction = transaction;
-                command.CommandText = @"
-UPDATE character_subtype0_fields
-SET expert_job_exp = MIN(4294967295, expert_job_exp + @exp)
-WHERE character_id=@cid;";
-                command.Parameters.AddWithValue("@cid", characterId);
-                command.Parameters.AddWithValue("@exp", normalizedExperienceGain);
-                return command.ExecuteNonQuery() == 1;
+                if (recipeId <= 0)
+                    return false;
+                using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = @"
+INSERT OR IGNORE INTO character_expert_job_recipes (character_id, recipe_id)
+VALUES (@cid, @recipe);";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.Parameters.AddWithValue("@recipe", recipeId);
+                    command.ExecuteNonQuery();
+                }
             }
+            return true;
         }
 
         internal static void InitializeInTransaction(
@@ -167,6 +298,9 @@ WHERE character_id=@cid;";
                 initialGrade = 1;
                 initialEndurance = DisjointMachineConfigProvider.InitialEndurance;
             }
+            var initialEnchanterEndurance = expertJobType == ExpertJobStateCodec.EnchanterType
+                ? EnchanterConfigProvider.Config.InitialEndurance
+                : 0;
 
             using (var command = connection.CreateCommand())
             {
@@ -174,16 +308,19 @@ WHERE character_id=@cid;";
                 command.CommandText = @"
 INSERT INTO character_expert_job (
     character_id, giveup_count,
-    disjoint_machine_grade, disjoint_machine_endurance, updated_at)
-VALUES (@cid, 0, @grade, @endurance, CURRENT_TIMESTAMP)
+    disjoint_machine_grade, disjoint_machine_endurance,
+    enchanter_endurance, updated_at)
+VALUES (@cid, 0, @grade, @endurance, @enchanterEndurance, CURRENT_TIMESTAMP)
 ON CONFLICT(character_id) DO UPDATE SET
     giveup_count=0,
     disjoint_machine_grade=excluded.disjoint_machine_grade,
     disjoint_machine_endurance=excluded.disjoint_machine_endurance,
+    enchanter_endurance=excluded.enchanter_endurance,
     updated_at=CURRENT_TIMESTAMP;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 command.Parameters.AddWithValue("@grade", initialGrade);
                 command.Parameters.AddWithValue("@endurance", initialEndurance);
+                command.Parameters.AddWithValue("@enchanterEndurance", initialEnchanterEndurance);
                 command.ExecuteNonQuery();
             }
 
@@ -196,6 +333,99 @@ WHERE character_id=@cid;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 command.ExecuteNonQuery();
             }
+
+            if (expertJobType == ExpertJobStateCodec.EnchanterType)
+            {
+                foreach (var recipeId in EnchanterConfigProvider.Config.GetAutoLearnRecipeIds(0))
+                {
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.Transaction = transaction;
+                        command.CommandText = @"
+INSERT INTO character_expert_job_recipes (character_id, recipe_id)
+VALUES (@cid, @recipe);";
+                        command.Parameters.AddWithValue("@cid", characterId);
+                        command.Parameters.AddWithValue("@recipe", recipeId);
+                        command.ExecuteNonQuery();
+                    }
+                }
+            }
+        }
+
+        private static void ReconcileEnchanterRecipes(
+            SqliteConnection connection,
+            int characterId,
+            ExpertJobState state)
+        {
+            uint experience;
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = @"
+SELECT expert_job_exp
+FROM character_subtype0_fields
+WHERE character_id=@cid;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                var value = command.ExecuteScalar();
+                experience = value == null || value == DBNull.Value
+                    ? 0
+                    : (uint)Math.Min(uint.MaxValue, Convert.ToUInt64(value));
+            }
+
+            var expected = EnchanterConfigProvider.Config.GetAutoLearnRecipeIds(experience);
+            var missing = new List<int>();
+            foreach (var recipeId in expected)
+            {
+                if (!state.LearnedRecipeIds.Contains(recipeId))
+                    missing.Add(recipeId);
+            }
+            if (missing.Count == 0)
+            {
+                state.LearnedRecipeIds.Sort();
+                return;
+            }
+
+            using (var transaction = connection.BeginTransaction())
+            {
+                foreach (var recipeId in missing)
+                {
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.Transaction = transaction;
+                        command.CommandText = @"
+INSERT OR IGNORE INTO character_expert_job_recipes (character_id, recipe_id)
+VALUES (@cid, @recipe);";
+                        command.Parameters.AddWithValue("@cid", characterId);
+                        command.Parameters.AddWithValue("@recipe", recipeId);
+                        command.ExecuteNonQuery();
+                    }
+                }
+                transaction.Commit();
+            }
+            state.LearnedRecipeIds.AddRange(missing);
+            state.LearnedRecipeIds.Sort();
+        }
+
+        private static bool SaveExperienceInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int experienceGain)
+        {
+            var normalizedExperienceGain = Math.Max(0, experienceGain);
+            if (normalizedExperienceGain == 0)
+                return true;
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+UPDATE character_subtype0_fields
+SET expert_job_exp = MIN(4294967295, expert_job_exp + @exp)
+WHERE character_id=@cid;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@exp", normalizedExperienceGain);
+                return command.ExecuteNonQuery() == 1;
+            }
         }
 
         private static ExpertJobState CreateInitialState(int expertJobType)
@@ -207,6 +437,13 @@ WHERE character_id=@cid;";
                 {
                     MachineGrade = 1,
                     Endurance = DisjointMachineConfigProvider.InitialEndurance,
+                };
+            }
+            else if (expertJobType == ExpertJobStateCodec.EnchanterType)
+            {
+                state.EnchanterMachine = new EnchanterMachineState
+                {
+                    Endurance = EnchanterConfigProvider.Config.InitialEndurance,
                 };
             }
 

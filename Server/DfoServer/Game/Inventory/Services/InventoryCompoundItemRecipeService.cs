@@ -31,15 +31,27 @@ namespace DfoServer.Game.Inventory
             result.PvfPath = recipe.PvfPath;
             result.RecipeType = recipe.RecipeType;
 
-            var materials = MultiplyRecipeEntries(recipe.Materials, request.RequestedCount);
-            var outputs = MultiplyRecipeEntries(recipe.Outputs, request.RequestedCount);
+            if (!TryMultiplyRecipeEntries(
+                    recipe.Materials,
+                    request.RequestedCount,
+                    out var materials)
+                || !TryMultiplyRecipeEntries(
+                    recipe.Outputs,
+                    request.RequestedCount,
+                    out var outputs))
+            {
+                return Fail(result, 17);
+            }
             if (outputs.Count == 0)
                 return Fail(result, 17);
             if (!HasEnoughMaterials(inventory, materials))
                 return Fail(result, 21);
 
             var rewardRequests = BuildRewardRequests(outputs);
-            var goldCost = recipe.GoldCost * (int)request.RequestedCount;
+            var totalGoldCost = (long)recipe.GoldCost * request.RequestedCount;
+            if (totalGoldCost < 0 || totalGoldCost > int.MaxValue)
+                return Fail(result, 17);
+            var goldCost = (int)totalGoldCost;
 
             var planningInventory = InventoryCompoundPlanning.CloneInventory(inventory);
             if (!DeleteMaterials(planningInventory, materials, null))
@@ -154,29 +166,9 @@ namespace DfoServer.Game.Inventory
             var outputs = new List<CompoundItemRecipeEntry>();
             var goldCost = 0;
 
-            if (values.Count >= 1)
+            if (!TryParseEncodedRecipe(values, out materials, out outputs)
+                || outputs.Count == 0)
             {
-                var pos = 0;
-                var materialCount = values[pos++];
-                if (materialCount < 0 || values.Count < pos + materialCount * 2)
-                    return false;
-
-                for (var index = 0; index < materialCount; index++)
-                    materials.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
-
-                if (pos < values.Count)
-                {
-                    var outputCount = values[pos++];
-                    if (outputCount < 0 || values.Count < pos + outputCount * 2)
-                        return false;
-
-                    for (var index = 0; index < outputCount; index++)
-                        outputs.Add(new CompoundItemRecipeEntry(values[pos++], values[pos++]));
-                }
-            }
-            else
-            {
-                // IntData 为空，回退解析 [input item]/[output item]（生产 stk）
                 materials = ParseInputOutputEntries(stackable.InputItem);
                 outputs = ParseInputOutputEntries(stackable.OutputItem);
                 goldCost = ParseGoldCostFromInputItem(stackable.InputItem);
@@ -196,42 +188,44 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
-        private static List<CompoundItemRecipeEntry> MultiplyRecipeEntries(
+        private static bool TryMultiplyRecipeEntries(
             IReadOnlyList<CompoundItemRecipeEntry> entries,
-            ushort requestedCount)
+            ushort requestedCount,
+            out List<CompoundItemRecipeEntry> result)
         {
-            var merged = new Dictionary<int, int>();
+            result = new List<CompoundItemRecipeEntry>();
+            var merged = new Dictionary<int, long>();
             if (entries == null)
-                return new List<CompoundItemRecipeEntry>();
+                return true;
 
             foreach (var entry in entries)
             {
-                var count = checked(entry.Count * (int)requestedCount);
+                var count = (long)entry.Count * requestedCount;
                 if (entry.ItemTemplateId <= 0 || count <= 0)
                     continue;
 
-                if (!merged.ContainsKey(entry.ItemTemplateId))
-                    merged[entry.ItemTemplateId] = 0;
-                merged[entry.ItemTemplateId] = checked(merged[entry.ItemTemplateId] + count);
+                var total = (merged.TryGetValue(entry.ItemTemplateId, out var current)
+                    ? current
+                    : 0L) + count;
+                if (total > int.MaxValue)
+                    return false;
+                merged[entry.ItemTemplateId] = total;
             }
 
-            return merged
+            result = merged
                 .OrderBy(pair => pair.Key)
-                .Select(pair => new CompoundItemRecipeEntry(pair.Key, pair.Value))
+                .Select(pair => new CompoundItemRecipeEntry(pair.Key, (int)pair.Value))
                 .ToList();
+            return true;
         }
 
         private static bool HasEnoughMaterials(
             InventoryService inventory,
             IReadOnlyList<CompoundItemRecipeEntry> materials)
         {
-            foreach (var material in materials)
-            {
-                if (inventory.CountMainItem(material.ItemTemplateId) < material.Count)
-                    return false;
-            }
-
-            return true;
+            return InventoryMaterialConsumptionService.HasEnough(
+                inventory,
+                BuildMaterialRequirements(materials));
         }
 
         private static bool DeleteMaterials(
@@ -239,54 +233,69 @@ namespace DfoServer.Game.Inventory
             IReadOnlyList<CompoundItemRecipeEntry> materials,
             List<CompoundItemDeletedEntry> deleted)
         {
-            foreach (var material in materials)
+            var consumed = new List<InventoryMaterialConsumptionEntry>();
+            if (!InventoryMaterialConsumptionService.TryConsume(
+                    inventory,
+                    BuildMaterialRequirements(materials),
+                    consumed))
             {
-                if (!DeleteMaterial(inventory, material, deleted))
-                    return false;
+                return false;
             }
 
+            if (deleted != null)
+            {
+                foreach (var entry in consumed)
+                {
+                    deleted.Add(new CompoundItemDeletedEntry
+                    {
+                        ListType = InventoryListType.Main,
+                        SlotIndex = entry.SlotIndex,
+                        Count = entry.Count,
+                        ItemTemplateId = entry.ItemTemplateId,
+                    });
+                }
+            }
             return true;
         }
 
-        private static bool DeleteMaterial(
-            InventoryService inventory,
-            CompoundItemRecipeEntry material,
-            List<CompoundItemDeletedEntry> deleted)
+        private static bool TryParseEncodedRecipe(
+            IReadOnlyList<int> values,
+            out List<CompoundItemRecipeEntry> materials,
+            out List<CompoundItemRecipeEntry> outputs)
         {
-            var remaining = material.Count;
-            foreach (var pair in inventory.GetItems(InventoryListType.Main)
-                         .Where(candidate => candidate.Value.ItemId == material.ItemTemplateId)
-                         .OrderBy(candidate => candidate.Key))
-            {
-                if (remaining <= 0)
-                    return true;
+            materials = new List<CompoundItemRecipeEntry>();
+            outputs = new List<CompoundItemRecipeEntry>();
+            if (values == null || values.Count == 0)
+                return false;
 
-                var item = pair.Value;
-                var remove = Math.Min(remaining, InventoryStackRuleService.IsStackable(item) ? item.Count : 1);
-                if (remove <= 0)
-                    continue;
+            var position = 0;
+            var materialCount = values[position++];
+            if (materialCount < 0 || values.Count < position + materialCount * 2)
+                return false;
 
-                if (!InventoryDeleteService.TryConsumeFromSlot(
-                        inventory,
-                        InventoryListType.Main,
-                        pair.Key,
-                        item.ItemId,
-                        remove,
-                        out var delete)
-                    || !delete.Success)
-                    return false;
+            for (var index = 0; index < materialCount; index++)
+                materials.Add(new CompoundItemRecipeEntry(values[position++], values[position++]));
 
-                deleted?.Add(new CompoundItemDeletedEntry
-                {
-                    ListType = InventoryListType.Main,
-                    SlotIndex = pair.Key,
-                    Count = delete.DeletedCount,
-                    ItemTemplateId = item.ItemId,
-                });
-                remaining -= remove;
-            }
+            if (position >= values.Count)
+                return true;
 
-            return remaining <= 0;
+            var outputCount = values[position++];
+            if (outputCount < 0 || values.Count < position + outputCount * 2)
+                return false;
+
+            for (var index = 0; index < outputCount; index++)
+                outputs.Add(new CompoundItemRecipeEntry(values[position++], values[position++]));
+            return true;
+        }
+
+        private static List<InventoryMaterialRequirement> BuildMaterialRequirements(
+            IReadOnlyList<CompoundItemRecipeEntry> materials)
+        {
+            return materials
+                .Select(material => new InventoryMaterialRequirement(
+                    material.ItemTemplateId,
+                    material.Count))
+                .ToList();
         }
 
         private static List<InventoryRewardGrantRequest> BuildRewardRequests(
@@ -390,10 +399,6 @@ namespace DfoServer.Game.Inventory
             return false;
         }
 
-        /// <summary>
-        /// 从 [input item]/[output item] 文本解析 (itemId, count) 对列表。
-        /// 输入格式：空格分隔的整数列表，每两个为一对。
-        /// </summary>
         private static List<CompoundItemRecipeEntry> ParseInputOutputEntries(string text)
         {
             var entries = new List<CompoundItemRecipeEntry>();
@@ -412,21 +417,16 @@ namespace DfoServer.Game.Inventory
             return entries;
         }
 
-        /// <summary>
-        /// 从 [input item] 文本的第 3-4 个值提取金币费用（goldId=0 的 goldAmount）。
-        /// 文本格式：itemId0 count0 goldId0 goldAmount0 itemId1 count1 goldId1 goldAmount1 ...
-        /// stride=4，遍历检测 goldId==0 时提取 goldAmount。
-        /// </summary>
         private static int ParseGoldCostFromInputItem(string text)
         {
             if (string.IsNullOrWhiteSpace(text))
                 return 0;
 
             var values = ParseRecipeIntList(text);
-            for (var i = 2; i + 1 < values.Count; i += 4)
+            for (var i = 0; i + 1 < values.Count; i += 2)
             {
                 if (values[i] == 0)
-                    return values[i + 1];
+                    return Math.Max(0, values[i + 1]);
             }
 
             return 0;

@@ -8,6 +8,13 @@ namespace DfoServer.Game.ExpertJob
 
         public DisjointMachineState DisjointMachine { get; set; }
 
+        public EnchanterMachineState EnchanterMachine { get; set; }
+
         public List<int> LearnedRecipeIds { get; } = new List<int>();
+    }
+
+    public sealed class EnchanterMachineState
+    {
+        public int Endurance { get; set; }
     }
 }

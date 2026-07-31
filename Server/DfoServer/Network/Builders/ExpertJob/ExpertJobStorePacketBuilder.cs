@@ -5,6 +5,8 @@ namespace DfoServer.Network.Builders.ExpertJob
 {
     internal static class ExpertJobStorePacketBuilder
     {
+        private const byte EnchanterPlayerAttachedStoreMode = 1;
+
         internal static byte[] BuildCreateNotification(ExpertJobStoreSession store)
         {
             var writer = new GamePacketWriter();
@@ -18,6 +20,31 @@ namespace DfoServer.Network.Builders.ExpertJob
             return writer.ToArray();
         }
 
+        internal static byte[] BuildCreateExpertJobNotification(ExpertJobStoreSession store)
+        {
+            if (store?.Kind != ExpertJobStoreKind.EnchantShop || store.Enchanter == null)
+                throw new ArgumentException("an enchanter store is required", nameof(store));
+
+            var writer = new GamePacketWriter();
+            writer.WriteByte((byte)store.Kind);
+            writer.WriteUInt16(store.OwnerUserId);
+            writer.WriteDstr(store.NameBytes);
+            writer.WriteByte(store.TownId);
+            writer.WriteByte(store.AreaId);
+            writer.WriteInt16(store.PositionX);
+            writer.WriteInt16(store.PositionY);
+            writer.WriteInt32(store.Cost);
+            writer.WriteByte(EnchanterPlayerAttachedStoreMode);
+            writer.WriteByte((byte)Math.Min(byte.MaxValue, store.Enchanter.CardQualificationLevels.Count));
+            for (var index = 0;
+                index < store.Enchanter.CardQualificationLevels.Count && index < byte.MaxValue;
+                index++)
+            {
+                writer.WriteByte(store.Enchanter.CardQualificationLevels[index]);
+            }
+            return writer.ToArray();
+        }
+
         internal static byte[] BuildCloseNotification(ushort ownerUserId)
         {
             var writer = new GamePacketWriter();
@@ -27,11 +54,21 @@ namespace DfoServer.Network.Builders.ExpertJob
 
         internal static byte[] BuildEnterSuccess(ExpertJobStoreSession store)
         {
-            if (store?.Kind != ExpertJobStoreKind.DisjointMachine
-                || store.DisjointMachine == null)
+            if (store == null)
+                throw new ArgumentNullException(nameof(store));
+
+            if (store.Kind == ExpertJobStoreKind.EnchantShop && store.Enchanter != null)
             {
-                throw new ArgumentException("a disjoint machine store is required", nameof(store));
+                var enchantWriter = new GamePacketWriter();
+                enchantWriter.WriteByte(1);
+                enchantWriter.WriteByte((byte)store.Kind);
+                enchantWriter.WriteUInt16(store.OwnerUserId);
+                enchantWriter.WriteInt32(store.Enchanter.Endurance);
+                return enchantWriter.ToArray();
             }
+
+            if (store.Kind != ExpertJobStoreKind.DisjointMachine || store.DisjointMachine == null)
+                throw new ArgumentException("an unsupported expert job store was supplied", nameof(store));
 
             var machine = store.DisjointMachine;
             var writer = new GamePacketWriter();
@@ -71,12 +108,37 @@ namespace DfoServer.Network.Builders.ExpertJob
             return writer.ToArray();
         }
 
+        internal static byte[] BuildEnchantSuccess(EnchanterStoreUseResult result)
+        {
+            if (result == null)
+                throw new ArgumentNullException(nameof(result));
+
+            var writer = new GamePacketWriter();
+            writer.WriteByte(1);
+            writer.WriteByte(result.EnchantSucceeded ? (byte)1 : (byte)0);
+            writer.WriteUInt32(result.FinalExperience);
+            // The current client consumes this legacy field but does not project it.
+            writer.WriteByte(0);
+            writer.WriteInt32(result.Endurance);
+            return writer.ToArray();
+        }
+
         internal static byte[] BuildOwnerDisjointNotification(
             int ownerGold,
             int endurance)
         {
             var writer = new GamePacketWriter();
             writer.WriteByte(1);
+            writer.WriteInt32(ownerGold);
+            writer.WriteInt32(endurance);
+            return writer.ToArray();
+        }
+
+        internal static byte[] BuildOwnerEnchantNotification(
+            int ownerGold,
+            int endurance)
+        {
+            var writer = new GamePacketWriter();
             writer.WriteInt32(ownerGold);
             writer.WriteInt32(endurance);
             return writer.ToArray();

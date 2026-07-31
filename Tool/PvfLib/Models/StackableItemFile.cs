@@ -186,6 +186,9 @@ namespace PvfLib
         public int UsablePeriod { get; set; } = -1;
         public int TradeLimit { get; set; } = -1;
         public int PortableDisjoint { get; set; } = -1;
+        public string ExpertJobOnlyType { get; set; }
+        public int ExpertJobOnlyLevel { get; set; } = -1;
+        public int EnchanterExtractionIndex { get; set; } = -1;
 
         #endregion
 
@@ -329,6 +332,8 @@ namespace PvfLib
                     case "usable period": stk.UsablePeriod = ParseInt(data); break;
                     case "trade limit max": stk.TradeLimit = ParseInt(data); break;
                     case "portable disjoint": stk.PortableDisjoint = ParseInt(data); break;
+                    case "expertjob only": ParseExpertJobOnly(node, content, stk); break;
+                    case "enchanter extraction": stk.EnchanterExtractionIndex = ParseInt(data); break;
 
                     
                     case "enchant index": stk.EnchantIndex = ParseInt(data); break;
@@ -927,6 +932,20 @@ namespace PvfLib
             }
 
             return result;
+        }
+
+        private static void ParseExpertJobOnly(ScriptNode node, string content, StackableItemFile item)
+        {
+            if (node == null || item == null)
+                return;
+
+            var raw = node.GetFirstDataContent(content);
+            var typeMatch = Regex.Match(raw ?? string.Empty, "`([^`]*)`");
+            var values = ParseInts(raw);
+            if (typeMatch.Success)
+                item.ExpertJobOnlyType = typeMatch.Groups[1].Value.Trim();
+            if (values.Count > 0)
+                item.ExpertJobOnlyLevel = values[0];
         }
 
         private static List<AvatarSelectAbilityChangeEntry> ParseAvatarSelectAbilityChanges(

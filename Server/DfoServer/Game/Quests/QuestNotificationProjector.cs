@@ -406,18 +406,14 @@ namespace DfoServer.Game.Quests
                 HonorLevelDataProvider.ApplyToSubtype0Tail(tail, honorLevel);
                 record.Subtype0Tail = tail;
 
-                var expertJobSnapshot = new SelectCharacterDataSnapshot();
-                var expertInfo = expertJobSnapshot.InitializationSnapshot.ExpertJobInfo;
                 var expertJobState = _expertJobStateRepository.Load(
                     characterId,
                     expertJobType);
-                ExpertJobStateCodec.ProjectToSnapshot(
+                var expertJobBody = ExpertJobInfoBodyBuilder.BuildProjectedBody(
                     expertJobType,
                     expertJobState,
-                    expertInfo);
-                var expertJobBuilder = new ExpertJobInfoBodyBuilder();
-                expertJobBuilder.TryBuild(expertJobSnapshot, 0, out var expertJobBody);
-                await _sender.SendNotiAsync(expertJobBuilder.NotiType, expertJobBody);
+                    tail.ExpertJobExp);
+                await _sender.SendNotiAsync(0x00CD, expertJobBody);
 
                 var writer = new Network.GamePacketWriter();
                 writer.WriteByte(0);

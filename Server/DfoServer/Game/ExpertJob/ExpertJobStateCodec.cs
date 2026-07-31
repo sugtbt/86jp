@@ -5,13 +5,15 @@ namespace DfoServer.Game.ExpertJob
 {
     internal static class ExpertJobStateCodec
     {
+        internal const byte EnchanterType = 1;
         internal const byte DisjointerType = 3;
         internal const byte DisjointerMode = 3;
 
         internal static void ProjectToSnapshot(
             int expertJobType,
             ExpertJobState state,
-            ExpertJobInfoSnapshot snapshot)
+            ExpertJobInfoSnapshot snapshot,
+            uint expertJobExperience = 0)
         {
             if (snapshot == null)
                 throw new ArgumentNullException(nameof(snapshot));
@@ -23,6 +25,9 @@ namespace DfoServer.Game.ExpertJob
             snapshot.DisjointMachineGrade = 0;
             snapshot.DisjointMachineEndurance = 0;
             snapshot.Entries.Clear();
+            snapshot.CardQualificationLevels.Clear();
+            snapshot.EnchanterLevel = 0;
+            snapshot.EnchanterEndurance = 0;
 
             if (expertJobType == DisjointerType)
             {
@@ -45,6 +50,16 @@ namespace DfoServer.Game.ExpertJob
 
             foreach (var recipeId in state.LearnedRecipeIds)
                 snapshot.Entries.Add(recipeId);
+
+            if (expertJobType == EnchanterType)
+            {
+                var config = EnchanterConfigProvider.Config;
+                snapshot.CardQualificationLevels.AddRange(
+                    config.GetCardQualificationLevels(expertJobExperience));
+                snapshot.EnchanterLevel = config.GetLevel(expertJobExperience);
+                snapshot.EnchanterEndurance = state.EnchanterMachine?.Endurance
+                    ?? config.InitialEndurance;
+            }
         }
 
         internal static bool TryDecodeLegacyBlob(

@@ -679,28 +679,15 @@ namespace DfoServer.Game.Inventory
                 TryLoadStackable(enchantCardItemId, out card);
             }
 
-            if (card != null)
-            {
-                // monster card 的 string data: 第一个是图片资源，后续是允许附魔的 equipment type。
-                var allowedTypes = ExtractAllowedEquipmentTypes(card.StringDataItems);
-                if (allowedTypes.Count > 0 && !allowedTypes.Contains(targetEquipmentType))
-                {
-                    rejectReason = "target equipment type is not allowed by monster card string data";
-                    return false;
-                }
-
-                if (card.EnchantTable.Count > 0 && !card.EnchantTable.Contains(enchantUpgradeCount))
-                {
-                    rejectReason = "enchant upgrade count is not allowed by monster card enchant table";
-                    return false;
-                }
-
-                if (card.EnchantTable.Count == 0 && enchantUpgradeCount != 0)
-                {
-                    rejectReason = "monster card has no enchant table for upgraded bead";
-                    return false;
-                }
-            }
+            if (card != null
+                && !TryValidateMonsterCardTargetMetadata(
+                    card,
+                    targetEquipmentType,
+                    enchantUpgradeCount,
+                    requireAllowedType: false,
+                    upgradedItemName: "bead",
+                    out rejectReason))
+                return false;
 
             if (card == null && enchantUpgradeCount != 0)
             {
@@ -709,6 +696,38 @@ namespace DfoServer.Game.Inventory
             }
 
             return true;
+        }
+
+        internal static bool TryValidateMonsterCardTarget(
+            int cardItemTemplateId,
+            int targetItemTemplateId,
+            byte enchantUpgradeCount,
+            out string rejectReason)
+        {
+            rejectReason = null;
+            if (!TryLoadStackable(cardItemTemplateId, out var card)
+                || !string.Equals(
+                    NormalizeItemCategory(card.ItemCategory),
+                    "monster card",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                rejectReason = "item is not a monster card";
+                return false;
+            }
+
+            if (!TryGetEquipmentType(targetItemTemplateId, out var targetEquipmentType))
+            {
+                rejectReason = "target is not found in equipment.lst";
+                return false;
+            }
+
+            return TryValidateMonsterCardTargetMetadata(
+                card,
+                targetEquipmentType,
+                enchantUpgradeCount,
+                requireAllowedType: true,
+                upgradedItemName: "card",
+                out rejectReason);
         }
 
         public static bool TryValidatePetEnchantByBeadTarget(int beadItemTemplateId, int targetItemTemplateId, byte enchantUpgradeCount, out int enchantCardItemId, out string rejectReason)
@@ -752,27 +771,15 @@ namespace DfoServer.Game.Inventory
                 TryLoadStackable(enchantCardItemId, out card);
             }
 
-            if (card != null)
-            {
-                var allowedTypes = ExtractAllowedEquipmentTypes(card.StringDataItems);
-                if (allowedTypes.Count == 0 || !allowedTypes.Contains("[creature]"))
-                {
-                    rejectReason = "target equipment type is not allowed by monster card string data";
-                    return false;
-                }
-
-                if (card.EnchantTable.Count > 0 && !card.EnchantTable.Contains(enchantUpgradeCount))
-                {
-                    rejectReason = "enchant upgrade count is not allowed by monster card enchant table";
-                    return false;
-                }
-
-                if (card.EnchantTable.Count == 0 && enchantUpgradeCount != 0)
-                {
-                    rejectReason = "monster card has no enchant table for upgraded bead";
-                    return false;
-                }
-            }
+            if (card != null
+                && !TryValidateMonsterCardTargetMetadata(
+                    card,
+                    "[creature]",
+                    enchantUpgradeCount,
+                    requireAllowedType: true,
+                    upgradedItemName: "bead",
+                    out rejectReason))
+                return false;
 
             if (card == null && enchantUpgradeCount != 0)
             {
@@ -780,6 +787,41 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
+            return true;
+        }
+
+        private static bool TryValidateMonsterCardTargetMetadata(
+            StackableItemFile card,
+            string targetEquipmentType,
+            byte enchantUpgradeCount,
+            bool requireAllowedType,
+            string upgradedItemName,
+            out string rejectReason)
+        {
+            rejectReason = null;
+            var allowedTypes = ExtractAllowedEquipmentTypes(card.StringDataItems);
+            if ((requireAllowedType && allowedTypes.Count == 0)
+                || (allowedTypes.Count > 0 && !allowedTypes.Contains(targetEquipmentType)))
+            {
+                rejectReason = "target equipment type is not allowed by monster card string data";
+                return false;
+            }
+
+            if (card.EnchantTable.Count > 0)
+            {
+                if (!card.EnchantTable.Contains(enchantUpgradeCount))
+                {
+                    rejectReason = "enchant upgrade count is not allowed by monster card enchant table";
+                    return false;
+                }
+                return true;
+            }
+
+            if (enchantUpgradeCount != 0)
+            {
+                rejectReason = $"monster card has no enchant table for upgraded {upgradedItemName}";
+                return false;
+            }
             return true;
         }
 
@@ -841,6 +883,9 @@ namespace DfoServer.Game.Inventory
 
             return result;
         }
+
+        private static string NormalizeItemCategory(string raw)
+            => (raw ?? string.Empty).Replace("`", string.Empty).Trim();
 
         private static bool HasDurabilityByType(string normalizedType)
         {

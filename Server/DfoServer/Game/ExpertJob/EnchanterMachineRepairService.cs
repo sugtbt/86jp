@@ -2,19 +2,19 @@ using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.ExpertJob
 {
-    internal static class DisjointMachineRepairService
+    internal static class EnchanterMachineRepairService
     {
         internal const byte ErrorCannotRepair = ExpertJobMachineRepairService.ErrorCannotRepair;
         internal const byte ErrorInvalidState = ExpertJobMachineRepairService.ErrorInvalidState;
 
         internal static bool TryRepair(
             InventoryService inventory,
-            DisjointMachineState state,
+            EnchanterMachineState state,
+            uint experience,
             out ExpertJobMachineRepairResult result)
         {
-            var rule = state == null
-                ? null
-                : DisjointMachineConfigProvider.Config.GetRepairRule(state.MachineGrade);
+            var config = EnchanterConfigProvider.Config;
+            var rule = config.GetRepairRule(config.GetLevel(experience));
             if (state == null || rule == null)
             {
                 result = new ExpertJobMachineRepairResult { ErrorCode = ErrorInvalidState };
