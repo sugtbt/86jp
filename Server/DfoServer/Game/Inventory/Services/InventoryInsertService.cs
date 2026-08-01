@@ -95,7 +95,7 @@ namespace DfoServer.Game.Inventory
                 if (!TryValidateSingleStackInsert(item, insertCount, plan))
                     return false;
 
-                if (TryFindSameItemSlot(inventory, InventoryListType.Main, item.ItemId, out var sameSlot))
+                if (TryFindSameItemSlot(inventory, InventoryListType.Main, item, out var sameSlot))
                 {
                     var sameItem = inventory.GetItem(InventoryListType.Main, sameSlot);
                     return TryPlanMergeIntoOccupiedSlot(item, insertCount, sameItem, InventoryListType.Main, sameSlot, plan);
@@ -241,7 +241,7 @@ namespace DfoServer.Game.Inventory
                 if (!TryValidateSingleStackInsert(item, count, plan))
                     return false;
 
-                if (TryFindSameItemSlot(inventory, targetListType, item.ItemId, out var sameSlot))
+                if (TryFindSameItemSlot(inventory, targetListType, item, out var sameSlot))
                 {
                     var sameItem = inventory.GetItem(targetListType, sameSlot);
                     return TryPlanMergeIntoOccupiedSlot(item, count, sameItem, targetListType, sameSlot, plan);
@@ -276,7 +276,7 @@ namespace DfoServer.Game.Inventory
                 if (!TryValidateSingleStackInsert(item, count, plan))
                     return false;
 
-                if (TryFindSameItemSlot(inventory, targetListType, item.ItemId, out _))
+                if (TryFindSameItemSlot(inventory, targetListType, item, out _))
                     return Fail(plan, InventoryInsertError.CannotStack);
             }
 
@@ -320,7 +320,7 @@ namespace DfoServer.Game.Inventory
         private static bool TryFindSameItemSlot(
             InventoryService inventory,
             InventoryListType targetListType,
-            int itemId,
+            ItemCore item,
             out short slotIndex)
         {
             slotIndex = -1;
@@ -330,7 +330,7 @@ namespace DfoServer.Game.Inventory
             for (var slot = range.Start; slot <= range.End; slot++)
             {
                 var existing = inventory.GetItem(targetListType, slot);
-                if (existing == null || existing.ItemId != itemId || !InventoryStackRuleService.IsStackable(existing))
+                if (!InventoryStackRuleService.CanShareStack(item, existing))
                     continue;
 
                 slotIndex = slot;
@@ -497,7 +497,7 @@ namespace DfoServer.Game.Inventory
                 return Fail(result, InventoryInsertError.SlotOccupied);
 
             if (InventoryStackRuleService.IsStackable(item)
-                && TryFindSameItemSlot(inventory, plan.ListType, item.ItemId, out _))
+                && TryFindSameItemSlot(inventory, plan.ListType, item, out _))
                 return Fail(result, InventoryInsertError.CannotStack);
 
             var insertItem = item.Copy();
