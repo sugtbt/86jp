@@ -12,14 +12,16 @@ namespace DfoServer.Game.Inventory
         internal int CalculateConst { get; set; }
         internal int GoldCost { get; set; }
 
-        internal int CalculateChance(int targetRarity, int materialRarity)
+        internal int CalculateChance(int targetRarity, int materialRarity, bool sameItem = false)
         {
             if (targetRarity < 0 || targetRarity > 3 || materialRarity < 0 || materialRarity > 3)
                 return 0;
+            if (sameItem)
+                return ProbabilityDenominator;
             if (materialRarity > targetRarity)
                 return ProbabilityDenominator;
 
-            var basePercent = 70 - targetRarity * 10;
+            var basePercent = 80 - targetRarity * 10;
             var chance = basePercent * 1000L;
             for (var gap = targetRarity - materialRarity; gap > 0; gap--)
                 chance /= 2;
@@ -134,7 +136,10 @@ namespace DfoServer.Game.Inventory
                     out _))
                 return Reject("inventory full", out rejection);
 
-            var chance = _config.CalculateChance(targetRarity, materialRarity);
+            var chance = _config.CalculateChance(
+                targetRarity,
+                materialRarity,
+                target.ItemId == material.ItemId);
             var success = chance >= MonsterCardUpgradeConfig.ProbabilityDenominator
                 || (chance > 0 && _next(MonsterCardUpgradeConfig.ProbabilityDenominator) < chance);
 
