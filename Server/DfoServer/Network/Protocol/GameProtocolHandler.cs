@@ -467,6 +467,7 @@ namespace DfoServer.Network
             d[0x019C] = _inventoryHandler.Handle_TITLE_BOOK;                       //412
             d[0x01B6] = _inventoryHandler.Handle_CHANGE_RANDOM_OPTION;             //438
             d[0x019D] = _inventoryHandler.Handle_TITLE_BOOK;                       //413
+            d[0x019E] = _inventoryHandler.Handle_ENUM_CMDPACKET_MONSTERCARD_BIND;  //414 monster card synthesis
             d[0x0207] = _inventoryHandler.Handle_OPEN_AVATAR_PACKAGE;
             d[0x0218] = _inventoryHandler.Handle_USE_BOOSTER_ITEM;
             d[0x0239] = _inventoryHandler.Handle_SET_CLONE_TITLE;                  //569
