@@ -4,15 +4,15 @@ using DfoServer.Game.Inventory;
 
 namespace DfoServer.Network.Parsers.ExpertJob
 {
-    internal static class EnchanterExtractionRequest
+    internal static class ExpertJobExtractionRequest
     {
-        internal static bool TryParse(byte[] body, out EnchanterExtractionCommand command)
+        internal static bool TryParse(byte[] body, out ExpertJobExtractionCommand command)
         {
             command = null;
             if (body == null || body.Length != 6)
                 return false;
 
-            command = new EnchanterExtractionCommand
+            command = new ExpertJobExtractionCommand
             {
                 ExtractorType = body[0],
                 ExtractorSlotIndex = BitConverter.ToInt16(body, 1),

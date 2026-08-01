@@ -27,7 +27,7 @@ namespace DfoServer.Network.Handlers
 
             var (cid, aid) = ResolveOwner(session);
 
-            if (await TryHandleEnchanterRecipeLearning(
+            if (await TryHandleExpertJobRecipeLearning(
                     session, cid, listType, slotIndex, instanceValue, itemCode))
                 return;
 
@@ -117,7 +117,7 @@ namespace DfoServer.Network.Handlers
             FileLogger.Log($"[{ProtocolName}] USE_STACKABLE: consumed 1x item 0x{itemCode:X8} from slot {slotIndex}, remaining={result.RemainingStackCount}{petSatietyLog}");
         }
 
-        private async Task<bool> TryHandleEnchanterRecipeLearning(
+        private async Task<bool> TryHandleExpertJobRecipeLearning(
             EnhancedClientSession session,
             int characterId,
             InventoryListType listType,
@@ -131,15 +131,18 @@ namespace DfoServer.Network.Handlers
             var sourceItemId = itemCode;
             lock (lease.SyncRoot)
                 sourceItemId = lease.Inventory.GetItem(listType, slotIndex)?.ItemId ?? sourceItemId;
-            if (!EnchanterConfigProvider.Config.RecipesByItemId.ContainsKey(sourceItemId))
+            if (!ExpertJobConfigRegistry.TryResolveRecipe(
+                    sourceItemId,
+                    out var recipeConfig))
                 return false;
-            if (session.Player?.Subtype0Tail?.ExpertJobType != ExpertJobStateCodec.EnchanterType)
+            var recipeExpertJobType = recipeConfig.ExpertJobType;
+            if (session.Player?.Subtype0Tail?.ExpertJobType != recipeExpertJobType)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01,
                     0x002C,
                     UseStackableAckBuilder.BuildError(
-                        EnchanterRecipeLearningService.ErrorRequirementsNotMet,
+                        ExpertJobRecipeLearningService.ErrorRequirementsNotMet,
                         (byte)listType,
                         instanceValue,
                         sourceItemId)));
@@ -150,19 +153,20 @@ namespace DfoServer.Network.Handlers
             await operationGate.WaitAsync();
             try
             {
-                var state = _enchanterStates.Load(
+                var state = _expertJobStates.Load(
                     characterId,
-                    ExpertJobStateCodec.EnchanterType);
-                EnchanterRecipeLearningResult result;
+                    recipeExpertJobType);
+                ExpertJobRecipeLearningResult result;
                 lock (lease.SyncRoot)
                 {
-                    result = EnchanterRecipeLearningService.TryLearn(
+                    result = ExpertJobRecipeLearningService.TryLearn(
                         lease.Inventory,
                         listType,
                         slotIndex,
                         sourceItemId,
                         session.Player.Subtype0Tail.ExpertJobExp,
-                        state);
+                        state,
+                        recipeConfig);
                 }
                 if (!result.Handled)
                     return false;
@@ -175,7 +179,7 @@ namespace DfoServer.Network.Handlers
                         UseStackableAckBuilder.BuildError(
                             result.ErrorCode != 0
                                 ? result.ErrorCode
-                                : EnchanterRecipeLearningService.ErrorRequirementsNotMet,
+                                : ExpertJobRecipeLearningService.ErrorRequirementsNotMet,
                             (byte)listType,
                             instanceValue,
                             sourceItemId)));
@@ -191,7 +195,7 @@ namespace DfoServer.Network.Handlers
                 if (!_expertJobPersistence.Save(
                         lease,
                         lease,
-                        (connection, transaction) => _enchanterStates.SaveRecipeInTransaction(
+                        (connection, transaction) => _expertJobStates.SaveRecipeInTransaction(
                             connection,
                             transaction,
                             characterId,
@@ -201,7 +205,7 @@ namespace DfoServer.Network.Handlers
                         0x01,
                         0x002C,
                         UseStackableAckBuilder.BuildError(
-                            EnchanterRecipeLearningService.ErrorRequirementsNotMet,
+                            ExpertJobRecipeLearningService.ErrorRequirementsNotMet,
                             (byte)listType,
                             instanceValue,
                             sourceItemId)));
@@ -210,9 +214,13 @@ namespace DfoServer.Network.Handlers
 
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x002C, ack));
                 await _refresh.SendUpdateItemList(session, listType, slotIndex);
-                await SendEnchanterRecipeInfo(session, state);
+                await SendExpertJobRecipeInfo(
+                    session,
+                    recipeExpertJobType,
+                    state);
                 FileLogger.Log(
-                    $"[{ProtocolName}] ENCHANTER_RECIPE cid={characterId} " +
+                    $"[{ProtocolName}] EXPERT_JOB_RECIPE cid={characterId} " +
+                    $"type={recipeExpertJobType} " +
                     $"item={sourceItemId} recipe={result.RecipeId} " +
                     $"remaining={result.RemainingCount}");
                 return true;
@@ -223,12 +231,13 @@ namespace DfoServer.Network.Handlers
             }
         }
 
-        private static async Task SendEnchanterRecipeInfo(
+        private static async Task SendExpertJobRecipeInfo(
             EnhancedClientSession session,
+            int expertJobType,
             ExpertJobState state)
         {
             var body = ExpertJobInfoBodyBuilder.BuildProjectedBody(
-                ExpertJobStateCodec.EnchanterType,
+                expertJobType,
                 state,
                 session.Player.Subtype0Tail.ExpertJobExp);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00CD, body));

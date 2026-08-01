@@ -6,7 +6,9 @@ namespace DfoServer.Game.ExpertJob
     internal static class ExpertJobStateCodec
     {
         internal const byte EnchanterType = 1;
+        internal const byte AlchemistType = 2;
         internal const byte DisjointerType = 3;
+        internal const byte DollControllerType = 4;
         internal const byte DisjointerMode = 3;
 
         internal static void ProjectToSnapshot(

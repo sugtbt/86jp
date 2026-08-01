@@ -22,7 +22,7 @@ namespace DfoServer.Network.Handlers
         private readonly ExperienceItemNotificationService _experienceItemNotifications;
         private readonly Func<byte[], Task> _broadcastGamePacket;
         private readonly IMercenaryRestrictionService _mercenaryRestrictions;
-        private readonly IEnchanterMachineStateRepository _enchanterStates;
+        private readonly IExpertJobStateRepository _expertJobStates;
         private readonly ExpertJobPersistenceService _expertJobPersistence;
         private readonly ExpertJobOperationCoordinator _expertJobOperations;
 
@@ -34,7 +34,7 @@ namespace DfoServer.Network.Handlers
             ICharacterRepository characterRepository,
             InventoryRefreshSender refreshSender,
             ExperienceItemNotificationService experienceItemNotifications,
-            IEnchanterMachineStateRepository enchanterStates,
+            IExpertJobStateRepository expertJobStates,
             ExpertJobPersistenceService expertJobPersistence,
             ExpertJobOperationCoordinator expertJobOperations,
             Func<byte[], Task> broadcastGamePacket = null,
@@ -49,8 +49,8 @@ namespace DfoServer.Network.Handlers
                 ?? throw new ArgumentNullException(nameof(experienceItemNotifications));
             _broadcastGamePacket = broadcastGamePacket;
             _mercenaryRestrictions = mercenaryRestrictions;
-            _enchanterStates = enchanterStates
-                ?? throw new ArgumentNullException(nameof(enchanterStates));
+            _expertJobStates = expertJobStates
+                ?? throw new ArgumentNullException(nameof(expertJobStates));
             _expertJobPersistence = expertJobPersistence
                 ?? throw new ArgumentNullException(nameof(expertJobPersistence));
             _expertJobOperations = expertJobOperations

@@ -78,7 +78,7 @@ namespace DfoServer.SelfTests
                     out _),
                 ref failures);
             Check("captured enchanter extraction request parses",
-                EnchanterExtractionRequest.TryParse(
+                ExpertJobExtractionRequest.TryParse(
                     new byte[] { 0x01, 0x03, 0x00, 0x00, 0x0C, 0x00 },
                     out var extractionRequest)
                 && extractionRequest.ExtractorType == ExpertJobStateCodec.EnchanterType
@@ -87,9 +87,18 @@ namespace DfoServer.SelfTests
                 && extractionRequest.TargetSlotIndex == 12,
                 ref failures);
             Check("enchanter extraction request rejects trailing bytes",
-                !EnchanterExtractionRequest.TryParse(
+                !ExpertJobExtractionRequest.TryParse(
                     new byte[] { 0x01, 0x03, 0x00, 0x00, 0x0C, 0x00, 0x00 },
                     out _),
+                ref failures);
+            Check("captured alchemist extraction request uses shared layout",
+                ExpertJobExtractionRequest.TryParse(
+                    new byte[] { 0x02, 0x03, 0x00, 0x00, 0x09, 0x00 },
+                    out var alchemistExtractionRequest)
+                && alchemistExtractionRequest.ExtractorType == ExpertJobStateCodec.AlchemistType
+                && alchemistExtractionRequest.ExtractorSlotIndex == 3
+                && alchemistExtractionRequest.TargetListType == InventoryListType.Main
+                && alchemistExtractionRequest.TargetSlotIndex == 9,
                 ref failures);
             var capturedEnchantRequest = new byte[]
             {
@@ -115,7 +124,7 @@ namespace DfoServer.SelfTests
                 0x99, 0xD1, 0x98, 0x00, 0x01, 0x00, 0xEF, 0x00,
             };
             Check("captured enchanter bead craft request parses",
-                EnchanterCompoundRequest.TryParse(
+                ExpertJobCompoundRequest.TryParse(
                     capturedBeadCraftRequest,
                     out var beadCraftRequest)
                 && beadCraftRequest.RecipeItemId == 10015129
@@ -126,16 +135,25 @@ namespace DfoServer.SelfTests
             {
                 0xCD, 0xAC, 0x27, 0x00, 0x0A, 0x00, 0xFF, 0xFF,
             };
-            Check("captured enchanter product craft request parses",
-                EnchanterCompoundRequest.TryParse(
+            Check("captured expert-job product craft request parses",
+                ExpertJobCompoundRequest.TryParse(
                     capturedProductCraftRequest,
                     out var productCraftRequest)
                 && productCraftRequest.RecipeItemId == 2600141
                 && productCraftRequest.RequestedCount == 10
                 && productCraftRequest.IsProductCraft,
                 ref failures);
+            Check("doll-controller extraction request uses shared layout",
+                ExpertJobExtractionRequest.TryParse(
+                    new byte[] { 0x04, 0x03, 0x00, 0x00, 0x0C, 0x00 },
+                    out var dollExtractionRequest)
+                && dollExtractionRequest.ExtractorType == ExpertJobStateCodec.DollControllerType
+                && dollExtractionRequest.ExtractorSlotIndex == 3
+                && dollExtractionRequest.TargetListType == InventoryListType.Main
+                && dollExtractionRequest.TargetSlotIndex == 12,
+                ref failures);
             Check("enchanter bead craft request rejects trailing bytes",
-                !EnchanterCompoundRequest.TryParse(
+                !ExpertJobCompoundRequest.TryParse(
                     capturedBeadCraftRequest.Concat(new byte[] { 0 }).ToArray(),
                     out _),
                 ref failures);
@@ -279,19 +297,19 @@ namespace DfoServer.SelfTests
                 ref failures);
             runtime.TryCloseSession(enchanterStore.OwnerSessionId, out _);
 
-            var extractionAckResult = new EnchanterExtractionResult
+            var extractionAckResult = new ExpertJobExtractionResult
             {
                 TargetListType = InventoryListType.Main,
                 TargetSlotIndex = 13,
             };
-            extractionAckResult.Materials.Add(new EnchanterExtractionMaterial
+            extractionAckResult.Materials.Add(new ExpertJobExtractionMaterial
             {
                 SlotIndex = 42,
                 ItemTemplateId = 3038,
                 Count = 2,
             });
             Check("enchanter extraction success ACK uses current-client result layout",
-                EnchanterExtractionPacketBuilder.BuildSuccess(extractionAckResult).SequenceEqual(new byte[]
+                ExpertJobExtractionPacketBuilder.BuildSuccess(extractionAckResult).SequenceEqual(new byte[]
                 {
                     1, 0, 13, 0, 1,
                     42, 0, 0xDE, 0x0B, 0, 0, 2, 0, 0, 0,
@@ -357,6 +375,38 @@ namespace DfoServer.SelfTests
                 && enchanterConfig.RecipesByItemId[2600141].RequiredLevel == 1
                 && enchanterConfig.RecipesByItemId[2600141].MinimumExperienceGain == 0
                 && enchanterConfig.RecipesByItemId[2600141].MaximumExperienceGain == 1,
+                ref failures);
+            var alchemistConfig = AlchemistConfigProvider.Config;
+            Check("PVF alchemist recipes and extractor mappings",
+                alchemistConfig.RecipeConfig.GetLevel(19) == 1
+                && alchemistConfig.RecipeConfig.GetLevel(20) == 2
+                && alchemistConfig.RecipeConfig.GetAutoLearnRecipeIds(0).SequenceEqual(
+                    new[] { 2600149 })
+                && alchemistConfig.RecipeConfig.RecipesByItemId[2600150].ProductItemId == 1116
+                && alchemistConfig.RecipeConfig.RecipesByItemId[2600492].ProductItemId == 2600463
+                && alchemistConfig.Extractors[2600463].RequiredExpertJobLevel == 1
+                && alchemistConfig.Extractors[2600463].ExtractionIndex == 0
+                && alchemistConfig.Extractors[2600547].RequiredExpertJobLevel == 11
+                && alchemistConfig.Extractors[2600547].ExtractionIndex == 5
+                && alchemistConfig.ExtractionRules.ContainsKey((2600463, 0, 0))
+                && alchemistConfig.ExtractionRules.ContainsKey((2600547, 6, 1)),
+                ref failures);
+            var dollControllerConfig = DollControllerConfigProvider.Config;
+            Check("PVF doll-controller recipes and extractor mappings",
+                dollControllerConfig.RecipeConfig.GetLevel(19) == 1
+                && dollControllerConfig.RecipeConfig.GetLevel(20) == 2
+                && dollControllerConfig.RecipeConfig.GetAutoLearnRecipeIds(0).SequenceEqual(
+                    new[] { 2600083 })
+                && dollControllerConfig.RecipeConfig.RecipesByItemId[2600083].ProductItemId
+                    == 2600029
+                && dollControllerConfig.RecipeConfig.RecipesByItemId[2600502].ProductItemId
+                    == 2600474
+                && dollControllerConfig.Extractors[2600474].RequiredExpertJobLevel == 1
+                && dollControllerConfig.Extractors[2600474].ExtractionIndex == 0
+                && dollControllerConfig.Extractors[2600549].RequiredExpertJobLevel == 11
+                && dollControllerConfig.Extractors[2600549].ExtractionIndex == 5
+                && dollControllerConfig.ExtractionRules.ContainsKey((2600474, 0, 0))
+                && dollControllerConfig.ExtractionRules.ContainsKey((2600549, 6, 1)),
                 ref failures);
             Check("PVF disjointer experience thresholds map to one-based level",
                 config.GetExpertJobLevel(19) == 1
@@ -497,9 +547,9 @@ namespace DfoServer.SelfTests
             });
             extractionInventory.ClearDirtyState();
             Check("level-one enchanter extraction consumes equipment and grants PVF materials",
-                EnchanterExtractionService.TryExtract(
+                ExpertJobExtractionService.TryExtract(
                     extractionInventory,
-                    new EnchanterExtractionCommand
+                    new ExpertJobExtractionCommand
                     {
                         ExtractorType = ExpertJobStateCodec.EnchanterType,
                         ExtractorSlotIndex = 3,
@@ -507,6 +557,7 @@ namespace DfoServer.SelfTests
                         TargetSlotIndex = 12,
                     },
                     0,
+                    enchanterConfig,
                     out var extractionResult)
                 && extractionResult.ErrorCode == 0
                 && extractionInventory.GetItem(InventoryListType.Main, 3)?.ItemId == 2600482
@@ -517,6 +568,142 @@ namespace DfoServer.SelfTests
                     && material.Count > 0
                     && extractionInventory.CountMainItem(material.ItemTemplateId) >= material.Count),
                 ref failures);
+            var alchemistExtractionInventory = new InventoryService(990514, 990514);
+            alchemistExtractionInventory.SetItem(InventoryListType.Main, 3, new ItemCore
+            {
+                ItemId = 2600463,
+                Uid = 71010,
+                Value = 1,
+            });
+            alchemistExtractionInventory.SetItem(InventoryListType.Main, 12, new ItemCore
+            {
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = testEquipmentId,
+                Uid = 71011,
+            });
+            alchemistExtractionInventory.ClearDirtyState();
+            Check("level-one alchemist extractor consumes equipment and grants PVF material",
+                ExpertJobExtractionService.TryExtract(
+                    alchemistExtractionInventory,
+                    new ExpertJobExtractionCommand
+                    {
+                        ExtractorType = ExpertJobStateCodec.AlchemistType,
+                        ExtractorSlotIndex = 3,
+                        TargetListType = InventoryListType.Main,
+                        TargetSlotIndex = 12,
+                    },
+                    0,
+                    alchemistConfig,
+                    out var alchemistExtractionResult)
+                && alchemistExtractionResult.ErrorCode == 0
+                && alchemistExtractionInventory.GetItem(InventoryListType.Main, 3)?.ItemId == 2600463
+                && alchemistExtractionInventory.GetItem(InventoryListType.Main, 12) == null
+                && alchemistExtractionResult.Materials.Any(material =>
+                    material.ItemTemplateId == 2610024
+                    && material.Count > 0
+                    && alchemistExtractionInventory.CountMainItem(2610024) >= material.Count),
+                ref failures);
+            var dollExtractionInventory = new InventoryService(990517, 990517);
+            dollExtractionInventory.SetItem(InventoryListType.Main, 3, new ItemCore
+            {
+                ItemId = 2600474,
+                Uid = 71013,
+                Value = 1,
+            });
+            dollExtractionInventory.SetItem(InventoryListType.Main, 12, new ItemCore
+            {
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = testEquipmentId,
+                Uid = 71014,
+            });
+            dollExtractionInventory.ClearDirtyState();
+            Check("level-one doll-controller extractor consumes equipment and grants PVF material",
+                ExpertJobExtractionService.TryExtract(
+                    dollExtractionInventory,
+                    new ExpertJobExtractionCommand
+                    {
+                        ExtractorType = ExpertJobStateCodec.DollControllerType,
+                        ExtractorSlotIndex = 3,
+                        TargetListType = InventoryListType.Main,
+                        TargetSlotIndex = 12,
+                    },
+                    0,
+                    dollControllerConfig,
+                    out var dollExtractionResult)
+                && dollExtractionResult.ErrorCode == 0
+                && dollExtractionInventory.GetItem(InventoryListType.Main, 3)?.ItemId == 2600474
+                && dollExtractionInventory.GetItem(InventoryListType.Main, 12) == null
+                && dollExtractionResult.Materials.Count > 0
+                && dollExtractionResult.Materials.All(material =>
+                    material.ItemTemplateId > 0
+                    && material.Count > 0
+                    && dollExtractionInventory.CountMainItem(material.ItemTemplateId)
+                        >= material.Count),
+                ref failures);
+            var alchemistRecipeInventory = new InventoryService(990516, 990516);
+            alchemistRecipeInventory.SetItem(InventoryListType.Main, 15, new ItemCore
+            {
+                ItemId = 2600492,
+                Uid = 71012,
+                Count = 1,
+            });
+            var alchemistRecipeState = new ExpertJobState();
+            var learnedAlchemistRecipe = ExpertJobRecipeLearningService.TryLearn(
+                alchemistRecipeInventory,
+                InventoryListType.Main,
+                15,
+                2600492,
+                0,
+                alchemistRecipeState,
+                alchemistConfig.RecipeConfig);
+            var alchemistRecipeInfo = ExpertJobInfoBodyBuilder.BuildProjectedBody(
+                ExpertJobStateCodec.AlchemistType,
+                alchemistRecipeState,
+                0);
+            Check("alchemist design learns canonical recipe and projects mode-two refresh",
+                learnedAlchemistRecipe.Handled
+                && learnedAlchemistRecipe.Success
+                && learnedAlchemistRecipe.RecipeId == 2600492
+                && alchemistRecipeInventory.GetItem(InventoryListType.Main, 15) == null
+                && alchemistRecipeState.LearnedRecipeIds.SequenceEqual(new[] { 2600492 })
+                && alchemistRecipeInfo.Length == 7
+                && alchemistRecipeInfo[0] == 0
+                && alchemistRecipeInfo[1] == ExpertJobStateCodec.AlchemistType
+                && alchemistRecipeInfo[2] == 1
+                && BitConverter.ToInt32(alchemistRecipeInfo, 3) == 2600492,
+                ref failures);
+            var dollRecipeInventory = new InventoryService(990518, 990518);
+            dollRecipeInventory.SetItem(InventoryListType.Main, 15, new ItemCore
+            {
+                ItemId = 2600502,
+                Uid = 71015,
+                Count = 1,
+            });
+            var dollRecipeState = new ExpertJobState();
+            var learnedDollRecipe = ExpertJobRecipeLearningService.TryLearn(
+                dollRecipeInventory,
+                InventoryListType.Main,
+                15,
+                2600502,
+                0,
+                dollRecipeState,
+                dollControllerConfig.RecipeConfig);
+            var dollRecipeInfo = ExpertJobInfoBodyBuilder.BuildProjectedBody(
+                ExpertJobStateCodec.DollControllerType,
+                dollRecipeState,
+                0);
+            Check("doll-controller design learns canonical recipe and projects mode-four refresh",
+                learnedDollRecipe.Handled
+                && learnedDollRecipe.Success
+                && learnedDollRecipe.RecipeId == 2600502
+                && dollRecipeInventory.GetItem(InventoryListType.Main, 15) == null
+                && dollRecipeState.LearnedRecipeIds.SequenceEqual(new[] { 2600502 })
+                && dollRecipeInfo.Length == 7
+                && dollRecipeInfo[0] == 0
+                && dollRecipeInfo[1] == ExpertJobStateCodec.DollControllerType
+                && dollRecipeInfo[2] == 1
+                && BitConverter.ToInt32(dollRecipeInfo, 3) == 2600502,
+                ref failures);
             var recipeInventory = new InventoryService(990515, 990515);
             recipeInventory.SetItem(InventoryListType.Main, 15, new ItemCore
             {
@@ -525,13 +712,14 @@ namespace DfoServer.SelfTests
                 Count = 1,
             });
             var recipeLearningState = new ExpertJobState();
-            var learnedRecipe = EnchanterRecipeLearningService.TryLearn(
+            var learnedRecipe = ExpertJobRecipeLearningService.TryLearn(
                 recipeInventory,
                 InventoryListType.Main,
                 15,
                 2600512,
                 0,
-                recipeLearningState);
+                recipeLearningState,
+                enchanterConfig.RecipeConfig);
             Check("enchanter recipe item learns its canonical recipe id and consumes design",
                 learnedRecipe.Handled
                 && learnedRecipe.Success
@@ -545,13 +733,14 @@ namespace DfoServer.SelfTests
                 Uid = 71007,
                 Count = 1,
             });
-            var repeatedRecipe = EnchanterRecipeLearningService.TryLearn(
+            var repeatedRecipe = ExpertJobRecipeLearningService.TryLearn(
                 recipeInventory,
                 InventoryListType.Main,
                 16,
                 2600512,
                 0,
-                recipeLearningState);
+                recipeLearningState,
+                enchanterConfig.RecipeConfig);
             Check("already learned enchanter recipe consumes duplicate design without duplicating state",
                 repeatedRecipe.Handled
                 && repeatedRecipe.Success
@@ -565,13 +754,14 @@ namespace DfoServer.SelfTests
                 Uid = 71008,
                 Count = 1,
             });
-            var offsetBoundaryRecipe = EnchanterRecipeLearningService.TryLearn(
+            var offsetBoundaryRecipe = ExpertJobRecipeLearningService.TryLearn(
                 recipeInventory,
                 InventoryListType.Main,
                 17,
                 2600513,
                 0,
-                recipeLearningState);
+                recipeLearningState,
+                enchanterConfig.RecipeConfig);
             Check("level-one enchanter learns a level-three design at the official offset boundary",
                 offsetBoundaryRecipe.Handled
                 && offsetBoundaryRecipe.Success
@@ -586,18 +776,19 @@ namespace DfoServer.SelfTests
                 Uid = 71009,
                 Count = 1,
             });
-            var levelRejectedRecipe = EnchanterRecipeLearningService.TryLearn(
+            var levelRejectedRecipe = ExpertJobRecipeLearningService.TryLearn(
                 recipeInventory,
                 InventoryListType.Main,
                 18,
                 2600514,
                 20,
-                recipeLearningState);
+                recipeLearningState,
+                enchanterConfig.RecipeConfig);
             Check("level-two enchanter rejects a level-five design without mutation",
                 levelRejectedRecipe.Handled
                 && !levelRejectedRecipe.Success
                 && levelRejectedRecipe.ErrorCode ==
-                    EnchanterRecipeLearningService.ErrorLevelTooLow
+                    ExpertJobRecipeLearningService.ErrorLevelTooLow
                 && !recipeLearningState.LearnedRecipeIds.Contains(
                     levelRejectedRecipe.RecipeId)
                 && recipeInventory.GetItem(InventoryListType.Main, 18)?.ItemId == 2600514,
@@ -702,7 +893,7 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             RunEnchanterStoreUseChecks(ref failures);
-            RunEnchanterCompoundChecks(ref failures);
+            RunExpertJobCompoundChecks(ref failures);
 
             var initSnapshot = new SelectCharacterDataSnapshot();
             ExpertJobStateCodec.ProjectToSnapshot(
@@ -1173,7 +1364,7 @@ namespace DfoServer.SelfTests
                 ref failures);
         }
 
-        private static void RunEnchanterCompoundChecks(ref int failures)
+        private static void RunExpertJobCompoundChecks(ref int failures)
         {
             var inventory = new InventoryService(990523, 990523);
             inventory.SetItem(InventoryListType.Main, 10, new ItemCore
@@ -1198,7 +1389,7 @@ namespace DfoServer.SelfTests
                 EnchantUpgradeCount = 2,
             });
             inventory.ClearDirtyState();
-            var command = new EnchanterCompoundCommand
+            var command = new ExpertJobCompoundCommand
             {
                 RecipeItemId = 10015129,
                 RequestedCount = 1,
@@ -1206,14 +1397,16 @@ namespace DfoServer.SelfTests
             };
 
             Check("level-seven enchanter crafts current-PVF task-card bead",
-                EnchanterCompoundService.TryCraft(
+                EnchanterCompoundService.TryCraftBead(
                     inventory,
                     command,
                     585,
-                    null,
                     out var result)
                 && result.SuccessCount == 1
                 && result.FailureCount == 0
+                && result.AttemptedOutputs.Count == 1
+                && result.AttemptedOutputs[0].ItemId == 2600313
+                && result.AttemptedOutputs[0].Count == 1
                 && result.Outputs.Count == 1
                 && result.Outputs[0].ItemId == 2600313
                 && result.Outputs[0].Count == 1
@@ -1232,7 +1425,7 @@ namespace DfoServer.SelfTests
                 craftedBead.EnchantUpgradeCount == 2,
                 ref failures);
 
-            var ack = EnchanterCompoundPacketBuilder.BuildSuccess(result);
+            var ack = ExpertJobCompoundPacketBuilder.BuildSuccess(result);
             Check("enchanter bead craft ACK uses current-client result layout",
                 ack.Length == 19
                 && ack[0] == 1
@@ -1244,6 +1437,28 @@ namespace DfoServer.SelfTests
                 && ack[18] == 0,
                 ref failures);
 
+            var failedAckResult = new ExpertJobCompoundResult
+            {
+                SuccessCount = 0,
+                FailureCount = 1,
+            };
+            failedAckResult.AttemptedOutputs.Add(new ExpertJobCompoundOutput
+            {
+                ItemId = 2600503,
+                Count = 1,
+            });
+            var failedAck = ExpertJobCompoundPacketBuilder.BuildSuccess(failedAckResult);
+            Check("expert-job craft failure ACK retains attempted output for client notice",
+                failedAck.Length == 19
+                && failedAck[0] == 1
+                && failedAck[1] == 1
+                && BitConverter.ToInt32(failedAck, 2) == 2600503
+                && BitConverter.ToInt32(failedAck, 6) == 1
+                && BitConverter.ToInt32(failedAck, 10) == 0
+                && BitConverter.ToInt32(failedAck, 14) == 1
+                && failedAck[18] == 0,
+                ref failures);
+
             var missingMaterials = new InventoryService(990524, 990524);
             missingMaterials.SetItem(InventoryListType.Main, 239, new ItemCore
             {
@@ -1252,11 +1467,10 @@ namespace DfoServer.SelfTests
             });
             missingMaterials.ClearDirtyState();
             Check("bead craft material failure leaves card unchanged",
-                !EnchanterCompoundService.TryCraft(
+                !EnchanterCompoundService.TryCraftBead(
                     missingMaterials,
                     command,
                     585,
-                    null,
                     out var rejected)
                 && rejected.ErrorCode == EnchanterCompoundService.ErrorInsufficientMaterials
                 && missingMaterials.GetItem(InventoryListType.Main, 239)?.Count == 1,
@@ -1290,23 +1504,29 @@ namespace DfoServer.SelfTests
             productInventory.ClearDirtyState();
             var productState = new ExpertJobState();
             productState.LearnedRecipeIds.Add(2600141);
-            var productCommand = new EnchanterCompoundCommand
+            var productCommand = new ExpertJobCompoundCommand
             {
                 RecipeItemId = 2600141,
                 RequestedCount = 10,
                 CardSlotIndex = -1,
             };
-            var productCrafted = EnchanterCompoundService.TryCraft(
+            var enchanterConfig = EnchanterConfigProvider.Config;
+            var productCrafted = ExpertJobCompoundService.TryCraftProduct(
                 productInventory,
                 productCommand,
                 0,
                 productState,
+                enchanterConfig.RecipeConfig,
+                enchanterConfig,
                 out var productResult);
             Check("learned enchanter recipe crafts requested current-PVF products",
                 productCrafted
                 && productResult.ErrorCode == 0
                 && productResult.SuccessCount == 10
                 && productResult.FailureCount == 0
+                && productResult.AttemptedOutputs.Count == 1
+                && productResult.AttemptedOutputs[0].ItemId == 2610034
+                && productResult.AttemptedOutputs[0].Count == 10
                 && productResult.Outputs.Count == 1
                 && productResult.Outputs[0].ItemId == 2610034
                 && productResult.Outputs[0].Count == 10
@@ -1318,7 +1538,7 @@ namespace DfoServer.SelfTests
                 && productInventory.CountMainItem(2610034) == 10,
                 ref failures);
             var productAck = productCrafted
-                ? EnchanterCompoundPacketBuilder.BuildSuccess(productResult)
+                ? ExpertJobCompoundPacketBuilder.BuildSuccess(productResult)
                 : Array.Empty<byte>();
             Check("enchanter product craft ACK reports batch output and counts",
                 productAck.Length == 19
@@ -1332,7 +1552,6 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             const int extractorRecipeItemId = 2600513;
-            var enchanterConfig = EnchanterConfigProvider.Config;
             var extractorInventory = new InventoryService(990526, 990526);
             extractorInventory.SetMainVirtualCount(0, 1_000_000);
             var extractorRecipeParsed =
@@ -1369,9 +1588,9 @@ namespace DfoServer.SelfTests
             extractorInventory.ClearDirtyState();
             var extractorState = new ExpertJobState();
             extractorState.LearnedRecipeIds.Add(extractorRecipeItemId);
-            var extractorCrafted = EnchanterCompoundService.TryCraft(
+            var extractorCrafted = ExpertJobCompoundService.TryCraftProduct(
                 extractorInventory,
-                new EnchanterCompoundCommand
+                new ExpertJobCompoundCommand
                 {
                     RecipeItemId = extractorRecipeItemId,
                     RequestedCount = 1,
@@ -1379,6 +1598,8 @@ namespace DfoServer.SelfTests
                 },
                 (uint)enchanterConfig.ExperienceThresholds[1],
                 extractorState,
+                enchanterConfig.RecipeConfig,
+                enchanterConfig,
                 out var extractorResult);
             Check("extractor product craft requests expert-job window inventory rescan",
                 extractorRecipeParsed
@@ -1390,6 +1611,100 @@ namespace DfoServer.SelfTests
                     extractorResult.Outputs[0].ItemId),
                 ref failures);
 
+            CheckProductCraft(
+                "level-one alchemist crafts its current-PVF auto-learn product",
+                990528,
+                2600149,
+                1110,
+                AlchemistConfigProvider.Config,
+                1,
+                2,
+                ref failures);
+            CheckProductCraft(
+                "level-one doll-controller crafts its current-PVF auto-learn product",
+                990529,
+                2600083,
+                2600029,
+                DollControllerConfigProvider.Config,
+                2,
+                4,
+                ref failures);
+
+        }
+
+        private static void CheckProductCraft(
+            string label,
+            int characterId,
+            int recipeItemId,
+            int expectedProductItemId,
+            IExpertJobExtractionConfig config,
+            int minimumExperience,
+            int maximumExperience,
+            ref int failures)
+        {
+            var inventory = new InventoryService(characterId, characterId);
+            inventory.SetMainVirtualCount(0, 1_000_000);
+            var parsed = InventoryCompoundItemRecipeService.TryParseCompoundRecipe(
+                recipeItemId,
+                out var recipe);
+            var slot = (short)30;
+            if (parsed)
+            {
+                foreach (var material in recipe.Materials)
+                {
+                    if (InventoryService.TryResolveMainVirtualSlotByItemId(
+                            material.ItemTemplateId,
+                            out var virtualSlot,
+                            out _))
+                    {
+                        inventory.SetMainVirtualCount(virtualSlot, material.Count);
+                    }
+                    else
+                    {
+                        inventory.SetItem(
+                            InventoryListType.Main,
+                            slot++,
+                            new ItemCore
+                            {
+                                ItemId = material.ItemTemplateId,
+                                Count = material.Count,
+                            });
+                    }
+                }
+            }
+            inventory.ClearDirtyState();
+            var state = new ExpertJobState();
+            state.LearnedRecipeIds.Add(recipeItemId);
+            var crafted = ExpertJobCompoundService.TryCraftProduct(
+                inventory,
+                new ExpertJobCompoundCommand
+                {
+                    RecipeItemId = recipeItemId,
+                    RequestedCount = 1,
+                    CardSlotIndex = -1,
+                },
+                0,
+                state,
+                config.RecipeConfig,
+                config,
+                out var result);
+
+            Check(label,
+                parsed
+                && crafted
+                && result.ErrorCode == 0
+                && result.SuccessCount == 1
+                && result.FailureCount == 0
+                && result.AttemptedOutputs.Count == 1
+                && result.AttemptedOutputs[0].ItemId == expectedProductItemId
+                && result.AttemptedOutputs[0].Count == 1
+                && result.Outputs.Count == 1
+                && result.Outputs[0].ItemId == expectedProductItemId
+                && result.Outputs[0].Count == 1
+                && result.ExperienceGain >= minimumExperience
+                && result.ExperienceGain <= maximumExperience
+                && inventory.CountMainItem(expectedProductItemId) == 1,
+                ref failures);
         }
 
         private static void RunPersistenceChecks(ref int failures)
@@ -1419,7 +1734,19 @@ INSERT INTO characters (character_id, account_id, name)
 VALUES (990491, 990491, 'enchanter-test');
 INSERT INTO character_subtype0_fields (
     character_id, expert_job_type, expert_job_exp)
-VALUES (990491, 1, 246);";
+VALUES (990491, 1, 246);
+INSERT INTO accounts (account_id, m_id) VALUES (990492, 'alchemist-test');
+INSERT INTO characters (character_id, account_id, name)
+VALUES (990492, 990492, 'alchemist-test');
+INSERT INTO character_subtype0_fields (
+    character_id, expert_job_type, expert_job_exp)
+VALUES (990492, 2, 0);
+INSERT INTO accounts (account_id, m_id) VALUES (990493, 'doll-controller-test');
+INSERT INTO characters (character_id, account_id, name)
+VALUES (990493, 990493, 'doll-controller-test');
+INSERT INTO character_subtype0_fields (
+    character_id, expert_job_type, expert_job_exp)
+VALUES (990493, 4, 0);";
                         command.ExecuteNonQuery();
                     }
 
@@ -1435,6 +1762,16 @@ VALUES (990491, 1, 246);";
                             transaction,
                             990491,
                             ExpertJobStateCodec.EnchanterType);
+                        SqliteExpertJobStateRepository.InitializeInTransaction(
+                            connection,
+                            transaction,
+                            990492,
+                            ExpertJobStateCodec.AlchemistType);
+                        SqliteExpertJobStateRepository.InitializeInTransaction(
+                            connection,
+                            transaction,
+                            990493,
+                            ExpertJobStateCodec.DollControllerType);
                         transaction.Commit();
                     }
                 }
@@ -1455,6 +1792,18 @@ VALUES (990491, 1, 246);";
                 Check("enchanter load reconciles PVF auto-learn recipes",
                     initializedEnchanter.LearnedRecipeIds.SequenceEqual(
                         new[] { 10015129, 10015130 }),
+                    ref failures);
+                var initializedAlchemist = repository.Load(
+                    990492,
+                    ExpertJobStateCodec.AlchemistType);
+                Check("alchemist initialization persists PVF auto-learn recipe",
+                    initializedAlchemist.LearnedRecipeIds.SequenceEqual(new[] { 2600149 }),
+                    ref failures);
+                var initializedDollController = repository.Load(
+                    990493,
+                    ExpertJobStateCodec.DollControllerType);
+                Check("doll-controller initialization persists PVF auto-learn recipe",
+                    initializedDollController.LearnedRecipeIds.SequenceEqual(new[] { 2600083 }),
                     ref failures);
 
                 using (var connection = new SqliteConnection(connectionString))
@@ -1481,6 +1830,20 @@ VALUES (990491, 1, 246);";
                                 990491,
                                 2600512),
                             ref failures);
+                        Check("manual alchemist design uses the unified recipe table",
+                            repository.SaveRecipeInTransaction(
+                                connection,
+                                transaction,
+                                990492,
+                                2600492),
+                            ref failures);
+                        Check("manual doll-controller design uses the unified recipe table",
+                            repository.SaveRecipeInTransaction(
+                                connection,
+                                transaction,
+                                990493,
+                                2600502),
+                            ref failures);
                         transaction.Commit();
                     }
                 }
@@ -1499,6 +1862,20 @@ VALUES (990491, 1, 246);";
                 Check("unified recipe persistence reloads auto and manual recipes",
                     reloadedEnchanter.LearnedRecipeIds.SequenceEqual(
                         new[] { 2600512, 10015129, 10015130 }.OrderBy(id => id)),
+                    ref failures);
+                var reloadedAlchemist = repository.Load(
+                    990492,
+                    ExpertJobStateCodec.AlchemistType);
+                Check("alchemist reload keeps auto and manual recipes in unified state",
+                    reloadedAlchemist.LearnedRecipeIds.SequenceEqual(
+                        new[] { 2600149, 2600492 }),
+                    ref failures);
+                var reloadedDollController = repository.Load(
+                    990493,
+                    ExpertJobStateCodec.DollControllerType);
+                Check("doll-controller reload keeps auto and manual recipes in unified state",
+                    reloadedDollController.LearnedRecipeIds.SequenceEqual(
+                        new[] { 2600083, 2600502 }),
                     ref failures);
 
                 var recoverySessionId = Guid.NewGuid();

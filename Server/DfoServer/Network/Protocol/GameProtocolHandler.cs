@@ -48,6 +48,8 @@ namespace DfoServer.Network
         private readonly GoldLimitHandler _goldLimitHandler;
         private readonly CraneMiniGameHandler _craneMiniGameHandler;
         private readonly ExpertJobStoreHandler _expertJobStoreHandler;
+        private readonly ExpertJobExtractionHandler _expertJobExtractionHandler;
+        private readonly ExpertJobCompoundHandler _expertJobCompoundHandler;
         private readonly EnchanterHandler _enchanterHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
@@ -180,6 +182,19 @@ namespace DfoServer.Network
                 expertJobOperations,
                 _inventoryRefreshSender);
             _enchanterHandler = new EnchanterHandler(
+                expertJobStores,
+                expertJobStateRepository,
+                expertJobPersistence,
+                expertJobOperations);
+            _expertJobExtractionHandler = new ExpertJobExtractionHandler(
+                expertJobStateRepository,
+                characterRepository,
+                subtype0Repository,
+                honorLevel,
+                expertJobPersistence,
+                _inventoryRefreshSender,
+                expertJobOperations);
+            _expertJobCompoundHandler = new ExpertJobCompoundHandler(
                 expertJobStores,
                 expertJobStateRepository,
                 characterRepository,
@@ -740,11 +755,11 @@ namespace DfoServer.Network
             d[(ushort)CmdPacketType.REPAIR_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleRepair;
             d[(ushort)CmdPacketType.UPGRADE_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleUpgrade;
             d[(ushort)CmdPacketType.REQUEST_DISJOINT_ITEM] = HandleSharedDisjointOrHellParty;
-            d[(ushort)CmdPacketType.EXPERT_EXTRACTION] = _enchanterHandler.HandleExtraction;
+            d[(ushort)CmdPacketType.EXPERT_EXTRACTION] = _expertJobExtractionHandler.Handle;
             d[(ushort)CmdPacketType.REPAIR_EXPERT_JOB_STORE] = _enchanterHandler.HandleRepair;
             d[(ushort)CmdPacketType.USE_ENCHANT_STORE] = _expertJobStoreHandler.HandleEnchant;
             d[(ushort)CmdPacketType.COMPOUND_ITEM_BY_EXPERT_JOB] =
-                _enchanterHandler.HandleCompound;
+                _expertJobCompoundHandler.Handle;
         }
 
         private Task HandleSharedDisjointOrHellParty(

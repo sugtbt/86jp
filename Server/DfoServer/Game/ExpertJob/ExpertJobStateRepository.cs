@@ -8,6 +8,19 @@ namespace DfoServer.Game.ExpertJob
     public interface IExpertJobStateRepository
     {
         ExpertJobState Load(int characterId, int expertJobType);
+
+        bool SaveProgressInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int experienceGain,
+            IReadOnlyCollection<int> learnedRecipeIds);
+
+        bool SaveRecipeInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int recipeId);
     }
 
     public interface IDisjointMachineStateRepository
@@ -40,12 +53,6 @@ namespace DfoServer.Game.ExpertJob
             EnchanterMachineState state,
             int experienceGain,
             IReadOnlyCollection<int> learnedRecipeIds);
-
-        bool SaveRecipeInTransaction(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId,
-            int recipeId);
     }
 
     public sealed class SqliteExpertJobStateRepository
@@ -116,8 +123,14 @@ ORDER BY recipe_id;";
                                 state.LearnedRecipeIds.Add(reader.GetInt32(0));
                         }
                     }
-                    if (expertJobType == ExpertJobStateCodec.EnchanterType)
-                        ReconcileEnchanterRecipes(connection, characterId, state);
+                    if (ExpertJobConfigRegistry.TryGetRecipeConfig(
+                            expertJobType,
+                            out var recipeConfig))
+                        ReconcileAutoLearnRecipes(
+                            connection,
+                            characterId,
+                            state,
+                            recipeConfig);
                 }
             }
             catch (Exception ex)
@@ -166,6 +179,15 @@ ON CONFLICT(character_id) DO UPDATE SET
         }
 
         public bool SaveEnchanterProgressInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int experienceGain,
+            IReadOnlyCollection<int> learnedRecipeIds)
+            => SaveProgressInTransaction(
+                connection, transaction, characterId, experienceGain, learnedRecipeIds);
+
+        bool IExpertJobStateRepository.SaveProgressInTransaction(
             SqliteConnection connection,
             SqliteTransaction transaction,
             int characterId,
@@ -334,9 +356,11 @@ WHERE character_id=@cid;";
                 command.ExecuteNonQuery();
             }
 
-            if (expertJobType == ExpertJobStateCodec.EnchanterType)
+            if (ExpertJobConfigRegistry.TryGetRecipeConfig(
+                    expertJobType,
+                    out var recipeConfig))
             {
-                foreach (var recipeId in EnchanterConfigProvider.Config.GetAutoLearnRecipeIds(0))
+                foreach (var recipeId in recipeConfig.GetAutoLearnRecipeIds(0))
                 {
                     using (var command = connection.CreateCommand())
                     {
@@ -352,10 +376,11 @@ VALUES (@cid, @recipe);";
             }
         }
 
-        private static void ReconcileEnchanterRecipes(
+        private static void ReconcileAutoLearnRecipes(
             SqliteConnection connection,
             int characterId,
-            ExpertJobState state)
+            ExpertJobState state,
+            ExpertJobRecipeConfig recipeConfig)
         {
             uint experience;
             using (var command = connection.CreateCommand())
@@ -371,7 +396,7 @@ WHERE character_id=@cid;";
                     : (uint)Math.Min(uint.MaxValue, Convert.ToUInt64(value));
             }
 
-            var expected = EnchanterConfigProvider.Config.GetAutoLearnRecipeIds(experience);
+            var expected = recipeConfig.GetAutoLearnRecipeIds(experience);
             var missing = new List<int>();
             foreach (var recipeId in expected)
             {

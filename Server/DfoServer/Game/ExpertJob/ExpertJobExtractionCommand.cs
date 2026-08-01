@@ -2,7 +2,7 @@ using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.ExpertJob
 {
-    internal sealed class EnchanterExtractionCommand
+    internal sealed class ExpertJobExtractionCommand
     {
         internal byte ExtractorType { get; set; }
         internal short ExtractorSlotIndex { get; set; }

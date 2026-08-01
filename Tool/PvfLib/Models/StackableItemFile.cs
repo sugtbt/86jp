@@ -188,7 +188,9 @@ namespace PvfLib
         public int PortableDisjoint { get; set; } = -1;
         public string ExpertJobOnlyType { get; set; }
         public int ExpertJobOnlyLevel { get; set; } = -1;
+        public int AlchemistExtractionIndex { get; set; } = -1;
         public int EnchanterExtractionIndex { get; set; } = -1;
+        public int DollControllerExtractionIndex { get; set; } = -1;
 
         #endregion
 
@@ -333,7 +335,9 @@ namespace PvfLib
                     case "trade limit max": stk.TradeLimit = ParseInt(data); break;
                     case "portable disjoint": stk.PortableDisjoint = ParseInt(data); break;
                     case "expertjob only": ParseExpertJobOnly(node, content, stk); break;
+                    case "alchemist extraction": stk.AlchemistExtractionIndex = ParseInt(data); break;
                     case "enchanter extraction": stk.EnchanterExtractionIndex = ParseInt(data); break;
+                    case "doll_controller extraction": stk.DollControllerExtractionIndex = ParseInt(data); break;
 
                     
                     case "enchant index": stk.EnchantIndex = ParseInt(data); break;

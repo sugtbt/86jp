@@ -1,12 +1,11 @@
 using System;
 using DfoServer.Game.ExpertJob;
-using DfoServer.Network;
 
 namespace DfoServer.Network.Builders.ExpertJob
 {
-    internal static class EnchanterExtractionPacketBuilder
+    internal static class ExpertJobExtractionPacketBuilder
     {
-        internal static byte[] BuildSuccess(EnchanterExtractionResult result)
+        internal static byte[] BuildSuccess(ExpertJobExtractionResult result)
         {
             if (result == null || result.ErrorCode != 0)
                 throw new ArgumentException("a successful extraction result is required", nameof(result));

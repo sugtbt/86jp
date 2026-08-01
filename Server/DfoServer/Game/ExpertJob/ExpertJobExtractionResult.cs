@@ -3,14 +3,14 @@ using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.ExpertJob
 {
-    internal sealed class EnchanterExtractionMaterial
+    internal sealed class ExpertJobExtractionMaterial
     {
         internal short SlotIndex { get; set; }
         internal int ItemTemplateId { get; set; }
         internal int Count { get; set; }
     }
 
-    internal sealed class EnchanterExtractionResult
+    internal sealed class ExpertJobExtractionResult
     {
         internal byte ErrorCode { get; set; }
         internal InventoryListType TargetListType { get; set; }
@@ -18,7 +18,7 @@ namespace DfoServer.Game.ExpertJob
         internal int ExperienceGain { get; set; }
         internal uint FinalExperience { get; set; }
         internal List<int> LearnedRecipeIds { get; } = new List<int>();
-        internal List<EnchanterExtractionMaterial> Materials { get; } =
-            new List<EnchanterExtractionMaterial>();
+        internal List<ExpertJobExtractionMaterial> Materials { get; } =
+            new List<ExpertJobExtractionMaterial>();
     }
 }

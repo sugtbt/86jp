@@ -8,38 +8,6 @@ using PvfLib;
 
 namespace DfoServer.Game.ExpertJob
 {
-    internal sealed class EnchanterExtractionRule
-    {
-        internal int ResultItemId { get; set; }
-        internal double Multiplier { get; set; }
-        internal int AdditionalTable { get; set; }
-        internal int BigWinTable { get; set; }
-        internal int BigWinChancePercent { get; set; }
-    }
-
-    internal sealed class EnchanterExtractorDefinition
-    {
-        internal int ItemId { get; set; }
-        internal int RequiredExpertJobLevel { get; set; }
-        internal int ExtractionIndex { get; set; }
-        internal int MinimumExperienceGain { get; set; }
-        internal int MaximumExperienceGain { get; set; }
-    }
-
-    internal sealed class EnchanterSelectionRule : ExpertJobSelectionRule
-    {
-        internal double QuantityMultiplier { get; set; }
-    }
-
-    internal sealed class EnchanterRecipeDefinition
-    {
-        internal int RecipeItemId { get; set; }
-        internal int ProductItemId { get; set; }
-        internal int RequiredLevel { get; set; }
-        internal int MinimumExperienceGain { get; set; }
-        internal int MaximumExperienceGain { get; set; }
-    }
-
     internal sealed class EnchanterCardRecipeDefinition
     {
         internal int Qualification { get; set; }
@@ -64,27 +32,26 @@ namespace DfoServer.Game.ExpertJob
         internal int MaximumExperienceGain { get; set; }
     }
 
-    internal sealed class EnchanterConfig
+    internal sealed class EnchanterConfig : IExpertJobExtractionConfig
     {
-        private const int RecipeLearningLevelOffset = 2;
-
+        internal ExpertJobRecipeConfig RecipeConfig { get; set; }
         internal int MaximumStoreCharge { get; set; }
         internal int InitialEndurance { get; set; }
         internal int EnduranceReduction { get; set; }
         internal int EnduranceReductionMinimumLevel { get; set; }
         internal int ExtractionBaseConst { get; set; }
-        internal Dictionary<int, EnchanterExtractorDefinition> Extractors { get; } =
-            new Dictionary<int, EnchanterExtractorDefinition>();
-        internal Dictionary<(int ExtractorItemId, int Rarity, int EquipmentState), EnchanterExtractionRule>
+        internal Dictionary<int, ExpertJobExtractorDefinition> Extractors { get; } =
+            new Dictionary<int, ExpertJobExtractorDefinition>();
+        internal Dictionary<(int ExtractorItemId, int Rarity, int EquipmentState), ExpertJobExtractionRule>
             ExtractionRules { get; } =
-                new Dictionary<(int ExtractorItemId, int Rarity, int EquipmentState), EnchanterExtractionRule>();
-        internal Dictionary<int, List<EnchanterSelectionRule>> AdditionalResults { get; } =
-            new Dictionary<int, List<EnchanterSelectionRule>>();
-        internal Dictionary<int, List<EnchanterSelectionRule>> BigWinResults { get; } =
-            new Dictionary<int, List<EnchanterSelectionRule>>();
-        internal List<int> ExperienceThresholds { get; } = new List<int>();
-        internal Dictionary<int, int> AutoLearnRecipes { get; } = new Dictionary<int, int>();
-        internal Dictionary<int, int> StoreSkills { get; } = new Dictionary<int, int>();
+                new Dictionary<(int ExtractorItemId, int Rarity, int EquipmentState), ExpertJobExtractionRule>();
+        internal Dictionary<int, List<ExpertJobExtractionSelectionRule>> AdditionalResults { get; } =
+            new Dictionary<int, List<ExpertJobExtractionSelectionRule>>();
+        internal Dictionary<int, List<ExpertJobExtractionSelectionRule>> BigWinResults { get; } =
+            new Dictionary<int, List<ExpertJobExtractionSelectionRule>>();
+        internal List<int> ExperienceThresholds => RecipeConfig.ExperienceThresholds;
+        internal Dictionary<int, int> AutoLearnRecipes => RecipeConfig.AutoLearnRecipes;
+        internal Dictionary<int, int> StoreSkills => RecipeConfig.Skills;
         internal Dictionary<int, int> CardQualificationLevelRequirements { get; } =
             new Dictionary<int, int>();
         internal Dictionary<int, EnchanterCardRecipeDefinition> CardRecipesByItemId { get; } =
@@ -95,49 +62,25 @@ namespace DfoServer.Game.ExpertJob
             new Dictionary<int, int>();
         internal Dictionary<int, EnchanterCardExperienceRule> CardExperienceRulesByLevel { get; } =
             new Dictionary<int, EnchanterCardExperienceRule>();
-        internal Dictionary<int, EnchanterRecipeDefinition> RecipesByItemId { get; } =
-            new Dictionary<int, EnchanterRecipeDefinition>();
+        internal Dictionary<int, ExpertJobRecipeDefinition> RecipesByItemId =>
+            RecipeConfig.RecipesByItemId;
         internal List<EnchanterRepairRule> RepairRules { get; } = new List<EnchanterRepairRule>();
 
-        internal int GetLevel(uint experience)
-        {
-            var level = 1;
-            foreach (var threshold in ExperienceThresholds)
-            {
-                if (experience < threshold)
-                    break;
-                level++;
-            }
-            return Math.Min(ExperienceThresholds.Count, level);
-        }
+        internal int GetLevel(uint experience) => RecipeConfig.GetLevel(experience);
 
-        internal bool CanLearnRecipe(uint experience, EnchanterRecipeDefinition recipe)
-            => recipe != null
-                && recipe.RequiredLevel <= GetLevel(experience) + RecipeLearningLevelOffset;
+        internal bool CanLearnRecipe(uint experience, ExpertJobRecipeDefinition recipe)
+            => RecipeConfig.CanLearnRecipe(experience, recipe);
 
         internal IReadOnlyList<int> GetAutoLearnRecipeIds(uint experience)
         {
-            var level = GetLevel(experience);
-            return AutoLearnRecipes
-                .Where(pair => pair.Key <= level)
-                .OrderBy(pair => pair.Key)
-                .Select(pair => pair.Value)
-                .ToArray();
+            return RecipeConfig.GetAutoLearnRecipeIds(experience);
         }
 
         internal IReadOnlyList<int> GetNewAutoLearnRecipeIds(
             uint previousExperience,
             uint currentExperience)
         {
-            var previousLevel = GetLevel(previousExperience);
-            var currentLevel = GetLevel(currentExperience);
-            if (currentLevel <= previousLevel)
-                return Array.Empty<int>();
-            return AutoLearnRecipes
-                .Where(pair => pair.Key > previousLevel && pair.Key <= currentLevel)
-                .OrderBy(pair => pair.Key)
-                .Select(pair => pair.Value)
-                .ToArray();
+            return RecipeConfig.GetNewAutoLearnRecipeIds(previousExperience, currentExperience);
         }
 
         internal IReadOnlyList<byte> GetStoreSkillIds(uint experience)
@@ -162,6 +105,25 @@ namespace DfoServer.Game.ExpertJob
 
         internal EnchanterRepairRule GetRepairRule(int level)
             => level > 0 && level <= RepairRules.Count ? RepairRules[level - 1] : null;
+
+        byte IExpertJobExtractionConfig.ExpertJobType => ExpertJobStateCodec.EnchanterType;
+        ExpertJobRecipeConfig IExpertJobExtractionConfig.RecipeConfig => RecipeConfig;
+        IReadOnlyDictionary<int, ExpertJobExtractorDefinition> IExpertJobExtractionConfig.Extractors
+            => Extractors;
+        IReadOnlyDictionary<(int ExtractorItemId, int Rarity, int EquipmentState), ExpertJobExtractionRule>
+            IExpertJobExtractionConfig.ExtractionRules => ExtractionRules;
+        IReadOnlyDictionary<int, List<ExpertJobExtractionSelectionRule>>
+            IExpertJobExtractionConfig.AdditionalResults => AdditionalResults;
+        IReadOnlyDictionary<int, List<ExpertJobExtractionSelectionRule>>
+            IExpertJobExtractionConfig.BigWinResults => BigWinResults;
+
+        int IExpertJobExtractionConfig.CalculateBaseMaterialCount(
+            ItemMetadata metadata,
+            ExpertJobExtractionRule rule)
+            => Math.Max(
+                1,
+                (int)Math.Floor(
+                    Math.Max(1, metadata?.SellGold ?? 0) * rule.Multiplier / ExtractionBaseConst));
     }
 
     internal sealed class EnchanterRepairRule
@@ -183,6 +145,12 @@ namespace DfoServer.Game.ExpertJob
             var root = new ScriptParser().Parse(content);
             var config = new EnchanterConfig
             {
+                RecipeConfig = ExpertJobRecipeConfigParser.Parse(
+                    root,
+                    content,
+                    PvfPath,
+                    ExpertJobStateCodec.EnchanterType,
+                    requireProductExperience: true),
                 MaximumStoreCharge = ReadSingleInt(root, content, "limit store charge"),
                 InitialEndurance = ReadSingleInt(root, content, "endurance initial value"),
             };
@@ -193,23 +161,33 @@ namespace DfoServer.Game.ExpertJob
             config.EnduranceReductionMinimumLevel = ParseInt(enduranceReduction[0]);
             ParseRepairRules(ReadTokens(root, content, "endurance repair cost"), config);
 
-            ParseExperienceThresholds(ReadTokens(root, content, "expertness exp"), config);
-            ParsePairs(ReadTokens(root, content, "auto learn recipe"), config.AutoLearnRecipes, "auto learn recipe");
-            ParsePairs(ReadTokens(root, content, "skill"), config.StoreSkills, "skill");
             ParseCardQualifications(root, content, config);
             ParseCardExperienceRules(ReadTokens(root, content, "monstercard exp"), config);
-            var productExperience = ParseExperienceRanges(
-                ReadTokens(root, content, "product exp"),
-                "product exp");
-            var extractionExperience = ParseExperienceRanges(
+            var extractionExperience = ExpertJobPvfValueReader.ParseExperienceRanges(
                 ReadTokens(root, content, "extract exp"),
+                PvfPath,
                 "extract exp");
-            ParseExtractors(ReadTokens(root, content, "items"), extractionExperience, config);
+            ExpertJobExtractionConfigParser.ParseExtractors(
+                ReadTokens(root, content, "items"),
+                extractionExperience,
+                PvfPath,
+                "enchanter",
+                config.ExperienceThresholds.Count,
+                item => item.EnchanterExtractionIndex,
+                config.Extractors);
             ParseExtractionBase(ReadTokens(root, content, "enchanter extraction result item"), config);
-            ParseExtractionRules(ReadTokens(root, content, "extraction result"), config);
-            ParseRecipes(ReadTokens(root, content, "items"), productExperience, config);
-            ParseSelections(ReadTokens(root, content, "additional result"), config.AdditionalResults);
-            ParseSelections(ReadTokens(root, content, "big win result"), config.BigWinResults);
+            ExpertJobExtractionConfigParser.ParseExtractionRules(
+                ReadTokens(root, content, "extraction result"),
+                PvfPath,
+                config.ExtractionRules);
+            ExpertJobExtractionConfigParser.ParseSelections(
+                ReadTokens(root, content, "additional result"),
+                PvfPath,
+                config.AdditionalResults);
+            ExpertJobExtractionConfigParser.ParseSelections(
+                ReadTokens(root, content, "big win result"),
+                PvfPath,
+                config.BigWinResults);
 
             if (config.MaximumStoreCharge < 0
                 || config.InitialEndurance <= 0
@@ -230,50 +208,13 @@ namespace DfoServer.Game.ExpertJob
                 throw new InvalidOperationException($"PVF {PvfPath} has invalid enchanter configuration");
             }
             ValidateReferences(config);
+            ExpertJobExtractionConfigParser.ValidateReferences(
+                PvfPath,
+                config.Extractors,
+                config.ExtractionRules,
+                config.AdditionalResults,
+                config.BigWinResults);
             return config;
-        }
-
-        private static void ParseRecipes(
-            string[] tokens,
-            IReadOnlyDictionary<int, (int Minimum, int Maximum)> productExperience,
-            EnchanterConfig config)
-        {
-            if (tokens.Length == 0 || tokens.Length % 4 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} [items] row width is not 4");
-            for (var index = 0; index < tokens.Length; index += 4)
-            {
-                var definition = new EnchanterRecipeDefinition
-                {
-                    RecipeItemId = ParseInt(tokens[index + 1]),
-                    ProductItemId = ParseInt(tokens[index + 2]),
-                    RequiredLevel = ParseInt(tokens[index + 3]),
-                };
-                if (!productExperience.TryGetValue(definition.RecipeItemId, out var experience))
-                    continue;
-                definition.MinimumExperienceGain = experience.Minimum;
-                definition.MaximumExperienceGain = experience.Maximum;
-                if (definition.RecipeItemId <= 0
-                    || definition.ProductItemId <= 0
-                    || definition.RequiredLevel <= 0
-                    || config.RecipesByItemId.ContainsKey(definition.RecipeItemId))
-                    throw new InvalidOperationException($"PVF {PvfPath} has invalid recipe definition");
-
-                if (!DfoServer.Game.Inventory.ItemMetadataResolver.TryLoadStackableFile(
-                        definition.RecipeItemId,
-                        out var recipeItem)
-                    || !NormalizeTag(recipeItem.StackableType).StartsWith(
-                        "[recipe]",
-                        StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(
-                        NormalizeTag(recipeItem.ItemCategory),
-                        "expertjob recipe",
-                        StringComparison.OrdinalIgnoreCase)
-                    || !HasRequiredEnchanterSkill(recipeItem.NeedSkill, config.StoreSkills))
-                    continue;
-                config.RecipesByItemId.Add(definition.RecipeItemId, definition);
-            }
-            if (config.RecipesByItemId.Count == 0)
-                throw new InvalidOperationException($"PVF {PvfPath} has no learnable recipe definitions");
         }
 
         private static string NormalizeTag(string value)
@@ -310,85 +251,6 @@ namespace DfoServer.Game.ExpertJob
             }
         }
 
-        private static void ParseExperienceThresholds(string[] tokens, EnchanterConfig config)
-        {
-            if (tokens.Length == 0 || tokens.Length % 3 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} [expertness exp] row width is not 3");
-            var previous = -1;
-            for (var index = 0; index < tokens.Length; index += 3)
-            {
-                var threshold = ParseInt(tokens[index]);
-                if (threshold <= previous)
-                    throw new InvalidOperationException($"PVF {PvfPath} has invalid expertness thresholds");
-                config.ExperienceThresholds.Add(threshold);
-                previous = threshold;
-            }
-        }
-
-        private static Dictionary<int, (int Minimum, int Maximum)> ParseExperienceRanges(
-            string[] tokens,
-            string tag)
-        {
-            if (tokens.Length == 0 || tokens.Length % 3 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} [{tag}] row width is not 3");
-            var result = new Dictionary<int, (int Minimum, int Maximum)>();
-            for (var index = 0; index < tokens.Length; index += 3)
-            {
-                var itemId = ParseInt(tokens[index]);
-                var minimum = ParseInt(tokens[index + 1]);
-                var maximum = ParseInt(tokens[index + 2]);
-                if (itemId <= 0 || minimum < 0 || maximum < minimum)
-                    throw new InvalidOperationException($"PVF {PvfPath} has invalid {tag} range");
-                if (result.ContainsKey(itemId))
-                    throw new InvalidOperationException($"PVF {PvfPath} has duplicate {tag} item");
-                result.Add(itemId, (minimum, maximum));
-            }
-            return result;
-        }
-
-        private static void ParseExtractors(
-            string[] tokens,
-            IReadOnlyDictionary<int, (int Minimum, int Maximum)> extractionExperience,
-            EnchanterConfig config)
-        {
-            if (tokens.Length == 0 || tokens.Length % 4 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} [items] row width is not 4");
-            for (var index = 0; index < tokens.Length; index += 4)
-            {
-                var productItemId = ParseInt(tokens[index + 2]);
-                var requiredLevel = ParseInt(tokens[index + 3]);
-                if (!extractionExperience.TryGetValue(productItemId, out var experience))
-                    continue;
-                if (requiredLevel <= 0
-                    || requiredLevel > config.ExperienceThresholds.Count
-                    || config.Extractors.ContainsKey(productItemId)
-                    || !DfoServer.Game.Inventory.ItemMetadataResolver.TryLoadStackableFile(
-                        productItemId,
-                        out var item)
-                    || !string.Equals(
-                        item.ExpertJobOnlyType,
-                        "enchanter",
-                        StringComparison.OrdinalIgnoreCase)
-                    || item.ExpertJobOnlyLevel != requiredLevel
-                    || item.EnchanterExtractionIndex < 0)
-                {
-                    throw new InvalidOperationException($"PVF {PvfPath} has invalid extractor definition");
-                }
-                config.Extractors.Add(productItemId, new EnchanterExtractorDefinition
-                {
-                    ItemId = productItemId,
-                    RequiredExpertJobLevel = requiredLevel,
-                    ExtractionIndex = item.EnchanterExtractionIndex,
-                    MinimumExperienceGain = experience.Minimum,
-                    MaximumExperienceGain = experience.Maximum,
-                });
-            }
-            if (config.Extractors.Count != extractionExperience.Count
-                || config.Extractors.Values.Select(item => item.ExtractionIndex).Distinct().Count()
-                    != config.Extractors.Count)
-                throw new InvalidOperationException($"PVF {PvfPath} has unresolved or duplicate extractors");
-        }
-
         private static void ParseExtractionBase(string[] tokens, EnchanterConfig config)
         {
             if (tokens.Length != 2 || ParseInt(tokens[0]) <= 0)
@@ -396,95 +258,10 @@ namespace DfoServer.Game.ExpertJob
             config.ExtractionBaseConst = ParseInt(tokens[1]);
         }
 
-        private static void ParseExtractionRules(string[] tokens, EnchanterConfig config)
-        {
-            if (tokens.Length == 0 || tokens.Length % 8 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} [extraction result] row width is not 8");
-            for (var index = 0; index < tokens.Length; index += 8)
-            {
-                var key = (ParseInt(tokens[index]), ParseInt(tokens[index + 1]), ParseInt(tokens[index + 2]));
-                if (config.ExtractionRules.ContainsKey(key))
-                    throw new InvalidOperationException($"PVF {PvfPath} has duplicate extraction result");
-                var rule = new EnchanterExtractionRule
-                {
-                    ResultItemId = ParseInt(tokens[index + 3]),
-                    Multiplier = ParseDouble(tokens[index + 4]),
-                    AdditionalTable = ParseInt(tokens[index + 5]),
-                    BigWinTable = ParseInt(tokens[index + 6]),
-                    BigWinChancePercent = ParseInt(tokens[index + 7]),
-                };
-                if (key.Item1 <= 0
-                    || key.Item2 < 0
-                    || key.Item2 > 6
-                    || key.Item3 < 0
-                    || key.Item3 > 2
-                    || rule.ResultItemId <= 0
-                    || rule.Multiplier <= 0
-                    || rule.AdditionalTable < 0
-                    || rule.BigWinTable < 0
-                    || rule.BigWinChancePercent < 0
-                    || rule.BigWinChancePercent > 100)
-                {
-                    throw new InvalidOperationException($"PVF {PvfPath} has invalid extraction result values");
-                }
-                config.ExtractionRules.Add(key, rule);
-            }
-        }
-
-        private static void ParseSelections(string[] tokens, Dictionary<int, List<EnchanterSelectionRule>> target)
-        {
-            if (tokens.Length % 6 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} selection row width is not 6");
-            for (var index = 0; index < tokens.Length; index += 6)
-            {
-                var table = ParseInt(tokens[index]);
-                if (!target.TryGetValue(table, out var rules))
-                {
-                    rules = new List<EnchanterSelectionRule>();
-                    target.Add(table, rules);
-                }
-                var rule = new EnchanterSelectionRule
-                {
-                    MinimumLevel = ParseInt(tokens[index + 1]),
-                    MaximumLevel = ParseInt(tokens[index + 2]),
-                    ItemId = ParseInt(tokens[index + 3]),
-                    Weight = ParseInt(tokens[index + 4]),
-                    QuantityMultiplier = ParseDouble(tokens[index + 5]),
-                };
-                if (table <= 0
-                    || rule.MinimumLevel < 0
-                    || rule.MaximumLevel < rule.MinimumLevel
-                    || rule.ItemId <= 0
-                    || rule.Weight <= 0
-                    || rule.QuantityMultiplier <= 0)
-                {
-                    throw new InvalidOperationException($"PVF {PvfPath} has invalid selection values");
-                }
-                rules.Add(rule);
-            }
-        }
-
-        private static void ParsePairs(string[] tokens, Dictionary<int, int> target, string tag)
-        {
-            if (tokens.Length == 0 || tokens.Length % 2 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} [{tag}] row width is not 2");
-            for (var index = 0; index < tokens.Length; index += 2)
-            {
-                var key = ParseInt(tokens[index]);
-                var value = ParseInt(tokens[index + 1]);
-                if (key <= 0 || value <= 0 || target.ContainsKey(key))
-                    throw new InvalidOperationException($"PVF {PvfPath} [{tag}] has invalid or duplicate values");
-                target.Add(key, value);
-            }
-        }
-
         private static void ValidateReferences(EnchanterConfig config)
         {
             var maximumLevel = config.ExperienceThresholds.Count;
-            if (config.AutoLearnRecipes.Any(pair => pair.Key > maximumLevel)
-                || config.AutoLearnRecipes.Values.Distinct().Count() != config.AutoLearnRecipes.Count
-                || config.StoreSkills.Any(pair => pair.Key > byte.MaxValue || pair.Value > maximumLevel)
-                || config.CardQualificationLevelRequirements.Any(pair =>
+            if (config.CardQualificationLevelRequirements.Any(pair =>
                     pair.Key < 0 || pair.Key > byte.MaxValue || pair.Value <= 0 || pair.Value > maximumLevel)
                 || config.CardRecipesByItemId.Values.Any(recipe =>
                     !config.CardQualificationLevelRequirements.TryGetValue(
@@ -497,17 +274,6 @@ namespace DfoServer.Game.ExpertJob
                     level <= 0 || level > maximumLevel))
             {
                 throw new InvalidOperationException($"PVF {PvfPath} has invalid enchanter cross references");
-            }
-
-            foreach (var pair in config.ExtractionRules)
-            {
-                var rule = pair.Value;
-                if (!config.Extractors.ContainsKey(pair.Key.ExtractorItemId)
-                    || (rule.AdditionalTable > 0 && !config.AdditionalResults.ContainsKey(rule.AdditionalTable))
-                    || (rule.BigWinTable > 0 && !config.BigWinResults.ContainsKey(rule.BigWinTable)))
-                {
-                    throw new InvalidOperationException($"PVF {PvfPath} has unresolved extraction references");
-                }
             }
         }
 
@@ -722,7 +488,5 @@ namespace DfoServer.Game.ExpertJob
         private static int ParseInt(string value)
             => int.Parse(value, NumberStyles.Integer, CultureInfo.InvariantCulture);
 
-        private static double ParseDouble(string value)
-            => double.Parse(value, NumberStyles.Float, CultureInfo.InvariantCulture);
     }
 }

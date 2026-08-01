@@ -37,12 +37,12 @@ namespace DfoServer.Game.Inventory
                     out var materials)
                 || !TryMultiplyRecipeEntries(
                     recipe.Outputs,
-                    request.RequestedCount,
+                    request.OutputCount ?? request.RequestedCount,
                     out var outputs))
             {
                 return Fail(result, 17);
             }
-            if (outputs.Count == 0)
+            if ((request.OutputCount ?? request.RequestedCount) > 0 && outputs.Count == 0)
                 return Fail(result, 17);
             if (!HasEnoughMaterials(inventory, materials))
                 return Fail(result, 21);
@@ -69,10 +69,17 @@ namespace DfoServer.Game.Inventory
                 return Fail(result, 17);
             }
 
-            if (!InventoryRewardGrantService.TryPlanBatch(planningInventory, rewardRequests, out var plan)
-                || plan == null
-                || !plan.Success)
+            InventoryRewardGrantBatchPlan plan = null;
+            if (rewardRequests.Count > 0
+                && (!InventoryRewardGrantService.TryPlanBatch(
+                        planningInventory,
+                        rewardRequests,
+                        out plan)
+                    || plan == null
+                    || !plan.Success))
+            {
                 return Fail(result, 4);
+            }
 
             var deleted = new List<CompoundItemDeletedEntry>();
             if (goldCost > 0)
@@ -109,13 +116,21 @@ namespace DfoServer.Game.Inventory
                 result.SourceConsumed = true;
             }
 
-            if (!InventoryRewardGrantService.TryApplyPreparedBatch(inventory, plan, out var grantBatch)
-                || grantBatch == null
-                || !grantBatch.Success)
+            InventoryRewardGrantBatchResult grantBatch = null;
+            if (plan != null
+                && (!InventoryRewardGrantService.TryApplyPreparedBatch(
+                        inventory,
+                        plan,
+                        out grantBatch)
+                    || grantBatch == null
+                    || !grantBatch.Success))
+            {
                 return Fail(result, 4);
+            }
 
             result.DeletedEntries.AddRange(deleted);
-            AddRewardResults(inventory, grantBatch.Results, result.Rewards);
+            if (grantBatch != null)
+                AddRewardResults(inventory, grantBatch.Results, result.Rewards);
             result.ErrorCode = 0;
             return true;
         }

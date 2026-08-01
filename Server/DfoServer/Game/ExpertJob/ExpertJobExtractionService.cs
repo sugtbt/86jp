@@ -5,7 +5,7 @@ using DfoServer.Infrastructure;
 
 namespace DfoServer.Game.ExpertJob
 {
-    internal static class EnchanterExtractionService
+    internal static class ExpertJobExtractionService
     {
         internal const byte ErrorInventoryFull = 4;
         internal const byte ErrorInvalidItem = 13;
@@ -13,14 +13,16 @@ namespace DfoServer.Game.ExpertJob
 
         internal static bool TryExtract(
             InventoryService inventory,
-            EnchanterExtractionCommand command,
+            ExpertJobExtractionCommand command,
             uint currentExperience,
-            out EnchanterExtractionResult result)
+            IExpertJobExtractionConfig config,
+            out ExpertJobExtractionResult result)
         {
-            result = new EnchanterExtractionResult { ErrorCode = ErrorInvalidItem };
+            result = new ExpertJobExtractionResult { ErrorCode = ErrorInvalidItem };
             if (inventory == null
                 || command == null
-                || command.ExtractorType != ExpertJobStateCodec.EnchanterType
+                || config == null
+                || command.ExtractorType != config.ExpertJobType
                 || command.ExtractorSlotIndex < 0
                 || command.TargetListType != InventoryListType.Main
                 || command.TargetSlotIndex < 0
@@ -29,11 +31,11 @@ namespace DfoServer.Game.ExpertJob
 
             var extractor = inventory.GetItem(InventoryListType.Main, command.ExtractorSlotIndex);
             var target = inventory.GetItem(command.TargetListType, command.TargetSlotIndex);
-            var config = EnchanterConfigProvider.Config;
             if (extractor == null
                 || target == null
                 || !config.Extractors.TryGetValue(extractor.ItemId, out var extractorDefinition)
-                || config.GetLevel(currentExperience) < extractorDefinition.RequiredExpertJobLevel
+                || config.RecipeConfig.GetLevel(currentExperience)
+                    < extractorDefinition.RequiredExpertJobLevel
                 || !target.IsEquipmentItem())
                 return false;
 
@@ -73,8 +75,10 @@ namespace DfoServer.Game.ExpertJob
                 : extractorDefinition.MinimumExperienceGain + ServerRandom.Next(
                     extractorDefinition.MaximumExperienceGain
                     - extractorDefinition.MinimumExperienceGain + 1);
-            var finalExperience = (uint)Math.Min(uint.MaxValue, (ulong)currentExperience + (uint)experienceGain);
-            result = new EnchanterExtractionResult
+            var finalExperience = (uint)Math.Min(
+                uint.MaxValue,
+                (ulong)currentExperience + (uint)experienceGain);
+            result = new ExpertJobExtractionResult
             {
                 ErrorCode = 0,
                 TargetListType = command.TargetListType,
@@ -84,14 +88,14 @@ namespace DfoServer.Game.ExpertJob
             };
             foreach (var material in disjointResult.Materials)
             {
-                result.Materials.Add(new EnchanterExtractionMaterial
+                result.Materials.Add(new ExpertJobExtractionMaterial
                 {
                     SlotIndex = material.SlotIndex,
                     ItemTemplateId = material.ItemTemplateId,
                     Count = material.Count,
                 });
             }
-            result.LearnedRecipeIds.AddRange(config.GetNewAutoLearnRecipeIds(
+            result.LearnedRecipeIds.AddRange(config.RecipeConfig.GetNewAutoLearnRecipeIds(
                 currentExperience,
                 finalExperience));
             return true;
@@ -99,14 +103,11 @@ namespace DfoServer.Game.ExpertJob
 
         private static List<DisjointMaterialResult> CalculateMaterials(
             ItemMetadata metadata,
-            EnchanterExtractionRule rule,
-            EnchanterConfig config)
+            ExpertJobExtractionRule rule,
+            IExpertJobExtractionConfig config)
         {
             var result = new List<DisjointMaterialResult>();
-            var baseCount = Math.Max(
-                1,
-                (int)Math.Floor(Math.Max(1, metadata.SellGold) * rule.Multiplier / config.ExtractionBaseConst));
-            Add(result, rule.ResultItemId, baseCount);
+            Add(result, rule.ResultItemId, config.CalculateBaseMaterialCount(metadata, rule));
 
             var bigWin = ServerRandom.Next(10000)
                 < Math.Max(0, Math.Min(100, rule.BigWinChancePercent)) * 100;
