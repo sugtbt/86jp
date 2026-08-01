@@ -417,24 +417,45 @@ namespace DfoServer.SelfTests
 
             var special = new SpecialDungeonRuntime(
                 definition.Build(3000, SpecialDungeonKind.SeizeMoney));
-            var reserved = special.TryReserveSeizeMoneyClearReward(
-                remainingGoldUnits: 5,
+            var reserved = special.TryReserveAuthoritativeSeizeMoneyClearReward(
                 maxDropCount: 4,
-                out var count,
-                out var gauge);
+                out var plan,
+                out var failureReason);
             Check(
-                "SeizeMoney scales clear reward from remaining gauge",
-                reserved && count == 2 && gauge == 500,
+                "SeizeMoney without an authoritative hit fact grants no reward",
+                !reserved
+                    && plan == null
+                    && failureReason == "no_authoritative_hit_fact"
+                    && special.SeizeMoneyGauge == 1000,
                 ref failures);
 
-            var reservedAgain = special.TryReserveSeizeMoneyClearReward(
-                remainingGoldUnits: 10,
+            var recorded = special.ApplyAuthoritativeSeizeMoneyHits(5);
+            reserved = special.TryReserveAuthoritativeSeizeMoneyClearReward(
                 maxDropCount: 4,
-                out count,
-                out gauge);
+                out plan,
+                out failureReason);
             Check(
-                "SeizeMoney clear reward reservation is one-shot",
-                !reservedAgain && count == 0 && gauge == 500,
+                "SeizeMoney scales clear reward from authoritative ETC gauge",
+                recorded
+                    && reserved
+                    && plan != null
+                    && plan.HitCount == 5
+                    && plan.RemainingUnits == 5
+                    && plan.Count == 2
+                    && plan.Gauge == 500
+                    && special.SeizeMoneyGauge == 500,
+                ref failures);
+
+            var reservedAgain = special.TryReserveAuthoritativeSeizeMoneyClearReward(
+                maxDropCount: 4,
+                out var replayPlan,
+                out failureReason);
+            Check(
+                "SeizeMoney authoritative clear reward reservation is one-shot",
+                !reservedAgain
+                    && replayPlan == null
+                    && failureReason == "already_generated"
+                    && special.SeizeMoneyGauge == 500,
                 ref failures);
         }
 

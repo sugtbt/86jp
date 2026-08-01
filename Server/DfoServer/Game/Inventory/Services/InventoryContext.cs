@@ -124,6 +124,84 @@ namespace DfoServer.Game.Inventory
             }
         }
 
+        internal static bool TryReplaceCurrentLease(
+            InventoryLease expected,
+            InventoryService replacement,
+            out InventoryLease lease)
+        {
+            lease = null;
+            if (expected == null || replacement == null)
+            {
+                return false;
+            }
+
+            lock (expected.SyncRoot)
+            lock (SyncRoot)
+            {
+                if (replacement.CharacterId != expected.CharacterId
+                    || replacement.AccountId != expected.AccountId
+                    || !CharacterLeases.TryGetValue(expected.CharacterId, out var current)
+                    || !ReferenceEquals(current, expected)
+                    || !SessionOwnership.TryGetValue(expected.SessionId, out var characterId)
+                    || characterId != expected.CharacterId)
+                {
+                    return false;
+                }
+
+                expected.ReplaceInventory(replacement);
+                lease = expected;
+                return true;
+            }
+        }
+
+        public static bool TryGetOwnedLease(
+            Guid sessionId,
+            int characterId,
+            out InventoryLease lease)
+        {
+            lease = null;
+            if (sessionId == Guid.Empty || characterId <= 0)
+                return false;
+
+            lock (SyncRoot)
+            {
+                if (!SessionOwnership.TryGetValue(sessionId, out var ownedCharacterId)
+                    || ownedCharacterId != characterId
+                    || !CharacterLeases.TryGetValue(characterId, out var current)
+                    || !current.IsOwnedBy(sessionId))
+                {
+                    return false;
+                }
+
+                lease = current;
+                return true;
+            }
+        }
+
+        public static bool IsCurrentLease(
+            InventoryLease lease,
+            Guid sessionId,
+            int characterId)
+        {
+            if (lease == null
+                || sessionId == Guid.Empty
+                || characterId <= 0
+                || lease.CharacterId != characterId
+                || !lease.IsOwnedBy(sessionId))
+            {
+                return false;
+            }
+
+            lock (SyncRoot)
+            {
+                return SessionOwnership.TryGetValue(sessionId, out var ownedCharacterId)
+                    && ownedCharacterId == characterId
+                    && CharacterLeases.TryGetValue(characterId, out var current)
+                    && ReferenceEquals(current, lease)
+                    && current.Version == lease.Version;
+            }
+        }
+
         public static IReadOnlyList<InventoryLease> GetLeasesSnapshot()
         {
             lock (SyncRoot)

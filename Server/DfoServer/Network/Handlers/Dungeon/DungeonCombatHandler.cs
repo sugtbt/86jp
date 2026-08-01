@@ -26,13 +26,31 @@ namespace DfoServer.Network.Handlers.Dungeon
         private readonly DungeonSharedServices _svc;
         private readonly DungeonSettlementHandler _settlement;
         private readonly DungeonKillApplicationService _kills;
+        private readonly TournamentDungeonCoordinator _tournament;
 
-        internal DungeonCombatHandler(DungeonSharedServices svc, DungeonSettlementHandler settlement)
+        internal DungeonCombatHandler(
+            DungeonSharedServices svc,
+            DungeonSettlementHandler settlement,
+            TournamentDungeonCoordinator tournament,
+            BloodAltarDungeonCoordinator bloodAltar)
         {
             _svc = svc;
             _settlement = settlement;
-            _kills = new DungeonKillApplicationService(svc, settlement);
+            _tournament = tournament
+                ?? throw new ArgumentNullException(nameof(tournament));
+            _kills = new DungeonKillApplicationService(
+                svc,
+                settlement,
+                tournament,
+                bloodAltar);
         }
+
+        internal Task ProcessMechanismKillAsync(KillContext context)
+            => _kills.ProcessAsync(context);
+
+        internal Task RecoverParticipantEffectsAsync(
+            EnhancedClientSession session)
+            => _kills.RecoverParticipantEffectsAsync(session);
 
         internal async Task HandleDieMonster(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
@@ -44,25 +62,61 @@ namespace DfoServer.Network.Handlers.Dungeon
             var runIdentity = run.CaptureIdentity();
             if (request.IsPassiveObject)
             {
+                var objectCode = (int)request.LocalIndex;
                 var passiveObjectEvent = DungeonEventEnvelope.Create(
                     run,
                     session.Player.CharacterId,
                     "passive-object-destroyed",
-                    sourceActorId: request.LocalIndex);
+                    sourceActorCode: objectCode);
+                if (run.TryCaptureCurrentRoomSnapshot(
+                        passiveObjectEvent.RoomIdentity,
+                        out var roomSnapshot)
+                    && roomSnapshot.RoomState?.InstanceRoom != null)
+                {
+                    var death = roomSnapshot.RoomState.InstanceRoom
+                        .TryRecordNextActorDeathByCode(
+                            passiveObjectEvent,
+                            objectCode,
+                            actorType: 9,
+                            out var actorDefined);
+                    if (actorDefined)
+                    {
+                        if (!death.Accepted || !death.Created)
+                        {
+                            FileLogger.Log(
+                                $"[DungeonHandler] duplicate/exhausted passive object " +
+                                $"ignored: cid={session.Player.CharacterId} " +
+                                $"code={objectCode} room={run.CurrentRoomInstanceId}");
+                            return;
+                        }
+
+                        passiveObjectEvent = death.Fact.Source;
+                        objectCode = death.Fact.ActorCode;
+                    }
+                }
+
                 FileLogger.Log(
-                    $"[DungeonHandler] DIE_MONSTER: passive object code={request.LocalIndex}");
+                    $"[DungeonHandler] DIE_MONSTER: passive object code={objectCode}");
+                await DungeonActorQuestSync.SyncAsync(
+                    session,
+                    objectCode,
+                    actorType: 9,
+                    passiveObjectEvent);
+                if (!session.Player.IsCurrentDungeonRun(runIdentity))
+                    return;
+
                 DungeonMechanismCoordinator.OnPassiveObjectDestroyed(
                     session,
                     run,
-                    request.LocalIndex);
+                    objectCode);
                 if (run.ClearCondition != null
-                    && run.ClearCondition.Check(0, request.LocalIndex))
+                    && run.ClearCondition.Check(0, objectCode))
                 {
                     await _settlement.SubmitClearIntentAsync(
                         session,
                         new DungeonClearIntent(
                             passiveObjectEvent,
-                            $"destroy object {request.LocalIndex}",
+                            $"destroy object {objectCode}",
                             bossCode: 0));
                 }
 
@@ -71,7 +125,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 {
                     await _svc.QuestDrops.CheckPassiveObjectDrop(
                         session,
-                        request.LocalIndex);
+                        run,
+                        passiveObjectEvent,
+                        objectCode);
                 }
                 return;
             }
@@ -196,7 +252,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            await ReturnDeathRespawnToTownAsync(
+            await ResolveDeathRespawnDeadlineAsync(
                 session,
                 run,
                 run.CaptureIdentity(),
@@ -220,18 +276,73 @@ namespace DfoServer.Network.Handlers.Dungeon
             run.DeathRespawnAvailableAt = DateTime.UtcNow.Add(DeathRespawnDelay);
 
             var identity = run.CaptureIdentity();
-            var ticket = run.Timers.Begin(DungeonRunTimerKeys.CombatDeathRespawn);
+            var ticket = run.Timers.Begin(
+                DungeonRunTimerKeys.CombatDeathRespawn,
+                run.DeathRespawnAvailableAt,
+                RunTimerDetachPolicy.SuspendUntilResume);
+            ScheduleDeathRespawnTimer(
+                session,
+                run,
+                identity,
+                ticket,
+                run.DeathRespawnAvailableAt,
+                "death");
+        }
+
+        internal bool RecoverDeathRespawnTimer(
+            EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run == null)
+                return false;
+            if (!run.IsWaitingDeathRespawn
+                || run.DeathRespawnAvailableAt == DateTime.MinValue)
+            {
+                run.Timers.Cancel(DungeonRunTimerKeys.CombatDeathRespawn);
+                return false;
+            }
+            if (!run.Timers.TryResume(
+                    DungeonRunTimerKeys.CombatDeathRespawn,
+                    out var ticket,
+                    out var deadlineUtc))
+            {
+                return false;
+            }
+
+            ScheduleDeathRespawnTimer(
+                session,
+                run,
+                run.CaptureIdentity(),
+                ticket,
+                deadlineUtc,
+                "rejoin");
+            return true;
+        }
+
+        private void ScheduleDeathRespawnTimer(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonRunIdentity identity,
+            RunTimerTicket ticket,
+            DateTime deadlineUtc,
+            string source)
+        {
             var timerName = BuildDeathRespawnTimerName(session, run, ticket);
-            var handle = ClockService.Instance.ScheduleOneShotAfterAsync(
+            var handle = ClockService.Instance.ScheduleOneShotAsync(
                 timerName,
-                DeathRespawnDelay,
+                deadlineUtc,
                 async _ => await OnDeathRespawnTimerElapsedAsync(
                     session,
                     run,
                     identity,
                     ticket));
             run.Timers.Attach(ticket, handle);
-            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DIE_TIMER: scheduled uid={session.Player.UserId} delayMs={(int)DeathRespawnDelay.TotalMilliseconds}");
+            var remaining = deadlineUtc - DateTime.UtcNow;
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] DIE_TIMER: " +
+                $"scheduled uid={session.Player.UserId} source={source} " +
+                $"deadline={deadlineUtc:O} " +
+                $"remainingMs={Math.Max(0, remaining.TotalMilliseconds):F0}");
         }
 
         private async Task OnDeathRespawnTimerElapsedAsync(
@@ -247,8 +358,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     ticket))
                 return;
 
-            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DIE_TIMER: auto-return uid={session.Player.UserId}");
-            await ReturnDeathRespawnToTownAsync(
+            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DIE_TIMER: deadline uid={session.Player.UserId}");
+            await ResolveDeathRespawnDeadlineAsync(
                 session,
                 run,
                 identity,
@@ -257,7 +368,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 source: "timer");
         }
 
-        private async Task ReturnDeathRespawnToTownAsync(
+        private async Task ResolveDeathRespawnDeadlineAsync(
             EnhancedClientSession session,
             DungeonRun run,
             DungeonRunIdentity runIdentity,
@@ -284,6 +395,37 @@ namespace DfoServer.Network.Handlers.Dungeon
                     FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] DEATH_RESPAWN delayed: {remaining.TotalMilliseconds:F0}ms remaining");
                     return;
                 }
+            }
+
+            var tournamentDecision = _tournament.ResolveDeathDeadline(
+                session,
+                run,
+                runIdentity);
+            if (tournamentDecision.Action
+                == TournamentDeathDeadlineAction.Ignore)
+            {
+                DungeonRunLifecycle.CancelDeathRespawn(session);
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"DEATH_RESPAWN mechanism decision ignored: source={source}");
+                return;
+            }
+            if (tournamentDecision.Action
+                == TournamentDeathDeadlineAction.PresentTournamentRewards)
+            {
+                DungeonRunLifecycle.CancelDeathRespawn(session);
+                FileLogger.Log(
+                    $"[Tournament] death deadline enters settlement: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"run={run.RunId}/{run.RunGeneration} " +
+                    $"rounds={tournamentDecision.CompletedRounds} " +
+                    $"new={tournamentDecision.NewlyEliminated} " +
+                    $"source={source}");
+                await _tournament.EnsureParticipantRewardsAsync(
+                    session,
+                    run,
+                    forceProjection: false);
+                return;
             }
 
             DungeonRunLifecycle.CancelDeathRespawn(session);

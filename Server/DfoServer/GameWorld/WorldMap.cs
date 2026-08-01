@@ -37,6 +37,12 @@ namespace DfoServer.GameWorld
 
         public static IReadOnlyList<WorldMapArea> Areas => Index.Value.Areas;
 
+        internal static int AdmissionSourceCount =>
+            Index.Value.AdmissionSourceCount;
+
+        internal static IReadOnlyList<DungeonAdmissionDefinition>
+            AdmissionDefinitions => Index.Value.AdmissionDefinitions;
+
         public static WorldMapArea GetAreaByDungeonId(int dungeonId)
         {
             if (dungeonId <= 0)
@@ -48,6 +54,13 @@ namespace DfoServer.GameWorld
 
         public static bool IsTaskExclusiveDungeon(int dungeonId)
         {
+            if (Index.Value.AdmissionsByDungeonId.TryGetValue(
+                    dungeonId,
+                    out var definition))
+            {
+                return definition.IsTaskExclusive;
+            }
+
             return IsQuestDungeonAsset(dungeonId);
         }
 
@@ -55,60 +68,98 @@ namespace DfoServer.GameWorld
             int dungeonId,
             ISet<int> activeQuestIds)
         {
-            if (!IsTaskExclusiveDungeon(dungeonId))
-                return true;
-            if (activeQuestIds == null || activeQuestIds.Count == 0)
-                return false;
+            return EvaluateDungeonAdmission(
+                dungeonId,
+                activeQuestIds,
+                clearedQuestIds: null).Allowed;
+        }
 
-            if (Index.Value.EntriesByDungeonId.TryGetValue(
+        internal static DungeonAdmissionDecision EvaluateDungeonAdmission(
+            int dungeonId,
+            ISet<int> activeQuestIds,
+            ISet<int> clearedQuestIds)
+        {
+            if (Index.Value.AdmissionsByDungeonId.TryGetValue(
                     dungeonId,
-                    out var entries))
+                    out var definition))
             {
-                foreach (var entry in entries)
+                return definition.Evaluate(activeQuestIds, clearedQuestIds);
+            }
+
+            if (!IsQuestDungeonAsset(dungeonId))
+            {
+                return new DungeonAdmissionDecision(
+                    allowed: true,
+                    mode: DungeonAdmissionMode.Unrestricted,
+                    reason: "no_worldmap_admission_rule",
+                    requiredQuestIds: Array.Empty<int>());
+            }
+
+            var requiredQuestIds = GetDungeonQuestConnectionIds(dungeonId);
+            if (activeQuestIds != null)
+            {
+                foreach (var questId in requiredQuestIds)
                 {
-                    if (entry.InProgressOnly
-                        && entry.HasExplicitQuestId
-                        && entry.QuestId > 0
-                        && activeQuestIds.Contains(entry.QuestId))
+                    if (activeQuestIds.Contains(questId))
                     {
-                        return true;
+                        return new DungeonAdmissionDecision(
+                            allowed: true,
+                            mode: DungeonAdmissionMode.ActiveQuestOnly,
+                            reason: "quest_asset_connection_active",
+                            requiredQuestIds: requiredQuestIds);
+                    }
+                }
+
+                foreach (var questId in activeQuestIds)
+                {
+                    if (QuestData.ReferencesDungeon(questId, dungeonId))
+                    {
+                        return new DungeonAdmissionDecision(
+                            allowed: true,
+                            mode: DungeonAdmissionMode.ActiveQuestOnly,
+                            reason: "quest_asset_reference_active",
+                            requiredQuestIds: requiredQuestIds);
                     }
                 }
             }
 
-            foreach (var questId in GetDungeonQuestConnectionIds(dungeonId))
+            return new DungeonAdmissionDecision(
+                allowed: false,
+                mode: DungeonAdmissionMode.ActiveQuestOnly,
+                reason: "quest_asset_state_miss",
+                requiredQuestIds: requiredQuestIds);
+        }
+
+        internal static bool TryGetAdmissionDefinition(
+            int dungeonId,
+            out DungeonAdmissionDefinition definition)
+        {
+            return Index.Value.AdmissionsByDungeonId.TryGetValue(
+                dungeonId,
+                out definition);
+        }
+
+        private static IReadOnlyList<int> GetWorldMapActiveQuestIds(
+            int dungeonId)
+        {
+            if (Index.Value.AdmissionsByDungeonId.TryGetValue(
+                    dungeonId,
+                    out var definition))
             {
-                if (activeQuestIds.Contains(questId))
-                    return true;
+                return definition.ActiveQuestIds;
             }
 
-            foreach (var questId in activeQuestIds)
-            {
-                if (QuestData.ReferencesDungeon(questId, dungeonId))
-                    return true;
-            }
-
-            return false;
+            return Array.Empty<int>();
         }
 
         public static IReadOnlyList<int> GetTaskExclusiveQuestIds(int dungeonId)
         {
             var result = new List<int>();
             var seen = new HashSet<int>();
-            if (Index.Value.EntriesByDungeonId.TryGetValue(
-                    dungeonId,
-                    out var entries))
+            foreach (var questId in GetWorldMapActiveQuestIds(dungeonId))
             {
-                foreach (var entry in entries)
-                {
-                    if (entry.InProgressOnly
-                        && entry.HasExplicitQuestId
-                        && entry.QuestId > 0
-                        && seen.Add(entry.QuestId))
-                    {
-                        result.Add(entry.QuestId);
-                    }
-                }
+                if (seen.Add(questId))
+                    result.Add(questId);
             }
 
             foreach (var questId in GetDungeonQuestConnectionIds(dungeonId))
@@ -197,6 +248,7 @@ namespace DfoServer.GameWorld
         {
             var areas = new List<WorldMapArea>();
             var byDungeon = new Dictionary<int, WorldMapArea>();
+            var admissionSources = new List<WorldMapArea>();
 
             try
             {
@@ -220,14 +272,73 @@ namespace DfoServer.GameWorld
                     }
                 }
 
-                FileLogger.Log($"[WorldMap] loaded areas={areas.Count} dungeonRefs={byDungeon.Count}");
+                admissionSources.AddRange(LoadAdmissionSources());
+
+                FileLogger.Log(
+                    $"[WorldMap] loaded areas={areas.Count} " +
+                    $"dungeonRefs={byDungeon.Count} " +
+                    $"admissionSources={admissionSources.Count}");
             }
             catch (Exception ex)
             {
                 FileLogger.Log($"[WorldMap] load failed: {ex.Message}");
             }
 
-            return new WorldMapIndex(areas, byDungeon);
+            return new WorldMapIndex(areas, byDungeon, admissionSources);
+        }
+
+        private static List<WorldMapArea> LoadAdmissionSources()
+        {
+            var result = new List<WorldMapArea>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var rawPath in PvfArchiveAccessor.FindPathsContaining(
+                         "worldmap/"))
+            {
+                var path = NormalizeWorldMapPath(rawPath);
+                if (!IsTopLevelWorldMapDefinition(path) || !seen.Add(path))
+                    continue;
+
+                try
+                {
+                    var source = new WorldMapArea
+                    {
+                        AreaId = -1,
+                        FilePath = path,
+                    };
+                    ParseDungeons(
+                        "dungeon",
+                        PvfArchiveAccessor.ReadText(path),
+                        source);
+                    result.Add(source);
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        $"[WorldMap] admission source load failed: " +
+                        $"file={path} {ex.Message}");
+                }
+            }
+
+            return result;
+        }
+
+        private static string NormalizeWorldMapPath(string path) =>
+            (path ?? string.Empty)
+                .Replace('\\', '/')
+                .Trim()
+                .TrimStart('/');
+
+        private static bool IsTopLevelWorldMapDefinition(string path)
+        {
+            const string prefix = "worldmap/";
+            if (string.IsNullOrWhiteSpace(path)
+                || !path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                || !path.EndsWith(".wdm", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return path.IndexOf('/', prefix.Length) < 0;
         }
 
         private static WorldMapArea LoadArea(int areaId, string relativeFilePath)
@@ -286,99 +397,44 @@ namespace DfoServer.GameWorld
 
         private static void ParseDungeons(string sectionName, string content, WorldMapArea area)
         {
-            var pendingInProgressRows = false;
+            var tokens = new List<string>();
             foreach (var line in EnumerateSectionLines(sectionName, content))
+                tokens.AddRange(Tokenize(line));
+
+            // WDM entries are a continuous stream even when [in progress] is on
+            // its own line: dungeonId, optional marker, then questId.
+            for (var i = 0; i < tokens.Count;)
             {
-                var tokens = Tokenize(line);
-                if (tokens.Count == 0)
-                    continue;
-
-                // TimeGate.wdm 这类文件会把 [in progress] 独立成一行，下一行按“任务ID 副本ID”成对出现。
-                if (IsInProgressMarker(tokens, 0, out var markerTokenCount) && markerTokenCount == tokens.Count)
-                {
-                    pendingInProgressRows = true;
-                    continue;
-                }
-
-                if (IsInProgressMarker(tokens, 0, out markerTokenCount))
-                {
-                    tokens.RemoveRange(0, markerTokenCount);
-                    if (tokens.Count == 0)
-                        continue;
-
-                    ParseInProgressDungeonPairs(tokens, area);
-                    pendingInProgressRows = false;
-                    continue;
-                }
-
-                if (pendingInProgressRows)
-                {
-                    ParseInProgressDungeonPairs(tokens, area);
-                    pendingInProgressRows = false;
-                    continue;
-                }
-
-                for (var i = 0; i < tokens.Count;)
-                {
-                    if (!int.TryParse(tokens[i], out var dungeonId))
-                    {
-                        i++;
-                        continue;
-                    }
-
-                    i++;
-                    var inProgressOnly = false;
-                    if (IsInProgressMarker(tokens, i, out markerTokenCount))
-                    {
-                        inProgressOnly = true;
-                        i += markerTokenCount;
-                    }
-
-                    var questId = -1;
-                    var hasExplicitQuestId =
-                        i < tokens.Count && int.TryParse(tokens[i], out questId);
-                    if (hasExplicitQuestId)
-                        i++;
-
-                    area.Dungeons.Add(new WorldMapDungeonEntry
-                    {
-                        DungeonId = dungeonId,
-                        QuestId = questId,
-                        HasExplicitQuestId = hasExplicitQuestId,
-                        InProgressOnly = inProgressOnly,
-                    });
-                }
-            }
-        }
-
-        private static void ParseInProgressDungeonPairs(List<string> tokens, WorldMapArea area)
-        {
-            for (var i = 0; i + 1 < tokens.Count;)
-            {
-                if (!int.TryParse(tokens[i], out var questId))
+                if (!int.TryParse(tokens[i], out var dungeonId))
                 {
                     i++;
                     continue;
                 }
 
-                if (!int.TryParse(tokens[i + 1], out var dungeonId))
+                i++;
+                var inProgressOnly = false;
+                if (IsInProgressMarker(tokens, i, out var markerTokenCount))
                 {
+                    inProgressOnly = true;
+                    i += markerTokenCount;
+                }
+
+                var questId = -1;
+                var hasExplicitQuestId =
+                    i < tokens.Count && int.TryParse(tokens[i], out questId);
+                if (hasExplicitQuestId)
                     i++;
+
+                if (dungeonId <= 0)
                     continue;
-                }
 
-                if (dungeonId > 0)
+                area.Dungeons.Add(new WorldMapDungeonEntry
                 {
-                    area.Dungeons.Add(new WorldMapDungeonEntry
-                    {
-                        DungeonId = dungeonId,
-                        QuestId = questId,
-                        HasExplicitQuestId = true,
-                        InProgressOnly = true,
-                    });
-                }
-
-                i += 2;
+                    DungeonId = dungeonId,
+                    QuestId = questId,
+                    HasExplicitQuestId = hasExplicitQuestId,
+                    InProgressOnly = inProgressOnly,
+                });
             }
         }
 
@@ -510,12 +566,15 @@ namespace DfoServer.GameWorld
 
         private sealed class WorldMapIndex
         {
-            public WorldMapIndex(List<WorldMapArea> areas, Dictionary<int, WorldMapArea> areaByDungeonId)
+            public WorldMapIndex(
+                List<WorldMapArea> areas,
+                Dictionary<int, WorldMapArea> areaByDungeonId,
+                IReadOnlyList<WorldMapArea> admissionSources)
             {
                 Areas = areas;
                 AreaByDungeonId = areaByDungeonId;
                 EntriesByDungeonId = new Dictionary<int, List<WorldMapDungeonEntry>>();
-                foreach (var area in areas)
+                foreach (var area in admissionSources ?? Array.Empty<WorldMapArea>())
                 {
                     foreach (var entry in area.Dungeons)
                     {
@@ -531,11 +590,71 @@ namespace DfoServer.GameWorld
                         entries.Add(entry);
                     }
                 }
+
+                AdmissionsByDungeonId = BuildAdmissionDefinitions(
+                    EntriesByDungeonId);
+                AdmissionSourceCount = admissionSources?.Count ?? 0;
+                var definitions = new List<DungeonAdmissionDefinition>(
+                    AdmissionsByDungeonId.Values);
+                definitions.Sort((left, right) =>
+                    left.DungeonId.CompareTo(right.DungeonId));
+                AdmissionDefinitions = definitions;
             }
 
             public List<WorldMapArea> Areas { get; }
             public Dictionary<int, WorldMapArea> AreaByDungeonId { get; }
             public Dictionary<int, List<WorldMapDungeonEntry>> EntriesByDungeonId { get; }
+            public Dictionary<int, DungeonAdmissionDefinition>
+                AdmissionsByDungeonId { get; }
+            public int AdmissionSourceCount { get; }
+            public IReadOnlyList<DungeonAdmissionDefinition>
+                AdmissionDefinitions { get; }
+
+            private static Dictionary<int, DungeonAdmissionDefinition>
+                BuildAdmissionDefinitions(
+                    IReadOnlyDictionary<int, List<WorldMapDungeonEntry>> entriesByDungeonId)
+            {
+                var result = new Dictionary<int, DungeonAdmissionDefinition>();
+                foreach (var pair in entriesByDungeonId)
+                {
+                    var hasUnrestrictedEntry = false;
+                    var hasMalformedEntry = false;
+                    var persistentQuestIds = new List<int>();
+                    var activeQuestIds = new List<int>();
+
+                    foreach (var entry in pair.Value)
+                    {
+                        if (entry == null)
+                        {
+                            hasMalformedEntry = true;
+                            continue;
+                        }
+
+                        if (!entry.HasExplicitQuestId || entry.QuestId <= 0)
+                        {
+                            if (entry.InProgressOnly)
+                                hasMalformedEntry = true;
+                            else
+                                hasUnrestrictedEntry = true;
+                            continue;
+                        }
+
+                        var target = entry.InProgressOnly
+                            ? activeQuestIds
+                            : persistentQuestIds;
+                        if (!target.Contains(entry.QuestId))
+                            target.Add(entry.QuestId);
+                    }
+
+                    result[pair.Key] = new DungeonAdmissionDefinition(
+                        pair.Key,
+                        hasUnrestrictedEntry,
+                        persistentQuestIds.ToArray(),
+                        activeQuestIds.ToArray(),
+                        hasMalformedEntry);
+                }
+                return result;
+            }
         }
     }
 }

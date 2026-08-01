@@ -54,107 +54,53 @@ namespace DfoServer.GameWorld
             new Lazy<QuestParameterTable>(LoadParameters);
 
         internal static QuestRewardResolution Resolve(
-            int questId,
+            QuestRewardDefinition definition,
+            bool hasRewardSelection,
             int rewardSelectIdx,
             int playerLevel,
             int playerJob,
             int playerGrowType)
         {
             var empty = CreateEmptyReward();
-            var quest = QuestData.GetQuestFile(questId);
-            if (quest == null)
+            if (definition == null)
             {
                 return QuestRewardResolution.Invalid(
                     empty,
-                    "quest definition not found");
+                    "quest reward definition not found");
             }
 
             try
             {
-                var chainType = MapRewardType(quest.RewardType);
-                var questMinLevel = quest.Level != null && quest.Level.Length > 0
-                    ? quest.Level[0]
-                    : 1;
-                var difficulty = quest.Difficulty != null
-                    && quest.Difficulty.Length > 0
-                        ? quest.Difficulty[0]
-                        : 'G';
-                var ignoreLevel = quest.IgnoreQuestLevel4Exp;
-                var isRepeatable = string.Equals(
-                        (quest.Grade ?? string.Empty).Trim(),
-                        "[normaly repeat]",
-                        StringComparison.OrdinalIgnoreCase)
-                    || QuestData.NormalizeQuestTag(quest.Type)
-                        == "seeking repeat";
+                if (!definition.TryProject(
+                        hasRewardSelection,
+                        rewardSelectIdx,
+                        playerJob,
+                        playerGrowType,
+                        out var items,
+                        out var hasGoldMarker,
+                        out var rewardParameter,
+                        out var projectionError))
+                {
+                    return QuestRewardResolution.Invalid(empty, projectionError);
+                }
 
-                var exp = isRepeatable
+                var exp = definition.SuppressExperience
                     ? 0
                     : Parameters.Value.ComputeExp(
                         playerLevel,
-                        questMinLevel,
-                        difficulty,
-                        ignoreLevel);
+                        definition.QuestMinLevel,
+                        definition.Difficulty,
+                        definition.IgnoreLevelForExperience);
 
-                var items = new List<QuestRewardItem>();
                 uint gold = 0;
-                if (chainType == 0)
+                if (definition.ChainType == 0
+                    && (hasGoldMarker || definition.GoldMultiple > 0))
                 {
-                    var fixedRewards = QuestData.ParseItemPairs(
-                        quest.RewardIntData,
-                        playerJob,
-                        playerGrowType,
-                        preserveGoldMarker: true);
-                    var hasGoldMarker = false;
-                    foreach (var reward in fixedRewards)
-                    {
-                        if (reward.ItemId == 0)
-                            hasGoldMarker = true;
-                        else
-                            items.Add(reward);
-                    }
-
-                    if (hasGoldMarker || quest.GoldMultiple > 0)
-                    {
-                        gold = Parameters.Value.ComputeGoldReward(
-                            playerLevel,
-                            questMinLevel,
-                            quest.GoldMultiple,
-                            ignoreLevel);
-                    }
-
-                    if (rewardSelectIdx >= 0)
-                    {
-                        var selectable = QuestData.ParseItemPairs(
-                            quest.RewardSelectionIntData,
-                            playerJob,
-                            playerGrowType);
-                        if (!string.IsNullOrWhiteSpace(
-                                quest.RewardSelectionIntData)
-                            && rewardSelectIdx >= selectable.Count)
-                        {
-                            return QuestRewardResolution.Invalid(
-                                empty,
-                                $"reward selection index {rewardSelectIdx} " +
-                                $"is outside {selectable.Count} entries");
-                        }
-                        if (rewardSelectIdx < selectable.Count)
-                            items.Add(selectable[rewardSelectIdx]);
-                    }
-                }
-
-                var growNumber = 0;
-                if (RequiresIntegerParameter(chainType))
-                {
-                    var rewardValues = QuestData.ParseIntList(
-                        quest.RewardIntData);
-                    if (rewardValues.Count == 0)
-                    {
-                        return QuestRewardResolution.Invalid(
-                            empty,
-                            $"reward type {quest.RewardType} " +
-                            "requires an integer parameter");
-                    }
-                    growNumber = rewardValues[0];
+                    gold = Parameters.Value.ComputeGoldReward(
+                        playerLevel,
+                        definition.QuestMinLevel,
+                        definition.GoldMultiple,
+                        definition.IgnoreLevelForExperience);
                 }
 
                 return QuestRewardResolution.Valid(
@@ -162,10 +108,10 @@ namespace DfoServer.GameWorld
                     {
                         Exp = exp,
                         Gold = gold,
-                        ChainType = chainType,
-                        GrowNumber = growNumber,
-                        CreatureKind = quest.CreatureKind,
-                        CreatureLevel = quest.CreatureLevel,
+                        ChainType = definition.ChainType,
+                        GrowNumber = rewardParameter,
+                        CreatureKind = definition.CreatureKind,
+                        CreatureLevel = definition.CreatureLevel,
                         Items = items,
                         ConsumeItems = new List<QuestRewardItem>(),
                     });
@@ -174,12 +120,12 @@ namespace DfoServer.GameWorld
             {
                 FileLogger.Log(
                     $"[QuestRewardProjector] reward calc failed: " +
-                    $"quest={questId}: {ex.Message}");
+                    $"quest={definition.QuestId}: {ex.Message}");
                 return QuestRewardResolution.Invalid(empty, ex.Message);
             }
         }
 
-        private static QuestReward CreateEmptyReward()
+        internal static QuestReward CreateEmptyReward()
             => new QuestReward
             {
                 Exp = 0,
@@ -188,28 +134,6 @@ namespace DfoServer.GameWorld
                 Items = new List<QuestRewardItem>(),
                 ConsumeItems = new List<QuestRewardItem>(),
             };
-
-        private static bool RequiresIntegerParameter(int chainType)
-            => chainType == 1
-                || chainType == 2
-                || chainType == 10
-                || chainType == 20
-                || chainType == 25
-                || chainType == ChainTypeSlotExpansion;
-
-        private static int MapRewardType(string rewardType)
-        {
-            switch ((rewardType ?? string.Empty).Trim().ToLowerInvariant())
-            {
-                case "[grow type]": return 1;
-                case "[awakening type]": return 2;
-                case "[creature evolution]": return 10;
-                case "[expert job]": return 20;
-                case "[slot expansion]": return ChainTypeSlotExpansion;
-                case "[event creature evolution]": return 25;
-                default: return 0;
-            }
-        }
 
         private static QuestParameterTable LoadParameters()
         {

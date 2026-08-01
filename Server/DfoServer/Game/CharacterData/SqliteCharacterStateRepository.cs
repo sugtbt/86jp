@@ -29,7 +29,7 @@ namespace DfoServer.Game.CharacterData
             {
                 conn.Open();
                 using (var cmd = new SqliteCommand(
-                    @"SELECT pc_room_state, expert_job_blob,
+                    @"SELECT pc_room_state,
                              champion_break_key_id, champion_break_mode, champion_break_value,
                              character_option_blob, charac_invisible_falgs_payload_len,
                              racing_dungeon_current_enter_count,
@@ -45,24 +45,20 @@ namespace DfoServer.Game.CharacterData
                             return;
                         snapshot.PcRoomPlayTimeState = (byte)reader.GetInt32(0);
 
-                        var expertBlob = reader.IsDBNull(1) ? null : (byte[])reader[1];
-                        if (expertBlob != null)
-                            DeserializeExpertJobInfo(expertBlob, snapshot.ExpertJobInfo);
+                        snapshot.ChampionBreakSystem.KeyId = reader.GetInt32(1);
+                        snapshot.ChampionBreakSystem.Mode = (byte)reader.GetInt32(2);
+                        snapshot.ChampionBreakSystem.Value = reader.GetInt32(3);
 
-                        snapshot.ChampionBreakSystem.KeyId = reader.GetInt32(2);
-                        snapshot.ChampionBreakSystem.Mode = (byte)reader.GetInt32(3);
-                        snapshot.ChampionBreakSystem.Value = reader.GetInt32(4);
+                        snapshot.CharacterOptionBlob = reader.IsDBNull(4) ? null : (byte[])reader[4];
+                        snapshot.CharacInvisibleFalgsPayloadLen = reader.IsDBNull(5) ? 0u : (uint)reader.GetInt64(5);
+                        snapshot.RacingDungeonCurrentEnterCount = reader.IsDBNull(6) ? 0u : (uint)reader.GetInt64(6);
 
-                        snapshot.CharacterOptionBlob = reader.IsDBNull(5) ? null : (byte[])reader[5];
-                        snapshot.CharacInvisibleFalgsPayloadLen = reader.IsDBNull(6) ? 0u : (uint)reader.GetInt64(6);
-                        snapshot.RacingDungeonCurrentEnterCount = reader.IsDBNull(7) ? 0u : (uint)reader.GetInt64(7);
-
-                        snapshot.AckCharSlotIndex = reader.IsDBNull(8) ? (byte)0 : (byte)reader.GetInt32(8);
-                        snapshot.AckFatigueBattery = reader.IsDBNull(9) ? (ushort)0 : (ushort)reader.GetInt32(9);
-                        snapshot.AckFatigueGrownUpBuff = reader.IsDBNull(10) ? (ushort)0 : (ushort)reader.GetInt32(10);
-                        snapshot.AckTradePunishFlag = reader.IsDBNull(11) ? (byte)0 : (byte)reader.GetInt32(11);
-                        snapshot.AckExtraField86JP = reader.IsDBNull(12) ? (ushort)0 : (ushort)reader.GetInt32(12);
-                        snapshot.AckTutorialSkipable = reader.IsDBNull(13) ? (byte)0 : (byte)reader.GetInt32(13);
+                        snapshot.AckCharSlotIndex = reader.IsDBNull(7) ? (byte)0 : (byte)reader.GetInt32(7);
+                        snapshot.AckFatigueBattery = reader.IsDBNull(8) ? (ushort)0 : (ushort)reader.GetInt32(8);
+                        snapshot.AckFatigueGrownUpBuff = reader.IsDBNull(9) ? (ushort)0 : (ushort)reader.GetInt32(9);
+                        snapshot.AckTradePunishFlag = reader.IsDBNull(10) ? (byte)0 : (byte)reader.GetInt32(10);
+                        snapshot.AckExtraField86JP = reader.IsDBNull(11) ? (ushort)0 : (ushort)reader.GetInt32(11);
+                        snapshot.AckTutorialSkipable = reader.IsDBNull(12) ? (byte)0 : (byte)reader.GetInt32(12);
                     }
                 }
 
@@ -430,14 +426,14 @@ ORDER BY sort_order;",
                 {
                     using (var cmd = new SqliteCommand(
                         @"INSERT INTO character_init_flags
-                          (character_id, pc_room_state, expert_job_blob,
+                          (character_id, pc_room_state,
                            champion_break_key_id, champion_break_mode, champion_break_value,
                            character_option_blob, charac_invisible_falgs_payload_len,
                            racing_dungeon_current_enter_count,
                            ack_char_slot_index, ack_fatigue_battery, ack_fatigue_grownup_buff,
                            ack_trade_punish_flag, ack_extra_field_86jp,
                            ack_tutorial_skipable)
-                          VALUES (@cid, @pcr, @expert,
+                          VALUES (@cid, @pcr,
                                   @champKey, @champMode, @champValue,
                                   @charOpt, @ciplen,
                                   @rdcc,
@@ -446,7 +442,6 @@ ORDER BY sort_order;",
                                   @ackTutSkip)
                           ON CONFLICT(character_id) DO UPDATE SET
                             pc_room_state=excluded.pc_room_state,
-                            expert_job_blob=excluded.expert_job_blob,
                             champion_break_key_id=excluded.champion_break_key_id,
                             champion_break_mode=excluded.champion_break_mode,
                             champion_break_value=excluded.champion_break_value,
@@ -462,7 +457,6 @@ ORDER BY sort_order;",
                     {
                         cmd.Parameters.AddWithValue("@cid", characterId);
                         cmd.Parameters.AddWithValue("@pcr", (int)snapshot.PcRoomPlayTimeState);
-                        cmd.Parameters.AddWithValue("@expert", SerializeExpertJobInfo(snapshot.ExpertJobInfo));
                         cmd.Parameters.AddWithValue("@champKey", snapshot.ChampionBreakSystem.KeyId);
                         cmd.Parameters.AddWithValue("@champMode", (int)snapshot.ChampionBreakSystem.Mode);
                         cmd.Parameters.AddWithValue("@champValue", snapshot.ChampionBreakSystem.Value);
@@ -753,47 +747,6 @@ ON CONFLICT(character_id) DO UPDATE SET
             snapshot.Unknown725Packets.AddRange(u725);
 
             snapshot.Unknown730 = _miscState.LoadUnknown730(characterId);
-        }
-
-
-
-
-
-
-        private static byte[] SerializeExpertJobInfo(ExpertJobInfoSnapshot info)
-        {
-            var list = new List<byte>();
-            list.Add(info.State0);
-            list.Add(info.Mode);
-            list.AddRange(BitConverter.GetBytes(info.ValueA));
-            list.AddRange(BitConverter.GetBytes(info.ValueB));
-            list.Add((byte)info.Entries.Count);
-            foreach (var entry in info.Entries)
-                list.AddRange(BitConverter.GetBytes(entry));
-            return list.ToArray();
-        }
-
-        private static void DeserializeExpertJobInfo(byte[] blob, ExpertJobInfoSnapshot info)
-        {
-            if (blob.Length < 2) return;
-            info.State0 = blob[0];
-            info.Mode = blob[1];
-            int offset = 2;
-            if (offset + 8 <= blob.Length)
-            {
-                info.ValueA = BitConverter.ToInt32(blob, offset); offset += 4;
-                info.ValueB = BitConverter.ToInt32(blob, offset); offset += 4;
-            }
-            if (offset < blob.Length)
-            {
-                var count = blob[offset++];
-                info.Entries.Clear();
-                for (int i = 0; i < count && offset + 4 <= blob.Length; i++)
-                {
-                    info.Entries.Add(BitConverter.ToInt32(blob, offset));
-                    offset += 4;
-                }
-            }
         }
 
     }

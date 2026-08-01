@@ -11,12 +11,14 @@ namespace DfoServer.Game.Quests
         {
             Slot = quest.Slot;
             QuestId = quest.QuestId;
+            ActivationId = quest.ActivationId;
             Version = quest.Version;
             Trigger = new QuestTrigger(quest.TriggerValue);
         }
 
         public int Slot { get; }
         public ushort QuestId { get; }
+        public QuestActivationId ActivationId { get; }
         public long Version { get; }
         public QuestTrigger Trigger { get; }
     }
@@ -33,9 +35,18 @@ namespace DfoServer.Game.Quests
             _entries = entries;
             QuestIds = new ReadOnlyCollection<ushort>(
                 entries.Keys.OrderBy(id => id).ToArray());
+            var activations = new Dictionary<ushort, QuestActivationId>();
+            foreach (var pair in entries)
+            {
+                if (pair.Value.ActivationId.IsValid)
+                    activations.Add(pair.Key, pair.Value.ActivationId);
+            }
+            Activations = new ReadOnlyDictionary<ushort, QuestActivationId>(
+                activations);
         }
 
         public IReadOnlyCollection<ushort> QuestIds { get; }
+        public IReadOnlyDictionary<ushort, QuestActivationId> Activations { get; }
         public int Count => _entries.Count;
 
         public bool Contains(ushort questId) => _entries.ContainsKey(questId);

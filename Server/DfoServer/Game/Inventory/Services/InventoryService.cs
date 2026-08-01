@@ -501,6 +501,11 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
+        internal void RestorePendingHappyTokenCeraGrant(int count)
+        {
+            _pendingHappyTokenCeraGrant = Math.Max(0, count);
+        }
+
         public void ClearDirtyState()
         {
             _dirtySlots.Clear();

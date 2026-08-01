@@ -34,6 +34,10 @@ namespace DfoServer.SelfTests
             Seed(connectionString);
 
             var failures = 0;
+            var triggerSessionId = Guid.NewGuid();
+            InventoryContext.Register(
+                triggerSessionId,
+                new InventoryService(CharacterId, AccountId));
             Check("PVF classifies configured challenge quest",
                 QuestData.IsDailyChallengeQuest(ChallengeQuestId),
                 ref failures);
@@ -74,7 +78,8 @@ namespace DfoServer.SelfTests
             var firstManager = new QuestManager(firstSender, connectionString);
             firstManager.HandleSetTriggerAsync(
                     0x0021,
-                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false))
+                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false),
+                    triggerSessionId)
                 .GetAwaiter()
                 .GetResult();
 
@@ -96,7 +101,8 @@ namespace DfoServer.SelfTests
             var rebuiltManager = new QuestManager(rebuiltSender, connectionString);
             rebuiltManager.HandleSetTriggerAsync(
                     0x0021,
-                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false))
+                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false),
+                    triggerSessionId)
                 .GetAwaiter()
                 .GetResult();
             Check("rebuilt service reads persisted value and applies 2 -> 1",
@@ -109,7 +115,8 @@ namespace DfoServer.SelfTests
             rebuiltSender.Reset();
             rebuiltManager.HandleSetTriggerAsync(
                     0x0021,
-                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false))
+                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false),
+                    triggerSessionId)
                 .GetAwaiter()
                 .GetResult();
             Check("third challenge event persists 1 -> 0",
@@ -122,7 +129,8 @@ namespace DfoServer.SelfTests
             rebuiltSender.Reset();
             rebuiltManager.HandleSetTriggerAsync(
                     0x0021,
-                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false))
+                    BuildWireSetTriggerBody(ChallengeQuestId, increment: false),
+                    triggerSessionId)
                 .GetAwaiter()
                 .GetResult();
             Check("completed 0x0286 entry uses remaining,target wire order (0,3)",
@@ -149,7 +157,8 @@ namespace DfoServer.SelfTests
             rebuiltSender.Reset();
             rebuiltManager.HandleSetTriggerAsync(
                     0x0021,
-                    BuildWireSetTriggerBody(ChallengeQuestId, increment: true))
+                    BuildWireSetTriggerBody(ChallengeQuestId, increment: true),
+                    triggerSessionId)
                 .GetAwaiter()
                 .GetResult();
             Check("client increment cannot exceed the persisted daily target",
@@ -164,11 +173,12 @@ namespace DfoServer.SelfTests
             rebuiltSender.Reset();
             rebuiltManager.HandleSetTriggerAsync(
                     0x0021,
-                    BuildWireSetTriggerBody(NormalQuestId, increment: false))
+                    BuildWireSetTriggerBody(NormalQuestId, increment: false),
+                    triggerSessionId)
                 .GetAwaiter()
                 .GetResult();
-            Check("normal quest remains on the active quest persistence path",
-                ReadNormalQuestValue(connectionString) == 0
+            Check("server-owned hunt quest only echoes a client trigger",
+                ReadNormalQuestValue(connectionString) == 1
                 && ReadChallengeValue(connectionString) == 3,
                 ref failures);
             Check("normal quest does not emit a daily challenge snapshot",
@@ -183,6 +193,7 @@ namespace DfoServer.SelfTests
                 && configuredReward.ItemCount == 1,
                 ref failures);
 
+            InventoryContext.Unregister(triggerSessionId, CharacterId);
             SeedCompletedRewardGroup(connectionString);
             var sessionId = Guid.NewGuid();
             var inventory = new InventoryService(CharacterId, AccountId);

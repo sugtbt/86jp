@@ -18,6 +18,8 @@ namespace DfoServer.Game.Quests
             _connStr = connStr;
         }
 
+        internal string ConnectionString => _connStr;
+
         // ── 进行中任务 ──
 
         public List<ActiveQuest> LoadActiveQuests(int characterId)
@@ -33,7 +35,7 @@ namespace DfoServer.Game.Quests
         {
             var list = new List<ActiveQuest>();
             using (var cmd = new SqliteCommand(
-                "SELECT slot, quest_id, trigger_value, version FROM character_active_quests WHERE character_id=@cid ORDER BY slot", conn, tx))
+                "SELECT slot, quest_id, trigger_value, version, activation_id FROM character_active_quests WHERE character_id=@cid ORDER BY slot", conn, tx))
             {
                 cmd.Parameters.AddWithValue("@cid", characterId);
                 using (var r = cmd.ExecuteReader())
@@ -45,6 +47,7 @@ namespace DfoServer.Game.Quests
                             QuestId = (ushort)r.GetInt32(1),
                             TriggerValue = (uint)r.GetInt64(2),
                             Version = r.GetInt64(3),
+                            ActivationId = ParseActivationId(r.GetString(4)),
                         });
                 }
             }
@@ -66,16 +69,34 @@ namespace DfoServer.Game.Quests
                         clear.ExecuteNonQuery();
                     }
                     foreach (var q in quests)
-                        InsertActiveQuest(conn, tx, characterId, q.Slot, q.QuestId, q.TriggerValue);
+                    {
+                        InsertActiveQuest(
+                            conn,
+                            tx,
+                            characterId,
+                            q.Slot,
+                            q.QuestId,
+                            q.TriggerValue,
+                            q.ActivationId);
+                    }
                     tx.Commit();
                 }
             }
         }
 
-        public static void InsertActiveQuest(SqliteConnection conn, SqliteTransaction tx, int characterId, int slot, ushort questId, uint triggerValue)
+        public static QuestActivationId InsertActiveQuest(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            int slot,
+            ushort questId,
+            uint triggerValue,
+            QuestActivationId activationId = default)
         {
+            if (!activationId.IsValid)
+                activationId = QuestActivationId.New();
             using (var cmd = new SqliteCommand(
-                "INSERT INTO character_active_quests (character_id, slot, quest_id, trigger_value, version) VALUES (@cid, @s, @qid, @tv, 0)",
+                "INSERT INTO character_active_quests (character_id, slot, quest_id, trigger_value, version, activation_id) VALUES (@cid, @s, @qid, @tv, 0, @activation)",
                 conn,
                 tx))
             {
@@ -83,39 +104,103 @@ namespace DfoServer.Game.Quests
                 cmd.Parameters.AddWithValue("@s", slot);
                 cmd.Parameters.AddWithValue("@qid", (int)questId);
                 cmd.Parameters.AddWithValue("@tv", (long)triggerValue);
+                cmd.Parameters.AddWithValue(
+                    "@activation",
+                    activationId.ToStorageString());
                 cmd.ExecuteNonQuery();
             }
+            return activationId;
         }
 
-        public void DeleteActiveQuest(int characterId, int slot)
+        public bool DeleteActiveQuest(
+            int characterId,
+            int slot,
+            QuestActivationId activationId)
         {
             using (var conn = new SqliteConnection(_connStr))
             {
                 conn.Open();
-                DeleteActiveQuest(conn, null, characterId, slot);
+                return DeleteActiveQuest(
+                    conn,
+                    null,
+                    characterId,
+                    slot,
+                    activationId);
             }
         }
 
-        public static void DeleteActiveQuest(SqliteConnection conn, SqliteTransaction tx, int characterId, int slot)
+        public static bool DeleteActiveQuest(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            int slot,
+            QuestActivationId activationId)
         {
+            if (!activationId.IsValid)
+                return false;
             using (var cmd = new SqliteCommand(
-                "DELETE FROM character_active_quests WHERE character_id=@cid AND slot=@s", conn, tx))
+                "DELETE FROM character_active_quests WHERE character_id=@cid AND slot=@s AND activation_id=@activation", conn, tx))
             {
                 cmd.Parameters.AddWithValue("@cid", characterId);
                 cmd.Parameters.AddWithValue("@s", slot);
-                cmd.ExecuteNonQuery();
+                cmd.Parameters.AddWithValue(
+                    "@activation",
+                    activationId.ToStorageString());
+                return cmd.ExecuteNonQuery() == 1;
             }
         }
 
-        public static void UpdateTriggerValue(SqliteConnection conn, SqliteTransaction tx, int characterId, int slot, uint triggerValue)
+        public static bool TryDeleteActiveQuestCas(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            ushort questId,
+            QuestActivationId activationId,
+            long expectedVersion,
+            uint expectedTrigger)
         {
+            if (!activationId.IsValid)
+                return false;
+
             using (var cmd = new SqliteCommand(
-                "UPDATE character_active_quests SET trigger_value=@tv, version=version+1 WHERE character_id=@cid AND slot=@s", conn, tx))
+                @"DELETE FROM character_active_quests
+                  WHERE character_id=@cid AND quest_id=@qid
+                    AND activation_id=@activation
+                    AND version=@version AND trigger_value=@trigger",
+                conn,
+                tx))
+            {
+                cmd.Parameters.AddWithValue("@cid", characterId);
+                cmd.Parameters.AddWithValue("@qid", (int)questId);
+                cmd.Parameters.AddWithValue(
+                    "@activation",
+                    activationId.ToStorageString());
+                cmd.Parameters.AddWithValue("@version", expectedVersion);
+                cmd.Parameters.AddWithValue("@trigger", (long)expectedTrigger);
+                return cmd.ExecuteNonQuery() == 1;
+            }
+        }
+
+        public static bool UpdateTriggerValue(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            int slot,
+            QuestActivationId activationId,
+            uint triggerValue)
+        {
+            if (!activationId.IsValid)
+                return false;
+            using (var cmd = new SqliteCommand(
+                "UPDATE character_active_quests SET trigger_value=@tv, version=version+1 WHERE character_id=@cid AND slot=@s AND activation_id=@activation", conn, tx))
             {
                 cmd.Parameters.AddWithValue("@tv", (long)triggerValue);
                 cmd.Parameters.AddWithValue("@cid", characterId);
                 cmd.Parameters.AddWithValue("@s", slot);
-                cmd.ExecuteNonQuery();
+                cmd.Parameters.AddWithValue(
+                    "@activation",
+                    activationId.ToStorageString());
+                return cmd.ExecuteNonQuery() == 1;
             }
         }
 
@@ -124,14 +209,18 @@ namespace DfoServer.Game.Quests
             SqliteTransaction tx,
             int characterId,
             ushort questId,
+            QuestActivationId activationId,
             long expectedVersion,
             uint expectedTrigger,
             uint triggerValue)
         {
+            if (!activationId.IsValid)
+                return false;
             using (var cmd = new SqliteCommand(
                 @"UPDATE character_active_quests
                   SET trigger_value=@newTrigger, version=version+1
                   WHERE character_id=@cid AND quest_id=@qid
+                    AND activation_id=@activation
                     AND version=@version AND trigger_value=@oldTrigger",
                 conn,
                 tx))
@@ -139,6 +228,9 @@ namespace DfoServer.Game.Quests
                 cmd.Parameters.AddWithValue("@newTrigger", (long)triggerValue);
                 cmd.Parameters.AddWithValue("@cid", characterId);
                 cmd.Parameters.AddWithValue("@qid", (int)questId);
+                cmd.Parameters.AddWithValue(
+                    "@activation",
+                    activationId.ToStorageString());
                 cmd.Parameters.AddWithValue("@version", expectedVersion);
                 cmd.Parameters.AddWithValue("@oldTrigger", (long)expectedTrigger);
                 return cmd.ExecuteNonQuery() == 1;
@@ -149,21 +241,36 @@ namespace DfoServer.Game.Quests
             SqliteConnection conn,
             SqliteTransaction tx,
             int characterId,
+            QuestActivationId activationId,
             Guid eventId,
             string eventKind)
         {
+            if (!activationId.IsValid || eventId == Guid.Empty)
+                return false;
             using (var cmd = new SqliteCommand(
                 @"INSERT OR IGNORE INTO quest_progress_event_inbox
-                  (character_id, event_id, event_kind)
-                  VALUES (@cid, @eid, @kind)",
+                  (character_id, activation_id, event_id, event_kind)
+                  VALUES (@cid, @activation, @eid, @kind)",
                 conn,
                 tx))
             {
                 cmd.Parameters.AddWithValue("@cid", characterId);
+                cmd.Parameters.AddWithValue(
+                    "@activation",
+                    activationId.ToStorageString());
                 cmd.Parameters.AddWithValue("@eid", eventId.ToString("N"));
                 cmd.Parameters.AddWithValue("@kind", eventKind ?? string.Empty);
                 return cmd.ExecuteNonQuery() == 1;
             }
+        }
+
+        private static QuestActivationId ParseActivationId(string value)
+        {
+            if (QuestActivationId.TryParse(value, out var activationId))
+                return activationId;
+
+            throw new InvalidOperationException(
+                "Active quest row has an invalid activation identity.");
         }
 
         // ── 完成标记 ──

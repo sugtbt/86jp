@@ -1,7 +1,7 @@
-using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Network.Builders;
 using System;
+using System.Collections.Generic;
 
 namespace DfoServer.SelfTests
 {
@@ -11,44 +11,35 @@ namespace DfoServer.SelfTests
         {
             Console.WriteLine("=== MONSTERCARD_BIND selftest ===");
             var failures = 0;
-            var catalog = MonsterCardBindCatalog.Parse(@"
-[monstercard bind info]
-0 100 0 1 200 0 2 300 0
-[/monstercard bind info]
-[monstercard bind list]
-1000 0 500
-1001 0 500
-2000 1 100
-2001 1 0
-[/monstercard bind list]");
+            var config = new MonsterCardBindConfig
+            {
+                MixProbability = new Dictionary<int, int> { [0] = 40000, [1] = 10000, [2] = 3000, [3] = 0 },
+                BinderRates = new Dictionary<int, int> { [0] = 100, [1] = 200, [2] = 300 },
+                BindList = new List<MonsterCardBindEntry>
+                {
+                    new MonsterCardBindEntry { ItemId = 1000, Rarity = 0, Weight = 500 },
+                    new MonsterCardBindEntry { ItemId = 1001, Rarity = 0, Weight = 0 },
+                    new MonsterCardBindEntry { ItemId = 2000, Rarity = 1, Weight = 100 },
+                },
+            };
 
-            var calls = 0;
-            Check("same-rarity roll uses positive result weight",
-                catalog.TryRollResult(2, 0, max => calls++ == 0 ? 9999 : max - 1, out var same)
-                && same.Rarity == 0 && (same.ItemId == 1000 || same.ItemId == 1001), ref failures);
-            calls = 0;
-            Check("silver upgrade boundary selects next rarity pool",
-                catalog.TryRollResult(2, 0, max => calls++ == 0 ? 299 : 0, out var upgraded)
-                && upgraded.ItemId == 2000 && upgraded.Rarity == 1, ref failures);
-            calls = 0;
-            Check("silver upgrade boundary rejects roll 300",
-                catalog.TryRollResult(2, 0, max => calls++ == 0 ? 300 : 0, out var boundary)
-                && boundary.Rarity == 0, ref failures);
-            calls = 0;
-            Check("zero-weight result is excluded",
-                catalog.TryRollResult(2, 1, max => calls++ == 0 ? 9999 : max - 1, out var weighted)
-                && weighted.ItemId == 2000, ref failures);
-            var liveCatalog = MonsterCardBindCatalog.Load();
-            Check("live enchanter.exj bind type 2 resolves a same-rarity result",
-                liveCatalog.TryRollResult(2, 0, max => max - 1, out var liveResult)
-                && liveResult.ItemId > 0 && liveResult.Rarity == 0, ref failures);
-            Check("success ACK echoes input slots and one result row", CheckSuccessAck(), ref failures);
+            Check("same white base is 40%", Weight(config, 0, 0, 0) == 40000, ref failures);
+            Check("white plus purple cross-tier is 4%", Weight(config, 0, 2, 0) == 4000, ref failures);
+            Check("white plus pink cross-tier is 0.12%", Weight(config, 0, 3, 0) == 120, ref failures);
+            Check("gold binder triples and caps at 100%", Weight(config, 0, 0, 2) == 100000, ref failures);
+            Check("zero-weight cards cannot be selected",
+                config.TrySelectResult(0, max => max - 1, out var selected) && selected.ItemId == 1000,
+                ref failures);
+            Check("success ACK retains verified 19-byte layout", CheckAck(), ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
         }
 
-        private static bool CheckSuccessAck()
+        private static int Weight(MonsterCardBindConfig config, int first, int second, int binder)
+            => config.TryCalculateSuccessWeight(first, second, binder, out var value) ? value : -1;
+
+        private static bool CheckAck()
         {
             var result = new MonsterCardBindResult
             {
@@ -56,7 +47,7 @@ namespace DfoServer.SelfTests
                 Grant = new InventoryRewardGrantResult { SlotIndex = 246 },
             };
             var body = MonsterCardBindAckBuilder.BuildSuccess(105, 241, 245, result);
-            return body.Length == MonsterCardBindAckBuilder.SuccessLength
+            return body.Length == 19
                 && BitConverter.ToString(body) == "01-69-00-F1-00-F5-00-01-F6-00-A8-0E-00-00-01-00-00-00-00";
         }
 

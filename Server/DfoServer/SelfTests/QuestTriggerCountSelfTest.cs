@@ -55,6 +55,10 @@ namespace DfoServer.SelfTests
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
             var failures = 0;
+            var inventorySessionId = Guid.NewGuid();
+            InventoryContext.Register(
+                inventorySessionId,
+                new InventoryService(CharacterId, AccountId));
 
             CheckQuestSlotLayout(ref failures);
 
@@ -182,44 +186,47 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             var run = new DungeonRun(3536, 2);
-            run.MarkServerDrivenHuntMonsterTrigger(
+            run.MarkServerDrivenQuestTrigger(
                 DragonObstacleQuestId,
                 channelIndex: 0);
             Check("server-driven hunt trigger rejects another channel",
-                !run.TryConsumeServerDrivenHuntMonsterTrigger(
+                !run.TryConsumeServerDrivenQuestTrigger(
                     DragonObstacleQuestId,
                     triggerType: 0x20),
                 ref failures);
             Check("server-driven hunt trigger consumes its client channel",
-                run.TryConsumeServerDrivenHuntMonsterTrigger(
+                run.TryConsumeServerDrivenQuestTrigger(
                     DragonObstacleQuestId,
                     triggerType: 0x10)
-                    && !run.TryConsumeServerDrivenHuntMonsterTrigger(
+                    && !run.TryConsumeServerDrivenQuestTrigger(
                         DragonObstacleQuestId,
                         triggerType: 0x10),
                 ref failures);
 
-            run.MarkServerDrivenHuntMonsterTrigger(
+            run.MarkServerDrivenQuestTrigger(
                 DragonObstacleQuestId,
                 channelIndex: 0);
-            run.MarkServerDrivenHuntMonsterTrigger(
+            run.MarkServerDrivenQuestTrigger(
                 DragonObstacleQuestId,
                 channelIndex: 1);
             Check("combined hunt echo consumes both matching channels",
-                run.TryConsumeServerDrivenHuntMonsterTrigger(
+                run.TryConsumeServerDrivenQuestTrigger(
                     DragonObstacleQuestId,
                     triggerType: 0x30)
-                    && !run.HasPendingServerDrivenHuntMonsterTriggers(),
+                    && !run.HasPendingServerDrivenQuestTriggers(),
                 ref failures);
 
             CheckTransactionalProgress(
                 connStr,
                 questService,
                 ref failures);
-            failures += CheckHuntMonsterClientProjectionAsync(connStr)
+            failures += CheckHuntMonsterClientProjectionAsync(
+                    connStr,
+                    inventorySessionId)
                 .GetAwaiter()
                 .GetResult();
 
+            InventoryContext.Unregister(inventorySessionId, CharacterId);
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
         }
@@ -316,9 +323,10 @@ namespace DfoServer.SelfTests
                 && GameWorld.QuestData.ResolveReward(DragonObstacleQuestId).IsValid,
                 ref failures);
             SaveActiveQuest(connStr, SyntheticQuestId, 0);
-            var invalidRewardFinish = questService.HandleFinishQuest(
+            var invalidRewardFinish = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
                 CharacterId,
-                BuildQuestBody(SyntheticQuestId));
+                QuestSelfTestCommandAdapter.BuildFinishBody(SyntheticQuestId));
             Check("invalid reward definition cannot commit quest completion",
                 !invalidRewardFinish.Success
                 && LoadTrigger(connStr, SyntheticQuestId) == 0
@@ -440,7 +448,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
             var concurrentQuest = LoadActiveQuest(
                 connStr,
                 DragonObstacleQuestId);
-            Check("client trigger and server kill serialize without lost progress",
+            Check("server-owned client echo and server kill serialize without lost progress",
                 clientError == null
                 && serverError == null
                 && clientResult != null
@@ -448,8 +456,8 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 && serverResult != null
                 && serverResult.Count == 1
                 && concurrentQuest != null
-                && concurrentQuest.TriggerValue == 1
-                && concurrentQuest.Version == 2
+                && concurrentQuest.TriggerValue == 2
+                && concurrentQuest.Version == 1
                 && CountProgressEvents(connStr, concurrentEventId) == 1,
                 ref failures);
         }
@@ -493,7 +501,8 @@ VALUES (@cid, 1, @qid, 3, 0);";
         }
 
         private static async Task<int> CheckHuntMonsterClientProjectionAsync(
-            string connStr)
+            string connStr,
+            Guid sessionId)
         {
             var failures = 0;
             SaveActiveQuest(connStr, FitzLieutenantQuestId, 20540);
@@ -532,12 +541,14 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 0x0021,
                 BuildWireSetTriggerBody(
                     FitzLieutenantQuestId,
-                    triggerType: 0x20));
+                    triggerType: 0x20),
+                sessionId);
             await manager.HandleSetTriggerAsync(
                 0x0021,
                 BuildWireSetTriggerBody(
                     FitzLieutenantQuestId,
-                    triggerType: 0x10));
+                    triggerType: 0x10),
+                sessionId);
             clock.CheckOnce(DateTime.UtcNow.AddSeconds(1));
             await Task.Delay(10);
             Check("out-of-order 2547 echoes ACK without double decrement",

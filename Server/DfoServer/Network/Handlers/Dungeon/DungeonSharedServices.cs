@@ -46,9 +46,19 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal CardRewardCoordinator CardRewards { get; }
         internal Game.Dungeon.DropService Drops { get; }
         internal Game.Dungeon.DungeonEntryCostService EntryCost { get; }
+        internal DungeonAdmissionRejectSender AdmissionRejects { get; }
         internal DungeonProgressNotificationProjector ProgressNotifications { get; }
+        internal DungeonTownReturnCoordinator TownReturn { get; }
         internal Game.Dungeon.DungeonPersistentEffectApplicationService PersistentEffects { get; }
         internal Game.Dungeon.DungeonInstanceRegistry InstanceRegistry { get; }
+        internal Game.Dungeon.Tournament.TournamentDungeonApplicationService
+            Tournaments { get; }
+        internal Game.Dungeon.BloodAltar.BloodAltarDungeonApplicationService
+            BloodAltars { get; }
+        internal Game.Dungeon.BloodAltar.BloodAltarRewardApplicationService
+            BloodAltarRewards { get; }
+        internal Game.Dungeon.BloodAltar.BloodAltarRewardPlanningService
+            BloodAltarRewardPlanner { get; }
 
         internal DungeonSharedServices(
             Game.ReviveCoin.ReviveCoinService reviveCoin,
@@ -125,6 +135,21 @@ namespace DfoServer.Network.Handlers.Dungeon
             InstanceRegistry = instanceRegistry
                 ?? new Game.Dungeon.DungeonInstanceRegistry(
                     ClockService.Instance);
+            TownReturn = new DungeonTownReturnCoordinator(
+                InstanceRegistry,
+                ProgressNotifications);
+            Tournaments =
+                new Game.Dungeon.Tournament
+                    .TournamentDungeonApplicationService();
+            BloodAltars =
+                new Game.Dungeon.BloodAltar
+                    .BloodAltarDungeonApplicationService();
+            BloodAltarRewards =
+                new Game.Dungeon.BloodAltar
+                    .BloodAltarRewardApplicationService();
+            BloodAltarRewardPlanner =
+                new Game.Dungeon.BloodAltar
+                    .BloodAltarRewardPlanningService();
 
             PersistentMechanisms = new DungeonPersistentMechanismCoordinator(
                 CharacterStateRepository);
@@ -139,7 +164,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 accountExperience: AccountExperience,
                 sendInDungeonLevelUpFollowups:
                     ProgressNotifications.SendInDungeonLevelUpFollowups,
-                inventoryRefresh: inventoryRefresh);
+                inventoryRefresh: inventoryRefresh,
+                instanceRegistry: InstanceRegistry,
+                townReturn: TownReturn,
+                sessionDirectory: Sessions);
             TowerOfDespairProgress =
                 new Game.Dungeon.TowerOfDespairProgressService(
                     new Game.Dungeon.TowerOfDespairProgressRepository(
@@ -149,6 +177,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 new Game.Dungeon.TowerOfDespairRewardGrantService();
             CardRewards = new CardRewardCoordinator();
             EntryCost = new Game.Dungeon.DungeonEntryCostService();
+            AdmissionRejects = new DungeonAdmissionRejectSender();
         }
     }
 }

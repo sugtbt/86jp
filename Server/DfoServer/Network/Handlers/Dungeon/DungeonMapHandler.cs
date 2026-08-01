@@ -44,6 +44,18 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
+            if (_svc.BloodAltars.BlocksMapMove(run))
+            {
+                var altar = _svc.BloodAltars.GetRuntime(run);
+                FileLogger.Log(
+                    $"[BloodAltar] MOVE_MAP blocked before map completion: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"instance={run.PartyDungeonInstanceId} " +
+                    $"room={run.CurrentRoomInstanceId} " +
+                    $"map={altar?.CurrentMapId ?? 0}");
+                return;
+            }
+
             if (IsHellPartyLocked(run))
             {
                 FileLogger.Log($"[DungeonHandler] MOVE_MAP blocked by active hell party: current=({run.RoomKey.X},{run.RoomKey.Y}) next=({req.NextX},{req.NextY})");
@@ -107,7 +119,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 moveTarget.Y,
                 overrideMapId);
             if (!leaderRoomIdentity.HasValue
-                || !session.Player.IsCurrentDungeonRoom(
+                || !session.Player.IsCurrentDungeonParticipantRoom(
                     leaderRoomIdentity.Value))
                 return;
             DungeonMechanismCoordinator.OnMoveMapCompleted(
@@ -135,7 +147,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             int overrideMapId,
             DungeonMechanismCoordinator.MoveMapContext mechanismMove,
             DungeonRunIdentity leaderRunIdentity,
-            DungeonRoomIdentity leaderRoomIdentity,
+            DungeonParticipantRoomIdentity leaderRoomIdentity,
             long leaderPreviousRoomInstanceId)
         {
             var pm = _svc.PartyManager;
@@ -161,7 +173,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
                 try
                 {
-                    if (!leader.Player.IsCurrentDungeonRoom(leaderRoomIdentity))
+                    if (!leader.Player.IsCurrentDungeonParticipantRoom(
+                            leaderRoomIdentity))
                         return;
                     var leaderRun = leader.Player.CurrentRun;
                     if (leaderRun == null)
@@ -176,10 +189,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                         nextX,
                         nextY,
                         overrideMapId);
-                    if (!leader.Player.IsCurrentDungeonRoom(leaderRoomIdentity))
+                    if (!leader.Player.IsCurrentDungeonParticipantRoom(
+                            leaderRoomIdentity))
                         return;
                     if (!memberRoomIdentity.HasValue
-                        || !bs.Player.IsCurrentDungeonRoom(
+                        || !bs.Player.IsCurrentDungeonParticipantRoom(
                             memberRoomIdentity.Value))
                         continue;
                     DungeonMechanismCoordinator.OnMoveMapCompleted(
@@ -195,7 +209,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
         }
 
-        internal Task<DungeonRoomIdentity?> SendStartMapAsync(
+        internal Task<DungeonParticipantRoomIdentity?> SendStartMapAsync(
             EnhancedClientSession session,
             int nextX,
             int nextY,
@@ -207,7 +221,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 nextY,
                 overrideMapId);
 
-        internal async Task<DungeonRoomIdentity?> SendStartMapAsync(
+        internal async Task<DungeonParticipantRoomIdentity?> SendStartMapAsync(
             EnhancedClientSession session,
             DungeonRun run,
             int nextX,
@@ -216,6 +230,8 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             if (session?.Player == null
                 || run == null
+                || run.Instance.State == DungeonInstanceState.Ending
+                || run.Instance.State == DungeonInstanceState.Ended
                 || !session.Player.IsCurrentDungeonRun(run.CaptureIdentity()))
             {
                 return null;
@@ -228,12 +244,21 @@ namespace DfoServer.Network.Handlers.Dungeon
                     nextX,
                     nextY,
                     overrideMapId);
+            var templateMapId = effectiveOverrideMapId;
+            if (templateMapId <= 0
+                && run.Instance.Selection?.TryGetFrozenRoomMapId(
+                    nextX,
+                    nextY,
+                    out var frozenMapId) == true)
+            {
+                templateMapId = frozenMapId;
+            }
             var maze = DungeonData.GetDungeonMapMonsterSummaryInformation(
                 run.DungeonId,
                 nextX,
                 nextY,
                 run.MazeIndex,
-                effectiveOverrideMapId,
+                templateMapId,
                 run.BossMapPos);
             if (overrideMapId <= 0
                 && run.HellMode
@@ -248,6 +273,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                 FileLogger.Log($"[DungeonHandler] START_MAP hell override: room=({maze.X},{maze.Y}) map={maze.Index}");
             }
 
+            var isTournamentMap = _svc.Tournaments.TryProjectStartMap(
+                run,
+                maze,
+                out var tournamentMaze);
+            if (isTournamentMap)
+                maze = tournamentMaze;
+            var isBloodAltarMap = _svc.BloodAltars.IsBloodAltar(run);
+
             var roomKey = new RoomKey(maze.X, maze.Y, effectiveOverrideMapId);
 
             byte[] startMapBody;
@@ -258,6 +291,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var sentMapY = maze.Y;
             var sentActorCount = 0;
             var sentTrackedCount = 0;
+            var startMapRevisit = false;
 
             // 锁内绝不 await: 把 START_MAP 对 run 房间态(RoomKey/RoomStates/RoomKilledSeqIds/RoomMonsters/
             // MonsterCount)的整段读改写与队友击杀 relay(PropagateKillForClearAsync 在别的线程读这些结构)互斥,
@@ -268,17 +302,37 @@ namespace DfoServer.Network.Handlers.Dungeon
             run.RoomKey = roomKey;
             if (run.RoomStates.TryGetValue(roomKey, out var cached))
             {
+                startMapRevisit = true;
+                if (run.Tower == null && cached.InstanceRoom != null)
+                {
+                    cached.InstanceRoom.CopyKilledActorSequenceIdsTo(
+                        cached.KilledSeqIds,
+                        death => DungeonRoomTopology.IsTrackedForRoomProgress(
+                            death.ActorType));
+                }
                 run.RoomMonsters = cached.Maze.Monsters;
                 run.RoomStartSequence = cached.FirstSeqId;
                 run.RoomKilledSeqIds = cached.KilledSeqIds;
                 run.RoomLcg = cached.Lcg;
                 run.Seed = cached.Seed;
                 run.RoomKey = roomKey;
+                if (isTournamentMap
+                    && !_svc.Tournaments.TryBindFirstActorSequence(
+                        run,
+                        cached.FirstSeqId))
+                {
+                    throw new InvalidOperationException(
+                        "Tournament actor sequence changed on room revisit.");
+                }
                 if (cached.InstanceRoom != null)
                     run.SetCurrentRoom(cached.InstanceRoom);
                 DungeonMechanismCoordinator.RestoreRoomState(run, cached);
 
-                startMapBody = DungeonNotificationBuilder.BuildStartMapRevisit(cached.Maze, cached.Seed);
+                startMapBody = isBloodAltarMap
+                    ? Array.Empty<byte>()
+                    : DungeonNotificationBuilder.BuildStartMapRevisit(
+                        cached.Maze,
+                        cached.Seed);
                 sentMapId = cached.Maze.Index;
                 sentMapX = cached.Maze.X;
                 sentMapY = cached.Maze.Y;
@@ -302,14 +356,18 @@ namespace DfoServer.Network.Handlers.Dungeon
                     roomKey,
                     roomInstanceId =>
                     {
-                        var template = isHellPartyRoom
-                            ? BuildHellPartyStartMapMaze(
-                                session,
-                                run,
-                                maze,
-                                hellRoomInfo)
-                            : maze;
-                        if (!isHellPartyRoom)
+                        var template = isBloodAltarMap
+                            ? BuildBloodAltarStartMapMaze(maze)
+                            : isHellPartyRoom
+                                ? BuildHellPartyStartMapMaze(
+                                    session,
+                                    run,
+                                    maze,
+                                    hellRoomInfo)
+                                : maze;
+                        if (!isBloodAltarMap
+                            && !isHellPartyRoom
+                            && !isTournamentMap)
                         {
                             var removedNamedMonsters = NamedMonsterRoomFilter.Apply(
                                 run.Instance,
@@ -343,6 +401,21 @@ namespace DfoServer.Network.Handlers.Dungeon
                     },
                     out var instanceRoomCreated);
                 var startMapMaze = instanceRoom.Maze;
+                if (isTournamentMap
+                    && !_svc.Tournaments.TryBindFirstActorSequence(
+                        run,
+                        instanceRoom.FirstActorSequenceId))
+                {
+                    throw new InvalidOperationException(
+                        "Tournament actor sequence could not be bound.");
+                }
+                if (run.Tower == null)
+                {
+                    instanceRoom.CopyKilledActorSequenceIdsTo(
+                        killedSet,
+                        death => DungeonRoomTopology.IsTrackedForRoomProgress(
+                            death.ActorType));
+                }
                 var seed = instanceRoom.Seed;
                 run.RoomStartSequence = instanceRoom.FirstActorSequenceId;
                 run.Seed = seed;
@@ -362,6 +435,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     Lcg = lcg,
                 };
                 roomState.TryActivate();
+                if (instanceRoom.State == DungeonRoomState.Cleared)
+                    roomState.TryClear();
                 run.RoomStates[roomKey] = roomState;
                 run.SetCurrentRoom(instanceRoom);
                 DungeonEncounterApplicationService.Apply(
@@ -372,10 +447,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                             session.Player.CharacterId,
                             "start_map encounter"),
                         DungeonEncounterDirectiveKind.Start));
-                DungeonMechanismCoordinator.OnRoomStateCreated(
-                    session,
-                    run,
-                    roomState);
+                if (!isBloodAltarMap)
+                {
+                    DungeonMechanismCoordinator.OnRoomStateCreated(
+                        session,
+                        run,
+                        roomState);
+                }
                 FileLogger.Log(
                     $"[DungeonHandler] ROOM_INSTANCE: instance={run.PartyDungeonInstanceId} " +
                     $"room={instanceRoom.RoomInstanceId} created={instanceRoomCreated} " +
@@ -403,9 +481,12 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 // df_game_r：掉落物序号使用独立随机计数，和怪物序号分离。
                 var itemSeqCounter = (ushort)ServerRandom.Next(60000);
-                var extraEntries = GeneratePassiveObjectDrops(
-                    run.DungeonId, run.MazeIndex,
-                    ref itemSeqCounter);
+                var extraEntries = isBloodAltarMap
+                    ? null
+                    : GeneratePassiveObjectDrops(
+                        run.DungeonId,
+                        run.MazeIndex,
+                        ref itemSeqCounter);
 
                 if (extraEntries != null)
                 {
@@ -413,19 +494,26 @@ namespace DfoServer.Network.Handlers.Dungeon
                         run.Drops[e.GlobalSeq] = e.ToDropInfo();
                 }
 
-                var ridableForRoom = GetRidableEntriesForRoom(
-                    run,
-                    maze.X,
-                    maze.Y);
+                var ridableForRoom = isBloodAltarMap
+                    ? null
+                    : GetRidableEntriesForRoom(
+                        run,
+                        maze.X,
+                        maze.Y);
                 var hellPartyMapMode = run.HellMode ? run.HellPartyMode : (byte)0;
                 var startMapFogFlag = run.HellMode ? (byte)1 : (byte)0;
 
-                startMapBody = DungeonNotificationBuilder.BuildStartMap(startMapMaze, run.RoomStartSequence, (int)seed,
-                    layeredRoomFlag: layeredFlag,
-                    hellPartyMode: hellPartyMapMode,
-                    hellPartyFogFlag: startMapFogFlag,
-                    extraEntries: extraEntries,
-                    ridableEntries: ridableForRoom);
+                startMapBody = isBloodAltarMap
+                    ? Array.Empty<byte>()
+                    : DungeonNotificationBuilder.BuildStartMap(
+                        startMapMaze,
+                        run.RoomStartSequence,
+                        (int)seed,
+                        layeredRoomFlag: layeredFlag,
+                        hellPartyMode: hellPartyMapMode,
+                        hellPartyFogFlag: startMapFogFlag,
+                        extraEntries: extraEntries,
+                        ridableEntries: ridableForRoom);
                 sentMapId = startMapMaze.Index;
                 sentMapX = startMapMaze.X;
                 sentMapY = startMapMaze.Y;
@@ -437,10 +525,43 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             CacheResolvedStartMapId(run, sentMapX, sentMapY, sentMapId);
 
-            var roomIdentity = run.CaptureRoomIdentity();
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x001D, startMapBody));
+            var roomIdentity = run.CaptureParticipantRoomIdentity();
+            if (isBloodAltarMap)
+            {
+                var failureReason = string.Empty;
+                if (sentMapId <= 0
+                    || sentMapId > ushort.MaxValue
+                    || !_svc.BloodAltars.TryBindMap(
+                        run,
+                        sentMapId,
+                        roomIdentity,
+                        out _,
+                        out failureReason))
+                {
+                    if (string.IsNullOrEmpty(failureReason))
+                        failureReason = "blood altar map id is out of range";
+                    FileLogger.Log(
+                        $"[BloodAltar] START_BLOOD_MAP rejected: " +
+                        $"cid={session.Player.CharacterId} map={sentMapId} " +
+                        $"reason={failureReason}");
+                    return null;
+                }
+
+                startMapBody = BloodAltarPacketBuilder.BuildStartMap(
+                    (byte)Math.Max(0, Math.Min(byte.MaxValue, sentMapX)),
+                    (byte)Math.Max(0, Math.Min(byte.MaxValue, sentMapY)),
+                    run.Seed,
+                    (ushort)sentMapId,
+                    startMapRevisit);
+            }
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                isBloodAltarMap
+                    ? (ushort)NotiPacketType.START_BLOOD_MAP
+                    : (ushort)NotiPacketType.START_MAP,
+                startMapBody));
             if (!session.Player.IsCurrentDungeonRun(runIdentity)
-                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+                || !session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
             {
                 return null;
             }
@@ -464,7 +585,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"job={session.Player.Job} grow={session.Player.GrowType}");
             }
             if (!session.Player.IsCurrentDungeonRun(runIdentity)
-                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+                || !session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
             {
                 return null;
             }
@@ -477,26 +598,75 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"override={effectiveOverrideMapId} selectedStart=({run.MazeStartX},{run.MazeStartY}) " +
                         $"selectedStartMap={run.MazeStartMapId} actors={sentActorCount} tracked={sentTrackedCount}");
             }
-            await DungeonMechanismCoordinator.OnStartMapSentAsync(
-                session,
-                roomIdentity);
+            if (!isBloodAltarMap)
+            {
+                await DungeonMechanismCoordinator.OnStartMapSentAsync(
+                    session,
+                    roomIdentity);
+            }
             if (!session.Player.IsCurrentDungeonRun(runIdentity)
-                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+                || !session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
             {
                 return null;
+            }
+
+            var tournament = run.Instance.Mechanisms.Tournament;
+            if (tournament != null
+                && sentMapId == tournament.Definition.MapId)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketType.TOURNAMENT_INFO,
+                    TournamentPacketBuilder.BuildTournamentInfo(
+                        tournament,
+                        run.Difficulty,
+                        run.RoomStartSequence)));
+                if (!session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
+                    return null;
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketType.TOURNAMENT_MAP_INFO,
+                    TournamentPacketBuilder.BuildTournamentMapInfo(
+                        (byte)sentMapX,
+                        (byte)sentMapY,
+                        run.Seed,
+                        (ushort)tournament.Definition.MapId,
+                        revisit: !isFirstRunStartMap)));
+                if (!session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
+                    return null;
+                FileLogger.Log(
+                    $"[Tournament] START_MAP projection sent: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"dungeon={run.DungeonId} map={sentMapId} " +
+                    $"firstSeq={run.RoomStartSequence} " +
+                    $"revisit={!isFirstRunStartMap}");
             }
 
             if (hellPartyMonsterInfoAfterStartMap != null && hellPartyMonsterInfoAfterStartMap.Count > 0)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x02A6,
                     DungeonNotificationBuilder.BuildHellPartyMonsterInfo(hellPartyMonsterInfoAfterStartMap)));
-                if (!session.Player.IsCurrentDungeonRoom(roomIdentity))
+                if (!session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
                     return null;
                 FileLogger.Log($"[DungeonHandler] HELLPARTY monster info sent after hell START_MAP: entries={hellPartyMonsterInfoAfterStartMap.Count} actorLevels={string.Join(",", hellPartyMonsterInfoAfterStartMap.Select(x => $"{x.Key}:{x.Value}"))}");
             }
 
             return roomIdentity;
         }
+
+        private static DungeonData.MazeSumInfo BuildBloodAltarStartMapMaze(
+            DungeonData.MazeSumInfo maze)
+            => new DungeonData.MazeSumInfo
+            {
+                Index = maze.Index,
+                X = maze.X,
+                Y = maze.Y,
+                Monsters = new List<DungeonData.MonsterSumInfo>(),
+                EventMonsterPositions =
+                    Array.Empty<EventMonsterPositionInfo>(),
+                SpecialPassiveObjects =
+                    Array.Empty<SpecialPassiveObjectInfo>(),
+            };
 
         private static string FormatStartMapActorSummary(
             DungeonData.MazeSumInfo maze,
@@ -699,7 +869,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (maze.Monsters == null)
                 return 0;
 
-            return maze.Monsters.Count(monster => monster.Type != 9);
+            return maze.Monsters.Count(monster =>
+                DungeonRoomTopology.IsTrackedForRoomProgress(monster.Type));
         }
 
         private static bool TryGetCurrentRoomState(EnhancedClientSession session, out RoomState roomState)
@@ -749,47 +920,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             return Task.CompletedTask;
-        }
-
-        internal static List<RidableObjectSpawnEntry> InitRidableObjects(MazeInfo maze)
-        {
-            var result = new List<RidableObjectSpawnEntry>();
-            if (maze.RidableScript == null || maze.RidableScript.Objects.Count == 0)
-                return result;
-
-            var script = maze.RidableScript;
-            var candidates = new List<RidableObject>(script.Objects);
-
-            if (script.SelectCount > 0 && script.SelectCount < candidates.Count)
-            {
-                for (int i = candidates.Count - 1; i > 0; i--)
-                {
-                    int j = ServerRandom.Next(i + 1);
-                    var tmp = candidates[i];
-                    candidates[i] = candidates[j];
-                    candidates[j] = tmp;
-                }
-                candidates = candidates.GetRange(0, script.SelectCount);
-            }
-
-            foreach (var obj in candidates)
-            {
-                result.Add(new RidableObjectSpawnEntry
-                {
-                    ObjectIndex = obj.ObjectIndex,
-                    MonsterIndex = 0,
-                    PosX = obj.PosX,
-                    PosY = obj.PosY,
-                    Faction = obj.Faction,
-                    MapX = (byte)obj.MapX,
-                    MapY = (byte)obj.MapY,
-                });
-            }
-
-            if (result.Count > 0)
-                FileLogger.Log($"[DungeonHandler] RIDABLE: selected {result.Count}/{script.Objects.Count} objects (select={script.SelectCount})");
-
-            return result;
         }
 
         private static List<RidableObjectSpawnEntry> GetRidableEntriesForRoom(

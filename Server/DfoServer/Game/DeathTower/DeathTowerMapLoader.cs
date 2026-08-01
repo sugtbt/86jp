@@ -61,7 +61,7 @@ namespace DfoServer.Game.DeathTower
             IReadOnlyList<StageMonster> monsters)
         {
             var result = new List<StageTowerItem>();
-            if (tower == null || monsters == null)
+            if (tower == null || monsters == null || !tower.Config.ItemDropsEnabled)
                 return result;
 
             foreach (var monster in monsters)

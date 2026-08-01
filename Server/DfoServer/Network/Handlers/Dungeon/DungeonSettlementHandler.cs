@@ -2,6 +2,7 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Currency;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Dungeon.BloodAltar;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Premium;
 using DfoServer.Game.Progression;
@@ -22,6 +23,10 @@ namespace DfoServer.Network.Handlers.Dungeon
     {
         private readonly DungeonSharedServices _svc;
         private readonly DungeonEntryHandler _entry;
+        private Func<EnhancedClientSession, DungeonRun, Task>
+            _bloodAltarClearedProjection;
+        private Func<EnhancedClientSession, GamePacketHeader, byte[], Task<bool>>
+            _bloodAltarEplpHandler;
 
         private const int SetPlayResultRankPointOffset = 10;
         // 成长之契约经验加成从 PVF premiumlist_new.etc 读取(PremiumEffectProvider)。
@@ -36,6 +41,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             _entry = entry;
         }
 
+        internal void ConfigureBloodAltarPresentation(
+            Func<EnhancedClientSession, DungeonRun, Task> clearedProjection,
+            Func<EnhancedClientSession, GamePacketHeader, byte[], Task<bool>>
+                eplpHandler)
+        {
+            _bloodAltarClearedProjection = clearedProjection
+                ?? throw new ArgumentNullException(nameof(clearedProjection));
+            _bloodAltarEplpHandler = eplpHandler
+                ?? throw new ArgumentNullException(nameof(eplpHandler));
+        }
+
         // Settlement result.
         // df_game_r CParty::CheckPlayResult -> CParty::SetPlayResult
         // Sends 3 NOTI packets (34, 37, 35) to show the settlement screen.
@@ -45,56 +61,358 @@ namespace DfoServer.Network.Handlers.Dungeon
         // (the client shows a 3 s countdown; 4 s on the server gives it room to finish).
         // If the player presses a key before the layout timer fires, the layout
         // is sent immediately and a fresh 3 s auto-flip timer starts.
-        internal async Task HandleSetPlayResult(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        internal async Task HandleSetPlayResult(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
         {
-            var run = session.Player.CurrentRun;
-            if (run == null) return;
-            if (!run.RewardPolicy.AllowsSettlement) return;
-            if (run.RunState != DungeonRunState.Cleared) return;
-            if (run.SettlementState != DungeonSettlementState.NotStarted
-                && run.SettlementState != DungeonSettlementState.Preparing)
+            var run = session?.Player?.CurrentRun;
+            if (run == null)
+                return;
+            if (_svc.BloodAltars.IsBloodAltar(run))
+            {
+                FileLogger.Log(
+                    $"[BloodAltar] SET_PLAY_RESULT ignored: " +
+                    $"cid={session.Player.CharacterId} run={run.RunId}");
+                return;
+            }
+
+            var presentationRankPoint = ExtractClientRankPoint(body);
+            if (run.TryQueueSettlementPresentation(presentationRankPoint))
+            {
+                FileLogger.Log(
+                    $"[DungeonHandler] SET_PLAY_RESULT queued until clear commit: " +
+                    $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
+                    $"rank={presentationRankPoint}");
+                return;
+            }
+
+            await ProjectSettlementPresentationAsync(
+                session,
+                run,
+                presentationRankPoint);
+        }
+
+        private async Task ProjectSettlementPresentationAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            int presentationRankPoint)
+        {
+            if (session?.Player == null
+                || run == null
+                || run.ClearedFact?.PresentationKind
+                    == DungeonClearPresentationKind.BloodAltar
+                || !run.RewardPolicy.AllowsSettlement
+                || run.RunState != DungeonRunState.Cleared
+                || run.SettlementState != DungeonSettlementState.Preparing)
             {
                 return;
             }
 
-            var settlementEffectId = new DungeonEffectId(
-                run.GetSettlementSourceEventId(),
-                "settlement-preparation",
-                DungeonEffectScope.Player,
-                run.RunId);
-            if (!run.Effects.TryReserve(
-                    settlementEffectId,
-                    out var settlementReservation))
+            var settlement = run.SettlementRuntime;
+            var authoritativeEffectId = GetAuthoritativeSettlementEffectId(run);
+            if (settlement == null
+                || run.Effects.GetState(authoritativeEffectId)
+                    != DungeonEffectState.Committed)
             {
+                FileLogger.Log(
+                    $"[DungeonHandler] SET_PLAY_RESULT rejected before authoritative " +
+                    $"settlement commit: instance={run.PartyDungeonInstanceId} " +
+                    $"run={run.RunId}");
                 return;
             }
-            if (!run.TryBeginSettlementPreparation()
-                && !run.CanResumeSettlementPreparation())
+
+            var presentationEffectId = GetSettlementPresentationEffectId(run);
+            if (!run.Effects.TryReserve(
+                    presentationEffectId,
+                    out var presentationReservation))
             {
-                run.Effects.TryFail(settlementReservation);
                 return;
             }
 
             var identity = run.CaptureIdentity();
             try
             {
+                CapturePresentationRank(settlement, presentationRankPoint);
+                if (!await ExecuteSettlementProjectionEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "play-result-notification",
+                        async () => await session.SendPacketAsync(
+                            GamePacketEnvelopeBuilder.Build(
+                                0x00,
+                                0x0022,
+                                DungeonNotificationBuilder.BuildPlayResult(
+                                    session.Player.UserId,
+                                    settlement.ClearTimeMilliseconds,
+                                    rankIndex: unchecked((byte)
+                                        settlement.PresentationRankBonusIndex),
+                                    timeBonusPoint: (byte)Math.Max(
+                                        0,
+                                        Math.Min(255, settlement.TimeBonusPoint)),
+                                    clientRankPoint:
+                                        settlement.ClientRankPoint))))
+                    || !await ExecuteSettlementProjectionEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "experience-notification",
+                        async () => await _svc.ProgressNotifications
+                            .SendExpGrantNotificationAsync(
+                                session,
+                                settlement.ExperienceGrant,
+                                "SET_PLAY_RESULT",
+                                reloadMissingAccountProgress: true))
+                    || !await ExecuteSettlementProjectionEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "clear-reward-notification",
+                        async () => await session.SendPacketAsync(
+                            GamePacketEnvelopeBuilder.Build(
+                                0x00,
+                                0x0023,
+                                DungeonNotificationBuilder.BuildClearDungeonReward(
+                                    settlement.ClearBaseExp,
+                                    scoreBonusExp: ToInt32Saturated(
+                                        settlement.ScoreBonusExp),
+                                    clearBonusExp: 0,
+                                    blackDiamondExp: ToInt32Saturated(
+                                        settlement.BlackDiamondBonusExp),
+                                    growthContractExp: ToInt32Saturated(
+                                        settlement.GrowthContractBonusExp),
+                                    monsterGrowthContractExp: ToInt32Saturated(
+                                        settlement.MonsterGrowthContractBonusExp),
+                                    adventureGroupExp: ToInt32Saturated(
+                                        settlement.AdventureGroupBonusExp),
+                                    monsterExp: settlement.MonsterTotalExp,
+                                    bossExp: ToInt32Saturated(
+                                        settlement.BossTotalExp),
+                                    championExp: ToInt32Saturated(
+                                        settlement.ChampionTotalExp),
+                                    superChampionExp: 0,
+                                    freeCardGold: settlement.FreeGold.GoldAmount,
+                                    freeCardItemId: settlement.FreeItem.ItemId,
+                                    freeCardItemCount: settlement.FreeItem.StackCount,
+                                    paidCardCost: settlement.PaidCardCost)))))
+                {
+                    run.Effects.TryFail(presentationReservation);
+                    return;
+                }
+
+                if (settlement.IsTowerOfDespair)
+                {
+                    if (!await ExecuteSettlementProjectionEffectAsync(
+                            session,
+                            run,
+                            identity,
+                            "tower-of-despair-inventory-notification",
+                            async () => await SendTowerOfDespairInventoryUpdates(
+                                session,
+                                settlement.TowerGrantedRewards)))
+                    {
+                        run.Effects.TryFail(presentationReservation);
+                        return;
+                    }
+
+                    if (TryBuildTowerOfDespairClearRewardWithTime(
+                            run.DungeonId,
+                            (uint)Math.Max(0, settlement.ClearTimeMilliseconds),
+                            settlement.TowerGrantedRewards
+                                .Select(reward => reward.Reward)
+                                .ToArray(),
+                            out var towerClearReward)
+                        && !await ExecuteSettlementProjectionEffectAsync(
+                            session,
+                            run,
+                            identity,
+                            "tower-of-despair-clear-notification",
+                            async () => await session.SendPacketAsync(
+                                GamePacketEnvelopeBuilder.Build(
+                                    0x00,
+                                    0x015C,
+                                    towerClearReward))))
+                    {
+                        run.Effects.TryFail(presentationReservation);
+                        return;
+                    }
+                }
+
+                if (!await ExecuteSettlementProjectionEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "linked-dungeon-notification",
+                        async () => await SendLinkedDungeonInfoAsync(session, run)))
+                {
+                    run.Effects.TryFail(presentationReservation);
+                    return;
+                }
+
+                if (settlement.ExperienceGrant?.LeveledUp == true
+                    && !await ExecuteSettlementProjectionEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "level-up-followup-notification",
+                        async () => await _svc.ProgressNotifications
+                            .SendInDungeonLevelUpFollowups(session)))
+                {
+                    run.Effects.TryFail(presentationReservation);
+                    return;
+                }
+
+                if (settlement.DungeonPermissionChanged
+                    && !await ExecuteSettlementProjectionEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "dungeon-permission-notification",
+                        () => SendDungeonPermissionUpdateAsync(
+                            session,
+                            settlement.DungeonPermissionEntries)))
+                {
+                    run.Effects.TryFail(presentationReservation);
+                    return;
+                }
+
+                if (settlement.ShouldScheduleCardRewardFlow
+                    && !await ExecuteSettlementProjectionEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "card-flow-schedule",
+                        () =>
+                        {
+                            run.CardFlipCount = 0;
+                            run.FreeCardSlots =
+                                new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+                            run.PaidCardSlots =
+                                new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+                            run.FreeCardRewardDelivered = false;
+                            run.PaidCardRewardDelivered = false;
+                            _svc.CardRewards.ScheduleAutoFlow(
+                                session,
+                                layoutDelayMs: 2000,
+                                autoFlipDelayMs: 4000);
+                            return Task.CompletedTask;
+                        }))
+                {
+                    run.Effects.TryFail(presentationReservation);
+                    return;
+                }
+
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] CLEAR_EXP: " +
+                    $"dungeon={run.DungeonId} diff={run.Difficulty} " +
+                    $"clientRank={settlement.ClientRankPoint} " +
+                    $"rewardRank={settlement.RankPoint} " +
+                    $"rewardRankBonusIndex={settlement.RankBonusIndex} " +
+                    $"base={settlement.ClearBaseExp} " +
+                    $"scoreBonus={settlement.ScoreBonusExp} " +
+                    $"total={settlement.ClearTotalExp} " +
+                    $"charExp={session.Player.Exp}");
+
+                if (!session.Player.IsCurrentDungeonRun(identity)
+                    || !run.TryMarkResultShown())
+                {
+                    run.Effects.TryFail(presentationReservation);
+                    return;
+                }
+
+                if (!settlement.ShouldScheduleCardRewardFlow)
+                    run.TryCompleteSettlement();
+
+                if (!run.Effects.TryCommit(presentationReservation))
+                    throw new InvalidOperationException(
+                        "Settlement presentation reservation was lost.");
+            }
+            catch (Exception ex)
+            {
+                run.Effects.TryFail(presentationReservation);
+                FileLogger.Log(
+                    $"[DungeonHandler] SET_PLAY_RESULT projection failed: " +
+                    $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
+                    $"event={presentationEffectId.SourceEventId:N} " +
+                    $"error={ex.Message}");
+            }
+        }
+
+        internal async Task RecoverPendingSettlementPresentationAsync(
+            EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run == null
+                || run.ClearedFact?.PresentationKind
+                    == DungeonClearPresentationKind.BloodAltar
+                || !run.TryGetPendingSettlementPresentation(
+                    out var presentationRankPoint))
+            {
+                return;
+            }
+
+            await ProjectSettlementPresentationAsync(
+                session,
+                run,
+                presentationRankPoint);
+            if (run.Effects.GetState(GetSettlementPresentationEffectId(run))
+                == DungeonEffectState.Committed)
+            {
+                run.TryAcknowledgePendingSettlementPresentation(
+                    presentationRankPoint);
+            }
+        }
+
+        private async Task<bool> PrepareSettlementFromClearAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonClearedFact clearFact)
+        {
+            if (session?.Player == null
+                || run == null
+                || clearFact == null
+                || !run.RewardPolicy.AllowsSettlement)
+            {
+                return run != null && !run.RewardPolicy.AllowsSettlement;
+            }
+
+            var authoritativeEffectId = GetAuthoritativeSettlementEffectId(run);
+            if (!run.Effects.TryReserve(
+                    authoritativeEffectId,
+                    out var authoritativeReservation))
+            {
+                return run.Effects.GetState(authoritativeEffectId)
+                    == DungeonEffectState.Committed;
+            }
+
+            if (!run.TryBeginSettlementPreparationFromClear(clearFact)
+                && !run.CanResumeSettlementPreparationFromClear(clearFact))
+            {
+                run.Effects.TryFail(authoritativeReservation);
+                return false;
+            }
+
+            var identity = run.CaptureIdentity();
+            try
+            {
+                var settlement = run.SettlementRuntime;
+                if (settlement == null)
+                {
+                    settlement = BuildSettlementRuntime(session, run);
+                    run.SettlementRuntime = settlement;
+                }
+
                 if (!await ExecuteSettlementEffectAsync(
                         session,
                         run,
                         identity,
-                        "settlement-mechanism-preparing",
+                        "settlement-mechanism-clear",
                         async () => await DungeonMechanismCoordinator
-                            .OnResultPreparingAsync(session, run, body)))
+                            .OnDungeonClearedAsync(session, run)))
                 {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
-                }
-
-                var settlement = run.SettlementRuntime;
-                if (settlement == null)
-                {
-                    settlement = BuildSettlementRuntime(session, run, body);
-                    run.SettlementRuntime = settlement;
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
                 }
 
                 if (settlement.IsTowerOfDespair
@@ -124,8 +442,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                             return Task.CompletedTask;
                         }))
                 {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
                 }
 
                 if (!await ExecuteSettlementEffectAsync(
@@ -141,129 +459,28 @@ namespace DfoServer.Network.Handlers.Dungeon
                                     run,
                                     settlement);
                             return Task.CompletedTask;
-                        })
-                    || !await ExecuteSettlementEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        "play-result-notification",
-                        async () => await session.SendPacketAsync(
-                            GamePacketEnvelopeBuilder.Build(
-                                0x00,
-                                0x0022,
-                                DungeonNotificationBuilder.BuildPlayResult(
-                                    session.Player.UserId,
-                                    settlement.ClearTimeMilliseconds,
-                                    rankIndex: (byte)settlement.RankBonusIndex,
-                                    timeBonusPoint: (byte)Math.Max(
-                                        0,
-                                        Math.Min(255, settlement.TimeBonusPoint)),
-                                    clientRankPoint:
-                                        settlement.ClientRankPoint))))
-                    || !await ExecuteSettlementEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        "experience-notification",
-                        async () => await _svc.ProgressNotifications.SendExpGrantNotificationAsync(
-                            session,
-                            settlement.ExperienceGrant,
-                            "SET_PLAY_RESULT",
-                            reloadMissingAccountProgress: true))
-                    || !await ExecuteSettlementEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        "clear-reward-notification",
-                        async () => await session.SendPacketAsync(
-                            GamePacketEnvelopeBuilder.Build(
-                                0x00,
-                                0x0023,
-                                DungeonNotificationBuilder
-                                    .BuildClearDungeonReward(
-                                        settlement.ClearBaseExp,
-                                        scoreBonusExp: ToInt32Saturated(
-                                            settlement.ScoreBonusExp),
-                                        clearBonusExp: 0,
-                                        blackDiamondExp: ToInt32Saturated(
-                                            settlement.BlackDiamondBonusExp),
-                                        growthContractExp: ToInt32Saturated(
-                                            settlement.GrowthContractBonusExp),
-                                        monsterGrowthContractExp:
-                                            ToInt32Saturated(
-                                                settlement
-                                                    .MonsterGrowthContractBonusExp),
-                                        adventureGroupExp: ToInt32Saturated(
-                                            settlement.AdventureGroupBonusExp),
-                                        monsterExp: settlement.MonsterTotalExp,
-                                        bossExp: ToInt32Saturated(
-                                            settlement.BossTotalExp),
-                                        championExp: ToInt32Saturated(
-                                            settlement.ChampionTotalExp),
-                                        superChampionExp: 0,
-                                        freeCardGold:
-                                            settlement.FreeGold.GoldAmount,
-                                         freeCardItemId:
-                                             settlement.FreeItem.ItemId,
-                                         freeCardItemCount:
-                                             settlement.FreeItem.StackCount,
-                                         paidCardCost:
-                                             settlement.PaidCardCost)))))
+                        }))
                 {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
                 }
 
-                if (settlement.IsTowerOfDespair)
-                {
-                    if (!await ExecuteSettlementEffectAsync(
-                            session,
-                            run,
-                            identity,
-                            "tower-of-despair-reward-persistence",
-                            () =>
-                            {
-                                GrantAndPersistTowerOfDespairRewards(
-                                    session,
-                                    settlement);
-                                return Task.CompletedTask;
-                            })
-                        || !await ExecuteSettlementEffectAsync(
-                            session,
-                            run,
-                            identity,
-                            "tower-of-despair-inventory-notification",
-                            async () => await SendTowerOfDespairInventoryUpdates(
+                if (settlement.IsTowerOfDespair
+                    && !await ExecuteSettlementEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        "tower-of-despair-reward-persistence",
+                        () =>
+                        {
+                            GrantAndPersistTowerOfDespairRewards(
                                 session,
-                                settlement.TowerGrantedRewards)))
-                    {
-                        run.Effects.TryFail(settlementReservation);
-                        return;
-                    }
-
-                    if (TryBuildTowerOfDespairClearRewardWithTime(
-                            run.DungeonId,
-                            (uint)Math.Max(
-                                0,
-                                settlement.ClearTimeMilliseconds),
-                            settlement.TowerGrantedRewards
-                                .Select(reward => reward.Reward)
-                                .ToArray(),
-                            out var towerClearReward)
-                        && !await ExecuteSettlementEffectAsync(
-                            session,
-                            run,
-                            identity,
-                            "tower-of-despair-clear-notification",
-                            async () => await session.SendPacketAsync(
-                                GamePacketEnvelopeBuilder.Build(
-                                    0x00,
-                                    0x015C,
-                                    towerClearReward))))
-                    {
-                        run.Effects.TryFail(settlementReservation);
-                        return;
-                    }
+                                settlement);
+                            return Task.CompletedTask;
+                        }))
+                {
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
                 }
 
                 if (!await ExecuteSettlementEffectAsync(
@@ -283,70 +500,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                             }
                         }))
                 {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
                 }
 
                 _svc.PersistentMechanisms.ConfigureLinkedChallenge(run);
-                if (!await ExecuteSettlementEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        "linked-dungeon-notification",
-                        async () => await SendLinkedDungeonInfoAsync(
-                            session,
-                            run)))
-                {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
-                }
-
-                FileLogger.Log(
-                    $"[{DungeonSharedServices.ProtocolLogName}] CLEAR_EXP: " +
-                    $"dungeon={run.DungeonId} diff={run.Difficulty} " +
-                    $"clientRank={settlement.ClientRankPoint} " +
-                    $"rankPoint={settlement.RankPoint} " +
-                    $"rankGrade={settlement.RankGrade} " +
-                    $"rankBonusIndex={settlement.RankBonusIndex} " +
-                    $"base={settlement.ClearBaseExp} " +
-                    $"scoreBonus={settlement.ScoreBonusExp} " +
-                    $"growthContract={settlement.GrowthContractBonusExp} " +
-                    $"blackDiamond={settlement.BlackDiamondBonusExp} " +
-                    $"adventureGroup={settlement.AdventureGroupBonusExp} " +
-                    $"bonus={settlement.ClearBonusExp} " +
-                    $"total={settlement.ClearTotalExp} " +
-                    $"monsterTotalExp={settlement.MonsterTotalExp} " +
-                    $"monsterGrowthContract=" +
-                    $"{settlement.MonsterGrowthContractBonusExp} " +
-                    $"bossTotalExp={settlement.BossTotalExp} " +
-                    $"championTotalExp={settlement.ChampionTotalExp} " +
-                    $"superChampionTotalExp=" +
-                    $"{settlement.SuperChampionTotalExp} " +
-                    $"namedMonsterTotalExp={settlement.NamedMonsterTotalExp} " +
-                    $"charExp={session.Player.Exp}");
-
-                if (settlement.ExperienceGrant?.LeveledUp == true
-                    && !await ExecuteSettlementEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        "level-up-followup-notification",
-                        async () =>
-                        {
-                            FileLogger.Log(
-                                $"[{DungeonSharedServices.ProtocolLogName}] " +
-                                $"LEVEL UP from dungeon clear: " +
-                                $"cid={session.Player.CharacterId} " +
-                                $"{settlement.PreviousLevel}->" +
-                                $"{session.Player.Level} " +
-                                $"exp={session.Player.Exp}");
-                            await _svc.ProgressNotifications.SendInDungeonLevelUpFollowups(session);
-                        }))
-                {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
-                }
-
                 if (!await ExecuteSettlementEffectAsync(
                         session,
                         run,
@@ -365,15 +523,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                             }
                             return Task.CompletedTask;
                         })
-                    || (settlement.DungeonPermissionChanged
-                        && !await ExecuteSettlementEffectAsync(
-                            session,
-                            run,
-                            identity,
-                            "dungeon-permission-notification",
-                            () => SendDungeonPermissionUpdateAsync(
-                                session,
-                                settlement.DungeonPermissionEntries)))
                     || !await ExecuteSettlementEffectAsync(
                         session,
                         run,
@@ -382,88 +531,71 @@ namespace DfoServer.Network.Handlers.Dungeon
                         async () => await _svc.PersistentMechanisms
                             .ApplyDungeonClearAsync(session, run)))
                 {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
                 }
 
-                if (settlement.ShouldScheduleCardRewardFlow
-                    && !await ExecuteSettlementEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        "card-flow-schedule",
-                        () =>
-                        {
-                            run.CardFlipCount = 0;
-                            run.FreeCardSlots =
-                                new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
-                            run.PaidCardSlots =
-                                new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
-                            run.FreeCardRewardDelivered = false;
-                            run.PaidCardRewardDelivered = false;
-                            _svc.CardRewards.ScheduleAutoFlow(
-                                session,
-                                layoutDelayMs: 2000,
-                                autoFlipDelayMs: 4000);
-                            return Task.CompletedTask;
-                        }))
-                {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
-                }
+                if (!run.Effects.TryCommit(authoritativeReservation))
+                    throw new InvalidOperationException(
+                        "Authoritative settlement reservation was lost.");
 
-                if (!session.Player.IsCurrentDungeonRun(identity)
-                    || !run.TryMarkResultShown())
-                {
-                    run.Effects.TryFail(settlementReservation);
-                    return;
-                }
-
-                if (!settlement.ShouldScheduleCardRewardFlow)
-                    run.TryCompleteSettlement();
-
-                run.Effects.TryCommit(settlementReservation);
+                FileLogger.Log(
+                    $"[DungeonHandler] authoritative settlement committed: " +
+                    $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
+                    $"event={clearFact.SourceEventId:N} " +
+                    $"rewardRank={settlement.RankPoint} " +
+                    $"totalExp={settlement.ClearTotalExp}");
+                return true;
             }
             catch (Exception ex)
             {
-                run.Effects.TryFail(settlementReservation);
+                run.Effects.TryFail(authoritativeReservation);
                 FileLogger.Log(
-                    $"[DungeonHandler] SET_PLAY_RESULT effect failed: " +
+                    $"[DungeonHandler] authoritative settlement failed: " +
                     $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
-                    $"event={settlementEffectId.SourceEventId:N} error={ex.Message}");
-                throw;
+                    $"event={clearFact.SourceEventId:N} error={ex.Message}");
+                return false;
             }
         }
 
+        private static DungeonEffectId GetAuthoritativeSettlementEffectId(
+            DungeonRun run)
+            => new DungeonEffectId(
+                run.GetSettlementSourceEventId(),
+                "settlement-authoritative-commit",
+                DungeonEffectScope.Player,
+                run.RunId);
+
+        private static DungeonEffectId GetSettlementPresentationEffectId(
+            DungeonRun run)
+            => new DungeonEffectId(
+                run.GetSettlementSourceEventId(),
+                "settlement-presentation",
+                DungeonEffectScope.Player,
+                run.RunId);
+
         private DungeonSettlementRuntime BuildSettlementRuntime(
             EnhancedClientSession session,
-            DungeonRun run,
-            byte[] body)
+            DungeonRun run)
         {
             var isTowerOfDespair = DungeonData.TryGetTowerOfDespairFloor(
                 run.DungeonId,
                 out var towerOfDespairFloor);
-            var shouldScheduleCardRewardFlow =
-                ShouldScheduleCardRewardFlow(run.DungeonId);
-            var clearRank = CalculateClearRank(body);
+            var isBloodAltar = run.ClearedFact?.PresentationKind
+                == DungeonClearPresentationKind.BloodAltar;
+            var shouldScheduleCardRewardFlow = !isBloodAltar
+                && ShouldScheduleCardRewardFlow(run.DungeonId);
+            var dungeonLevel = DungeonData.GetDungeonBasicLv(run.DungeonId);
+            if (dungeonLevel <= 0)
+                throw new InvalidOperationException(
+                    $"Dungeon {run.DungeonId} has no valid basic level.");
+
+            var clearRank = CalculateAuthoritativeClearRank();
             var clearExp = CalculateClearRewardExp(
                 session,
                 run,
-                clearRank.RankBonusIndex);
-
-            var dungeonLevel = 85;
-            try
-            {
-                dungeonLevel = DungeonData.GetDungeonBasicLv(run.DungeonId);
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log(
-                    $"[DungeonHandler] SET_PLAY_RESULT ERROR: " +
-                    $"dungeon level fallback dungeon={run.DungeonId} " +
-                    $"default={dungeonLevel}, card rewards will use the " +
-                    $"fallback level: {ex.Message}");
-            }
+                clearRank.RankBonusIndex,
+                dungeonLevel);
 
             var lcg = run.RoomLcg ?? new DnfLcg(run.Seed);
             var instance = run.Instance;
@@ -545,12 +677,26 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             var monsterTotalExp = run.TotalExp;
+            var clearTimeMilliseconds = run.CalculateElapsedMilliseconds(
+                DateTime.UtcNow);
+            var bloodAltarSettlement = isBloodAltar
+                ? BuildBloodAltarSettlementRuntime(
+                    run,
+                    dungeonLevel,
+                    clearExp.Total,
+                    clearTimeMilliseconds,
+                    lcg)
+                : null;
             return new DungeonSettlementRuntime
             {
                 IsTowerOfDespair = isTowerOfDespair,
+                BloodAltar = bloodAltarSettlement,
                 TowerOfDespairFloor = towerOfDespairFloor,
                 ShouldScheduleCardRewardFlow = shouldScheduleCardRewardFlow,
                 ClientRankPoint = clearRank.ClientRankPoint,
+                PresentationRankPoint = clearRank.RankPoint,
+                PresentationRankGrade = clearRank.RankGrade,
+                PresentationRankBonusIndex = clearRank.RankBonusIndex,
                 TimeBonusPoint = clearRank.TimeBonusPoint,
                 RankPoint = clearRank.RankPoint,
                 RankGrade = clearRank.RankGrade,
@@ -582,8 +728,34 @@ namespace DfoServer.Network.Handlers.Dungeon
                     monsterTotalExp),
                 MonsterGrowthContractBonusExp =
                     run.MonsterGrowthContractBonusExp,
-                ClearTimeMilliseconds = CalculateClearTimeMs(run),
+                ClearTimeMilliseconds = clearTimeMilliseconds,
             };
+        }
+
+        private BloodAltarParticipantSettlementRuntime
+            BuildBloodAltarSettlementRuntime(
+                DungeonRun run,
+                int dungeonLevel,
+                uint rewardExperience,
+                int clearTimeMilliseconds,
+                DnfLcg lcg)
+        {
+            var altar = _svc.BloodAltars.GetRuntime(run)
+                ?? throw new InvalidOperationException(
+                    "Blood altar clear has no instance runtime.");
+            if (!altar.IsDungeonComplete)
+            {
+                throw new InvalidOperationException(
+                    "Blood altar settlement was requested before all rounds completed.");
+            }
+
+            return _svc.BloodAltarRewardPlanner.Prepare(
+                altar,
+                dungeonLevel,
+                run.Difficulty,
+                rewardExperience,
+                clearTimeMilliseconds,
+                lcg);
         }
 
         private ExperienceGrantResult GrantSettlementExperienceInTransaction(
@@ -803,9 +975,77 @@ namespace DfoServer.Network.Handlers.Dungeon
             return !DungeonData.TryGetTowerOfDespairFloor(dungeonId, out _);
         }
 
-        private static ClearRankParts CalculateClearRank(byte[] body)
+        private static ClearRankParts CalculateAuthoritativeClearRank()
+            => BuildClearRank(0);
+
+        internal static void CapturePresentationRank(
+            DungeonSettlementRuntime settlement,
+            byte[] body)
+            => CapturePresentationRank(
+                settlement,
+                ExtractClientRankPoint(body));
+
+        private static void CapturePresentationRank(
+            DungeonSettlementRuntime settlement,
+            int presentationRankPoint)
         {
-            var clientRankPoint = ExtractClientRankPoint(body);
+            if (settlement == null)
+                throw new ArgumentNullException(nameof(settlement));
+
+            var rank = BuildClearRank(presentationRankPoint);
+            settlement.ClientRankPoint = rank.ClientRankPoint;
+            settlement.PresentationRankPoint = rank.RankPoint;
+            settlement.PresentationRankGrade = rank.RankGrade;
+            settlement.PresentationRankBonusIndex = rank.RankBonusIndex;
+        }
+
+        internal static async Task<bool> ExecuteSettlementProjectionEffectAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonRunIdentity identity,
+            string effectKind,
+            Func<Task> execute)
+        {
+            if (session?.Player == null
+                || run == null
+                || execute == null
+                || !session.Player.IsCurrentDungeonRun(identity))
+            {
+                return false;
+            }
+
+            var effectId = new DungeonEffectId(
+                run.GetSettlementSourceEventId(),
+                effectKind,
+                DungeonEffectScope.Player,
+                run.RunId);
+            if (!run.Effects.TryReserve(effectId, out var reservation))
+            {
+                return run.Effects.GetState(effectId)
+                    == DungeonEffectState.Committed;
+            }
+
+            try
+            {
+                await execute();
+                if (!session.Player.IsCurrentDungeonRun(identity))
+                {
+                    run.Effects.TryFail(reservation);
+                    return false;
+                }
+
+                return run.Effects.TryCommit(reservation);
+            }
+            catch
+            {
+                run.Effects.TryFail(reservation);
+                throw;
+            }
+        }
+
+        private static ClearRankParts BuildClearRank(int rankPointValue)
+        {
+            var clientRankPoint = Math.Max(0, Math.Min(255, rankPointValue));
             var timeBonusPoint = 0;
             var rankPoint = Math.Min(255, clientRankPoint + timeBonusPoint);
             var rankGrade = MonsterRewardTable.GetClearRankGrade(rankPoint);
@@ -821,13 +1061,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private static int ExtractClientRankPoint(byte[] body)
         {
-            if (body == null || body.Length == 0)
+            if (body == null || body.Length <= SetPlayResultRankPointOffset)
                 return 0;
 
-            if (body.Length > SetPlayResultRankPointOffset)
-                return body[SetPlayResultRankPointOffset];
-
-            return body[0];
+            return body[SetPlayResultRankPointOffset];
         }
 
         private static int ReadInt32(byte[] body, int offset)
@@ -838,35 +1075,20 @@ namespace DfoServer.Network.Handlers.Dungeon
             return BitConverter.ToInt32(body, offset);
         }
 
-        private static int CalculateClearTimeMs(DungeonRun run)
-        {
-            if (run == null || run.StartedUtc == DateTime.MinValue)
-                return 0;
-
-            var elapsed = DateTime.UtcNow - run.StartedUtc;
-            if (elapsed <= TimeSpan.Zero)
-                return 0;
-            if (elapsed.TotalMilliseconds >= int.MaxValue)
-                return int.MaxValue;
-            return (int)Math.Round(elapsed.TotalMilliseconds);
-        }
-
         private ClearExpParts CalculateClearRewardExp(
             EnhancedClientSession session,
             DungeonRun run,
-            int rankBonusIndex)
+            int rankBonusIndex,
+            int dungeonLevel)
         {
-            int dungeonLevel;
-            try { dungeonLevel = DungeonData.GetDungeonBasicLv(run.DungeonId); }
-            catch (Exception ex) { dungeonLevel = session.Player.Level; FileLogger.Log($"[DungeonHandler] CLEAR_EXP ERROR: dungeon level fallback to player level {dungeonLevel}: {ex.Message}"); }
-
             var baseExp = ExpTableProvider.GetExpRewardBase(dungeonLevel);
             if (baseExp <= 0)
                 return default;
 
-            float expWeight;
-            try { expWeight = DungeonData.GetExperienceWeight(run.DungeonId); }
-            catch { expWeight = 1.0f; }
+            var expWeight = DungeonData.GetExperienceWeight(run.DungeonId);
+            if (expWeight < 0)
+                throw new InvalidOperationException(
+                    $"Dungeon {run.DungeonId} has an invalid experience weight.");
 
             var scaledBase = baseExp * expWeight * MonsterRewardTable.GetDifficultyExpRate(run.Difficulty);
             var clearBaseExp = ToUInt32Floor(scaledBase);
@@ -978,11 +1200,29 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal async Task HandleSelectCard(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
+            if (session?.Player?.CurrentRun?.ClearedFact?.PresentationKind
+                    == DungeonClearPresentationKind.BloodAltar)
+            {
+                return;
+            }
             await _svc.CardRewards.HandleSelectCard(session, body);
         }
 
         internal async Task HandleEplpCommand(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
+            if (await _svc.DeathTower.TryHandleEplpCommandAsync(
+                    session,
+                    header,
+                    body))
+            {
+                return;
+            }
+            if (_bloodAltarEplpHandler != null
+                && await _bloodAltarEplpHandler(session, header, body))
+            {
+                return;
+            }
+
             var run = session?.Player?.CurrentRun;
             if (run == null)
                 return;
@@ -1011,6 +1251,11 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal async Task HandleCardStartRequest(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
+            if (session?.Player?.CurrentRun?.ClearedFact?.PresentationKind
+                    == DungeonClearPresentationKind.BloodAltar)
+            {
+                return;
+            }
             await _svc.CardRewards.HandleCardStartRequest(session);
         }
 
@@ -1020,7 +1265,8 @@ namespace DfoServer.Network.Handlers.Dungeon
         // + NOTI 279 (0x0117) SECRET_SHOP_NPC: settlement mystery merchant NPC ID
         internal async Task SubmitClearIntentAsync(
             EnhancedClientSession session,
-            DungeonClearIntent intent)
+            DungeonClearIntent intent,
+            bool deferParticipantFanout = false)
         {
             var run = session?.Player?.CurrentRun;
             if (run == null || intent == null)
@@ -1031,6 +1277,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             if (!run.RewardPolicy.AllowsClearCommit)
                 return;
+            if (run.Instance.State == DungeonInstanceState.Ending
+                || run.Instance.State == DungeonInstanceState.Ended)
+            {
+                return;
+            }
 
             DungeonEncounterApplicationService.Apply(
                 run,
@@ -1048,59 +1299,206 @@ namespace DfoServer.Network.Handlers.Dungeon
             var clearFact = run.Instance.GetOrCreateClearedFact(
                 intent,
                 out var factCreated);
-            if (!run.TryBeginClearCommit(clearFact)
-                && !run.CanResumeClearCommit(clearFact))
+            var roster = CaptureClearParticipantRoster(session, run);
+            run.Instance.ParticipantEffects.TryFreeze(
+                clearFact.Source,
+                DungeonParticipantEffectAudience.Instance,
+                roster,
+                out _);
+
+            if (deferParticipantFanout)
                 return;
 
+            if (await ProcessClearForParticipantAsync(
+                    session,
+                    run,
+                    clearFact,
+                    factCreated))
+            {
+                await RelayClearToFrozenRosterAsync(
+                    session,
+                    run,
+                    clearFact);
+            }
+        }
+
+        internal async Task RecoverParticipantClearEffectsAsync(
+            EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            var clearFact = run?.Instance?.ClearedFact;
+            if (run == null || clearFact == null || run.Tower != null)
+                return;
+
+            var recoverable = run.Instance.ParticipantEffects
+                .GetRecoverableForParticipant(
+                    run.CaptureParticipantIdentity(),
+                    DungeonParticipantEffectAudience.Instance,
+                    DungeonParticipantEffectKinds.DungeonClear);
+            foreach (var work in recoverable)
+            {
+                if (work.Source.SourceEventId != clearFact.SourceEventId
+                    || !ReferenceEquals(work.Participant.Run, run)
+                    || !run.Matches(work.Participant.RunIdentity))
+                {
+                    continue;
+                }
+
+                if (await ProcessClearForParticipantAsync(
+                        session,
+                        run,
+                        clearFact,
+                        factCreated: false))
+                {
+                    await RelayClearToFrozenRosterAsync(
+                        session,
+                        run,
+                        clearFact);
+                }
+            }
+        }
+
+        private async Task<bool> ProcessClearForParticipantAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonClearedFact clearFact,
+            bool factCreated)
+        {
+            if (session?.Player == null
+                || run == null
+                || clearFact == null
+                || !ReferenceEquals(session.Player.CurrentRun, run))
+            {
+                return false;
+            }
+
+            var identity = run.CaptureIdentity();
+            var participant = FindParticipant(
+                run.Instance.ParticipantEffects.GetRoster(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Instance),
+                session.Player.CharacterId,
+                identity);
+            if (participant == null)
+            {
+                FileLogger.Log(
+                    $"[DungeonHandler] clear participant missing from frozen roster: " +
+                    $"cid={session.Player.CharacterId} event={clearFact.SourceEventId:N}");
+                return false;
+            }
+
+            var killParticipant = FindParticipant(
+                run.Instance.ParticipantEffects.GetRoster(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Room),
+                session.Player.CharacterId,
+                identity);
+            if (killParticipant != null
+                && run.Instance.ParticipantEffects.GetState(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Room,
+                    identity.ParticipantIdentity,
+                    DungeonParticipantEffectKinds.MonsterKill)
+                    != DungeonParticipantEffectState.Committed)
+            {
+                return false;
+            }
+
+            if (!run.Instance.ParticipantEffects.TryBegin(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Instance,
+                    participant,
+                    DungeonParticipantEffectKinds.DungeonClear,
+                    out var participantReservation,
+                    out var existingState))
+            {
+                return existingState == DungeonParticipantEffectState.Committed;
+            }
+
+            var participantSource = clearFact.Source.ForAffectedPlayer(
+                identity,
+                participant.RoomIdentity.IsValid
+                    ? participant.RoomIdentity.RoomInstanceId
+                    : run.CurrentRoomInstanceId > 0
+                        ? run.CurrentRoomInstanceId
+                        : null,
+                session.Player.CharacterId);
             var clearProjectionId = new DungeonEffectId(
                 clearFact.SourceEventId,
                 "dungeon-clear-projection",
                 DungeonEffectScope.Player,
                 run.RunId);
-            if (!run.Effects.TryReserve(clearProjectionId, out var clearReservation))
-                return;
-
-            var identity = run.CaptureIdentity();
+            DungeonEffectReservation clearReservation = default;
             try
             {
+                if (!run.TryBeginClearCommit(clearFact)
+                    && !run.CanResumeClearCommit(clearFact))
+                {
+                    var alreadyCommitted = run.RunState == DungeonRunState.Cleared
+                        && ReferenceEquals(run.ClearedFact, clearFact)
+                        && run.Effects.GetState(clearProjectionId)
+                            == DungeonEffectState.Committed;
+                    if (alreadyCommitted)
+                        run.Instance.ParticipantEffects.TryCommit(participantReservation);
+                    else
+                        run.Instance.ParticipantEffects.TryFail(participantReservation);
+                    return alreadyCommitted;
+                }
+                if (!run.Effects.TryReserve(clearProjectionId, out clearReservation))
+                {
+                    var alreadyCommitted = run.Effects.GetState(clearProjectionId)
+                        == DungeonEffectState.Committed
+                        && run.RunState == DungeonRunState.Cleared;
+                    if (alreadyCommitted)
+                        run.Instance.ParticipantEffects.TryCommit(participantReservation);
+                    else
+                        run.Instance.ParticipantEffects.TryFail(participantReservation);
+                    return alreadyCommitted;
+                }
+
                 if (clearFact.BossCode != 0)
                     run.BossCode = clearFact.BossCode;
 
-                var offer = run.SecretShopOffer ?? CreateSecretShopOffer(run);
-                run.SecretShopOffer = offer;
-
-                if (!await ExecuteClearEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        clearFact,
-                        "enable-clear-notification",
-                        async () => await session.SendPacketAsync(
-                            GamePacketEnvelopeBuilder.Build(
-                                0x00,
-                                0x001F,
-                                DungeonNotificationBuilder.BuildEnableClearDungeon()))))
+                var standardPresentation = clearFact.PresentationKind
+                    == DungeonClearPresentationKind.Standard;
+                var offer = standardPresentation
+                    ? run.SecretShopOffer ?? CreateSecretShopOffer(run)
+                    : null;
+                if (standardPresentation)
                 {
-                    run.Effects.TryFail(clearReservation);
-                    return;
-                }
-
-                if (!await ExecuteClearEffectAsync(
-                        session,
-                        run,
-                        identity,
-                        clearFact,
-                        "secret-shop-notification",
-                        async () =>
-                        {
-                            // This protocol has no ACK. A packet failure retries the
-                            // group; a connection loss may therefore replay a prefix.
-                            foreach (var packet in SecretShopClearPacketBuilder.Build(offer))
-                                await session.SendPacketAsync(packet);
-                        }))
-                {
-                    run.Effects.TryFail(clearReservation);
-                    return;
+                    run.SecretShopOffer = offer;
+                    if (!await ExecuteClearEffectAsync(
+                            session,
+                            run,
+                            identity,
+                            clearFact,
+                            "enable-clear-notification",
+                            async () => await session.SendPacketAsync(
+                                GamePacketEnvelopeBuilder.Build(
+                                    0x00,
+                                    0x001F,
+                                    DungeonNotificationBuilder
+                                        .BuildEnableClearDungeon())))
+                        || !await ExecuteClearEffectAsync(
+                            session,
+                            run,
+                            identity,
+                            clearFact,
+                            "secret-shop-notification",
+                            async () =>
+                            {
+                                foreach (var packet in
+                                    SecretShopClearPacketBuilder.Build(offer))
+                                {
+                                    await session.SendPacketAsync(packet);
+                                }
+                            }))
+                    {
+                        run.Effects.TryFail(clearReservation);
+                        run.Instance.ParticipantEffects.TryFail(
+                            participantReservation);
+                        return false;
+                    }
                 }
 
                 if (!await ExecuteClearEffectAsync(
@@ -1109,10 +1507,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                         identity,
                         clearFact,
                         "quest-clear-drop",
-                        async () => await _svc.QuestDrops.CheckDungeonClearReward(session)))
+                        async () => await _svc.QuestDrops.CheckDungeonClearReward(
+                            session,
+                            run,
+                            participantSource)))
                 {
                     run.Effects.TryFail(clearReservation);
-                    return;
+                    run.Instance.ParticipantEffects.TryFail(participantReservation);
+                    return false;
                 }
 
                 var currentMapId = ResolveCurrentMapId(run);
@@ -1127,10 +1529,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                             run.DungeonId,
                             currentMapId,
                             "dungeon_clear",
-                            clearFact.Source)))
+                            participantSource)))
                 {
                     run.Effects.TryFail(clearReservation);
-                    return;
+                    run.Instance.ParticipantEffects.TryFail(participantReservation);
+                    return false;
                 }
 
                 if (ShouldSyncQuestConnectedStartMapOnDungeonClear(run, currentMapId))
@@ -1147,49 +1550,247 @@ namespace DfoServer.Network.Handlers.Dungeon
                                 0,
                                 run.MazeStartMapId,
                                 "dungeon_clear_deferred_start_map",
-                                clearFact.Source)))
+                                participantSource)))
                     {
                         run.Effects.TryFail(clearReservation);
-                        return;
+                        run.Instance.ParticipantEffects.TryFail(participantReservation);
+                        return false;
                     }
                 }
 
-                if (!session.Player.IsCurrentDungeonRun(identity)
+                if (!await PrepareSettlementFromClearAsync(
+                        session,
+                        run,
+                        clearFact)
+                    || !session.Player.IsCurrentDungeonRun(identity)
                     || !run.TryCompleteClearCommit(clearFact))
                 {
                     run.Effects.TryFail(clearReservation);
-                    return;
+                    run.Instance.ParticipantEffects.TryFail(participantReservation);
+                    return false;
                 }
 
-                run.Effects.TryCommit(clearReservation);
+                if (!run.Effects.TryCommit(clearReservation)
+                    || !run.Instance.ParticipantEffects.TryCommit(participantReservation))
+                {
+                    throw new InvalidOperationException(
+                        "Dungeon clear effect reservation was lost before commit.");
+                }
+
+                if (clearFact.PresentationKind
+                        == DungeonClearPresentationKind.BloodAltar
+                    && _bloodAltarClearedProjection != null)
+                {
+                    await _bloodAltarClearedProjection(session, run);
+                }
+                else
+                {
+                    await RecoverPendingSettlementPresentationAsync(session);
+                }
+
                 run.Instance.Diagnostics.Record(
                     DungeonDiagnosticRecordKind.ClearCommit,
-                    clearFact.Source,
+                    participantSource,
                     "dungeon-clear-commit",
                     "committed",
                     clearFact.Reason);
-                var itemSummary = string.Join(",", offer.Items.Select(x => $"{x.ItemId}:price={x.Price}:count={x.Count}"));
+                var itemSummary = offer == null
+                    ? "disabled"
+                    : string.Join(",", offer.Items.Select(
+                        x => $"{x.ItemId}:price={x.Price}:count={x.Count}"));
                 FileLogger.Log(
                     $"[DungeonHandler] ClearDungeon: {clearFact.Reason} " +
                     $"event={clearFact.SourceEventId:N} factCreated={factCreated} " +
                     $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
-                    $"secretShopNpc={offer.NpcId} items=[{itemSummary}]");
+                    $"presentation={clearFact.PresentationKind} " +
+                    $"secretShopNpc={offer?.NpcId ?? 0} items=[{itemSummary}]");
+                return true;
             }
             catch (Exception ex)
             {
                 run.Effects.TryFail(clearReservation);
+                run.Instance.ParticipantEffects.TryFail(participantReservation);
                 run.Instance.Diagnostics.Record(
                     DungeonDiagnosticRecordKind.ClearCommit,
-                    clearFact.Source,
+                    participantSource,
                     "dungeon-clear-commit",
                     "failed",
                     ex.Message);
                 FileLogger.Log(
-                    $"[DungeonHandler] ClearDungeon effect failed: " +
+                    $"[DungeonHandler] ClearDungeon participant effect failed: " +
                     $"event={clearFact.SourceEventId:N} instance={run.PartyDungeonInstanceId} " +
                     $"run={run.RunId} error={ex.Message}");
-                throw;
+                return false;
             }
+        }
+
+        internal async Task CompleteDeferredClearFanoutAsync(
+            EnhancedClientSession sourceSession,
+            DungeonRun sourceRun,
+            Guid sourceEventId)
+        {
+            if (sourceRun == null)
+            {
+                return;
+            }
+
+            var clearFact = sourceRun.Instance.ClearedFact;
+            if (clearFact == null || clearFact.SourceEventId != sourceEventId)
+                return;
+
+            if (sourceSession?.Player != null
+                && ReferenceEquals(sourceSession.Player.CurrentRun, sourceRun))
+            {
+                await ProcessClearForParticipantAsync(
+                    sourceSession,
+                    sourceRun,
+                    clearFact,
+                    factCreated: false);
+            }
+
+            await RelayClearToFrozenRosterAsync(
+                sourceSession,
+                sourceRun,
+                clearFact);
+        }
+
+        private IReadOnlyList<DungeonParticipantRosterEntry>
+            CaptureClearParticipantRoster(
+                EnhancedClientSession sourceSession,
+                DungeonRun sourceRun)
+        {
+            var result = new List<DungeonParticipantRosterEntry>();
+            var seen = new HashSet<DungeonParticipantRunIdentity>();
+
+            void Add(
+                int characterId,
+                ushort participantUserId,
+                DungeonRun candidateRun,
+                long attachmentGeneration)
+            {
+                if (candidateRun == null
+                    || characterId <= 0
+                    || participantUserId == 0
+                    || !candidateRun.SharesPhysicalInstanceWith(sourceRun)
+                    || !candidateRun.TryCaptureCurrentRoomSnapshot(out var snapshot)
+                    || !seen.Add(snapshot.RunIdentity.ParticipantIdentity))
+                {
+                    return;
+                }
+
+                result.Add(new DungeonParticipantRosterEntry(
+                    characterId,
+                    participantUserId,
+                    candidateRun,
+                    snapshot.RunIdentity,
+                    snapshot.RoomIdentity,
+                    attachmentGeneration));
+            }
+
+            foreach (var participant in _svc.InstanceRegistry
+                         .CaptureInstanceParticipantRoster(
+                             sourceRun.CaptureInstanceIdentity()))
+            {
+                if (seen.Add(participant.RunIdentity.ParticipantIdentity))
+                    result.Add(participant);
+            }
+
+            var sourcePlayer = sourceSession?.Player;
+            if (sourcePlayer == null)
+                return result;
+
+            Add(
+                sourcePlayer.CharacterId,
+                sourcePlayer.UserId,
+                sourceRun,
+                attachmentGeneration: 0);
+
+            var partyManager = _svc.PartyManager;
+            var sessions = _svc.Sessions;
+            var party = partyManager?.GetPartyByUser(sourcePlayer.UserId);
+            if (party == null || sessions == null)
+                return result;
+
+            foreach (var member in party.MembersBySlot())
+            {
+                if (!sessions.TryGet(member.CharacterId, out var memberSession))
+                    continue;
+                var player = memberSession?.Player;
+                Add(
+                    member.CharacterId,
+                    player?.UserId ?? 0,
+                    player?.CurrentRun,
+                    attachmentGeneration: 0);
+            }
+
+            return result;
+        }
+
+        private async Task RelayClearToFrozenRosterAsync(
+            EnhancedClientSession sourceSession,
+            DungeonRun sourceRun,
+            DungeonClearedFact clearFact)
+        {
+            var sessions = _svc.Sessions;
+            if (sessions == null || clearFact == null)
+                return;
+
+            var sourceCharacterId = sourceSession?.Player?.CharacterId ?? 0;
+            var roster = sourceRun.Instance.ParticipantEffects.GetRoster(
+                clearFact.SourceEventId,
+                DungeonParticipantEffectAudience.Instance);
+            foreach (var participant in roster)
+            {
+                if (!sessions.TryGet(participant.CharacterId, out var memberSession)
+                    || memberSession?.Player?.CurrentRun == null
+                    || memberSession.TcpClient == null
+                    || !memberSession.TcpClient.Connected)
+                {
+                    continue;
+                }
+
+                var memberRun = memberSession.Player.CurrentRun;
+                if (!ReferenceEquals(memberRun, participant.Run)
+                    || !memberRun.Matches(participant.RunIdentity))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await ProcessClearForParticipantAsync(
+                        memberSession,
+                        memberRun,
+                        clearFact,
+                        factCreated: false);
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        $"[DungeonHandler] clear participant relay failed: " +
+                        $"source={sourceCharacterId} member={participant.CharacterId} " +
+                        $"event={clearFact.SourceEventId:N} error={ex.Message}");
+                }
+            }
+        }
+
+        private static DungeonParticipantRosterEntry FindParticipant(
+            IReadOnlyList<DungeonParticipantRosterEntry> roster,
+            int characterId,
+            DungeonRunIdentity runIdentity)
+        {
+            if (roster == null)
+                return null;
+
+            foreach (var participant in roster)
+            {
+                if (participant.CharacterId == characterId
+                    && participant.RunIdentity.Equals(runIdentity))
+                {
+                    return participant;
+                }
+            }
+            return null;
         }
 
         private static async Task<bool> ExecuteClearEffectAsync(
@@ -1484,41 +2085,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             DungeonRunIdentity runIdentity)
         {
-            if (!await DungeonRunLifecycle.EndRunAsync(
-                    session,
-                    DungeonRunEndReason.ReturnToTown,
-                    runIdentity,
-                    _svc.InstanceRegistry))
-            {
-                return;
-            }
-            if (!DungeonRunLifecycle.CanProjectTownState(session, runIdentity))
-                return;
-            session.Player.UserState = 0x00;
-
-            var snapshot = TownAreaNotificationBuilder.CreateCurrentSnapshot(session.Player);
-
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0003,
-                EnterSelectDungeonStateBuilder.BuildUserState(session.Player)));
-            if (!DungeonRunLifecycle.CanProjectTownState(session, runIdentity))
-                return;
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0017,
-                TownAreaNotificationBuilder.BuildUserArea(snapshot)));
-            if (!DungeonRunLifecycle.CanProjectTownState(session, runIdentity))
-                return;
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0018,
-                TownAreaNotificationBuilder.BuildAreaUsers(snapshot)));
-            if (!DungeonRunLifecycle.CanProjectTownState(session, runIdentity))
-                return;
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x00CA,
-                new byte[] { 0x00 }));
-            if (!DungeonRunLifecycle.CanProjectTownState(session, runIdentity))
-                return;
-            await _svc.ProgressNotifications.SendUserInfoSubtype0Broadcast(session);
-            if (!DungeonRunLifecycle.CanProjectTownState(session, runIdentity))
-                return;
-
-            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ReturnToVillage: town state + subtype0 sent");
+            await _svc.TownReturn.ReturnAsync(session, runIdentity);
         }
 
         private bool EnsureDungeonPermissionPlan(

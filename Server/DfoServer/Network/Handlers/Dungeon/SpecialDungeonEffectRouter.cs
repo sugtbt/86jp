@@ -7,10 +7,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 {
     internal sealed class SpecialDungeonEffectRouter
     {
-        private readonly SpecialDungeonNotificationSender _sender;
+        private readonly ISpecialDungeonNotificationSender _sender;
 
         internal SpecialDungeonEffectRouter(
-            SpecialDungeonNotificationSender sender = null)
+            ISpecialDungeonNotificationSender sender = null)
         {
             _sender = sender ?? new SpecialDungeonNotificationSender();
         }
@@ -42,6 +42,78 @@ namespace DfoServer.Network.Handlers.Dungeon
                     continue;
 
                 await _sender.SendAsync(session, effect);
+            }
+        }
+
+        internal async Task RoutePlanAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            SpecialDungeonEffectPlan plan,
+            bool allowEndingRun = false)
+        {
+            if (session == null
+                || run == null
+                || plan == null
+                || !run.Matches(plan.RunIdentity))
+            {
+                return;
+            }
+
+            foreach (var item in plan.Items)
+            {
+                if (!CanProject(session, run, allowEndingRun))
+                    return;
+
+                var state = run.Effects.GetState(item.EffectId);
+                if (state == DungeonEffectState.Committed)
+                    continue;
+                if (!run.Effects.TryReserve(
+                        item.EffectId,
+                        out var reservation))
+                {
+                    if (run.Effects.GetState(item.EffectId)
+                        == DungeonEffectState.Committed)
+                    {
+                        continue;
+                    }
+
+                    return;
+                }
+
+                try
+                {
+                    if (!ApplyStateEffect(run, item.Intent))
+                        await _sender.SendAsync(session, item.Intent);
+
+                    if (!run.Effects.TryCommit(reservation))
+                    {
+                        run.Effects.TryFail(reservation);
+                        throw new InvalidOperationException(
+                            "Special dungeon effect checkpoint commit failed.");
+                    }
+                }
+                catch
+                {
+                    run.Effects.TryFail(reservation);
+                    throw;
+                }
+            }
+        }
+
+        internal async Task RecoverAsync(
+            EnhancedClientSession session,
+            DungeonRun run)
+        {
+            if (!CanProject(session, run, allowEndingRun: false))
+                return;
+
+            var plans = run.SpecialDungeonEffectPlans.GetRecoverable(
+                run.Effects);
+            foreach (var plan in plans)
+            {
+                if (!CanProject(session, run, allowEndingRun: false))
+                    return;
+                await RoutePlanAsync(session, run, plan);
             }
         }
 

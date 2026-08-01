@@ -79,8 +79,10 @@ namespace DfoServer.SelfTests
                     5,
                     out _),
                 ref failures);
-            var finishSample = questService.HandleFinishQuest(CharacterId,
-                BuildQuestBody(SampleQuestId));
+            var finishSample = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                QuestSelfTestCommandAdapter.BuildFinishBody(SampleQuestId));
             Check("finishing last missing child succeeds", IsSuccessAck(finishSample), ref failures);
             Check("parent trigger syncs to zero", LoadTrigger(connStr, ParentQuestId) == 0, ref failures);
 
@@ -90,8 +92,10 @@ namespace DfoServer.SelfTests
             {
                 new ActiveQuest { Slot = 0, QuestId = ParentQuestId, TriggerValue = 1 },
             });
-            var blockedParent = questService.HandleFinishQuest(CharacterId,
-                BuildQuestBody(ParentQuestId));
+            var blockedParent = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                QuestSelfTestCommandAdapter.BuildFinishBody(ParentQuestId));
             Check("parent finish fails while a subquest is missing", IsFailAck(blockedParent, 22), ref failures);
 
             ResetQuestState(connStr);
@@ -100,8 +104,10 @@ namespace DfoServer.SelfTests
             {
                 new ActiveQuest { Slot = 0, QuestId = ParentQuestId, TriggerValue = 0 },
             });
-            var triggerZeroButMissingChild = questService.HandleFinishQuest(CharacterId,
-                BuildQuestBody(ParentQuestId));
+            var triggerZeroButMissingChild = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                QuestSelfTestCommandAdapter.BuildFinishBody(ParentQuestId));
             Check("parent finish still checks children when trigger is already zero",
                 IsFailAck(triggerZeroButMissingChild, 22),
                 ref failures);
@@ -113,8 +119,12 @@ namespace DfoServer.SelfTests
             {
                 new ActiveQuest { Slot = 0, QuestId = ParentQuestId, TriggerValue = 2 },
             });
-            var staleParent = questService.HandleFinishQuest(CharacterId,
-                BuildQuestBody(ParentQuestId));
+            var staleParent = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                QuestSelfTestCommandAdapter.BuildFinishBody(
+                    ParentQuestId,
+                    rewardSelection: 0));
             Check("stale nonzero parent trigger can finish after all subquests cleared", IsSuccessAck(staleParent), ref failures);
 
             InventoryContext.Unregister(sessionId, CharacterId);

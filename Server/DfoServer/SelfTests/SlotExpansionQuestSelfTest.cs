@@ -57,8 +57,8 @@ namespace DfoServer.SelfTests
             if (!supportReward.IsValid)
                 Console.WriteLine($"[DIAG] support reward error: {supportReward.Error}");
 
-            Check("slot-expansion fixture contains both quests' seeking materials",
-                SeedSeekingMaterials(
+            Check("slot-expansion fixture contains both quests' seeking requirements",
+                SeedSeekingRequirements(
                     inventory,
                     SupportSlotQuestId,
                     MagicStoneQuestId),
@@ -76,7 +76,10 @@ namespace DfoServer.SelfTests
                     },
                 });
 
-            var supportAck = questService.HandleFinishQuest(CharacterId, BuildFinishBody(SupportSlotQuestId));
+            var supportAck = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                BuildFinishBody(SupportSlotQuestId));
             if (!IsSuccessAck(supportAck))
                 Console.WriteLine($"[DIAG] support finish error=0x{supportAck?.ErrorCode ?? 0xFF:X2}");
             Check("support quest success", IsSuccessAck(supportAck), ref failures);
@@ -100,7 +103,10 @@ namespace DfoServer.SelfTests
                     },
                 });
 
-            var magicAck = questService.HandleFinishQuest(CharacterId, BuildFinishBody(MagicStoneQuestId));
+            var magicAck = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                BuildFinishBody(MagicStoneQuestId));
             if (!IsSuccessAck(magicAck))
                 Console.WriteLine($"[DIAG] magic finish error=0x{magicAck?.ErrorCode ?? 0xFF:X2}");
             Check("magic stone quest success", IsSuccessAck(magicAck), ref failures);
@@ -116,17 +122,25 @@ namespace DfoServer.SelfTests
             return failures == 0 ? 0 : 1;
         }
 
-        private static bool SeedSeekingMaterials(
+        private static bool SeedSeekingRequirements(
             InventoryService inventory,
             params ushort[] questIds)
         {
             var totals = new Dictionary<int, int>();
             foreach (var questId in questIds)
             {
-                foreach (var item in GameWorld.QuestData.GetSeekingConsumeItems(questId))
+                if (!GameWorld.QuestData.TryResolveCompletionDefinition(
+                        questId,
+                        out var definition,
+                        out _))
                 {
-                    if (item.ItemId <= 0 || item.Count <= 0)
-                        continue;
+                    return false;
+                }
+
+                foreach (var item in definition.SeekingItems)
+                {
+                    if (item.ItemId < 0 || item.Count <= 0)
+                        return false;
                     totals.TryGetValue(item.ItemId, out var current);
                     totals[item.ItemId] = checked(current + item.Count);
                 }
@@ -134,6 +148,21 @@ namespace DfoServer.SelfTests
 
             foreach (var requirement in totals)
             {
+                if (InventoryService.TryResolveMainVirtualSlotByItemId(
+                        requirement.Key,
+                        out var virtualSlot,
+                        out var virtualItemId))
+                {
+                    if (!inventory.SetMainVirtualCount(
+                            virtualSlot,
+                            virtualItemId,
+                            requirement.Value))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+
                 if (!InventoryRewardGrantService.TryCreateAndInsert(
                         inventory,
                         requirement.Key,
@@ -148,12 +177,8 @@ namespace DfoServer.SelfTests
             return totals.Count > 0;
         }
 
-        private static byte[] BuildFinishBody(ushort questId)
-        {
-            var body = new byte[2];
-            BitConverter.GetBytes(questId).CopyTo(body, 0);
-            return body;
-        }
+        private static byte[] BuildFinishBody(ushort questId) =>
+            QuestSelfTestCommandAdapter.BuildFinishBody(questId);
 
         private static bool IsSuccessAck(QuestFinishResult result)
         {

@@ -36,13 +36,16 @@ namespace DfoServer.Network.Handlers.Dungeon
             _rollbackParty;
         private readonly Func<EnhancedClientSession, Task> _leaveTown;
         private readonly Func<EnhancedClientSession, byte[], Task> _sendPacket;
+        private readonly Func<EnhancedClientSession, Task>
+            _recoverParticipantEffects;
 
         internal DungeonRejoinCoordinator(
             DungeonInstanceRegistry registry,
             Func<EnhancedClientSession, int, Task<bool>> restoreParty,
             Func<EnhancedClientSession, int, Task> rollbackParty,
             Func<EnhancedClientSession, Task> leaveTown,
-            Func<EnhancedClientSession, byte[], Task> sendPacket = null)
+            Func<EnhancedClientSession, byte[], Task> sendPacket = null,
+            Func<EnhancedClientSession, Task> recoverParticipantEffects = null)
         {
             _registry = registry
                 ?? throw new ArgumentNullException(nameof(registry));
@@ -54,6 +57,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 ?? throw new ArgumentNullException(nameof(leaveTown));
             _sendPacket = sendPacket
                 ?? ((session, packet) => session.SendPacketAsync(packet));
+            _recoverParticipantEffects = recoverParticipantEffects
+                ?? (_ => Task.CompletedTask);
         }
 
         internal async Task ProjectCandidateAsync(
@@ -220,6 +225,18 @@ namespace DfoServer.Network.Handlers.Dungeon
                     session,
                     attachment.RunIdentity,
                     "dungeon_rejoin");
+                try
+                {
+                    await _recoverParticipantEffects(session);
+                }
+                catch (Exception ex)
+                {
+                    // A failed projector remains journaled and is retried by the
+                    // next valid rejoin; it must not roll back a valid attachment.
+                    FileLogger.Log(
+                        $"[DungeonRejoin] participant effect recovery failed: " +
+                        $"cid={offer.CharacterId} error={ex.Message}");
+                }
                 await SendSuccessAsync(session, header.type);
                 await SendNotiAsync(
                     session,

@@ -257,14 +257,11 @@ namespace DfoServer.SelfTests
                 _killer.Session.Player.Exp = 0;
                 _member.Session.Player.Level = 50;
                 _member.Session.Player.Exp = 0;
-                var config = new DeathTowerData.TowerConfig
-                {
-                    DungeonId = 11000,
-                    TotalStages = 1,
-                    StageMapIds = new[] { 33060 },
-                    BasisLevel = 50,
-                    MaxClearItemCount = 10,
-                };
+                var config = DeathTowerSelfTestFactory.CreateConfig(
+                    11000,
+                    new[] { 33060 },
+                    50,
+                    maxClearItemCount: 10);
                 var tower = new DeathTowerSession(config);
                 tower.BeginStage(0x12345678, new[]
                 {

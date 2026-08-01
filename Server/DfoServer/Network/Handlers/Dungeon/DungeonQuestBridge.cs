@@ -35,16 +35,32 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             var eligibleQuestIds = run.QuestSnapshot?.QuestIds
                 ?? QuestRunSnapshot.Empty.QuestIds;
+            var eligibleQuestActivations =
+                run.QuestSnapshot?.Activations?.Count > 0
+                    ? run.QuestSnapshot.Activations
+                    : null;
             switch (progressEvent.Kind)
             {
                 case DungeonQuestProgressKind.HuntMonster:
                     return questManager.SyncHuntMonsterQuestProgressAsync(
                         progressEvent.DungeonId,
                         progressEvent.Difficulty,
-                        progressEvent.MonsterCode,
+                        progressEvent.ActorCode,
                         progressEvent.SourceEventId,
                         eligibleQuestIds,
-                        envelope.RunIdentity);
+                        envelope.RunIdentity,
+                        eligibleQuestActivations);
+
+                case DungeonQuestProgressKind.HuntEnemy:
+                    return questManager.SyncHuntEnemyQuestProgressAsync(
+                        progressEvent.DungeonId,
+                        progressEvent.Difficulty,
+                        progressEvent.ActorCode,
+                        progressEvent.EnemyType,
+                        progressEvent.SourceEventId,
+                        eligibleQuestIds,
+                        envelope.RunIdentity,
+                        eligibleQuestActivations);
 
                 case DungeonQuestProgressKind.ClearMap:
                 case DungeonQuestProgressKind.ClearDungeon:
@@ -52,7 +68,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         progressEvent.DungeonId,
                         progressEvent.MapId,
                         progressEvent.SourceEventId,
-                        eligibleQuestIds);
+                        eligibleQuestIds,
+                        eligibleQuestActivations);
 
                 default:
                     return Task.CompletedTask;

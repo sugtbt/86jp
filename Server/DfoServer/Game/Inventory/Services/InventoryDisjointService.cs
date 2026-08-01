@@ -3,15 +3,31 @@ using System.Collections.Generic;
 
 namespace DfoServer.Game.Inventory
 {
+    internal delegate bool TryResolveDisjointMaterials(
+        ItemCore source,
+        ItemMetadata metadata,
+        out List<DisjointMaterialResult> materials,
+        out byte errorCode);
+
     internal static class InventoryDisjointService
     {
         internal static bool TryDisjointItem(
             InventoryService inventory,
             DisjointItemRequest request,
             out DisjointItemResult result)
+            => TryDisjointItem(inventory, request, TryResolveSystemMaterials, out result);
+
+        internal static bool TryDisjointItem(
+            InventoryService inventory,
+            DisjointItemRequest request,
+            TryResolveDisjointMaterials tryResolveMaterials,
+            out DisjointItemResult result)
         {
             result = CreateErrorResult(request, DisjointItemResult.ErrorInvalidRequest);
-            if (inventory == null || request == null || request.TargetSlotIndex < 0)
+            if (inventory == null
+                || request == null
+                || tryResolveMaterials == null
+                || request.TargetSlotIndex < 0)
                 return false;
 
             if (request.ItemSpace != InventoryListType.Main || request.DisjointItemSlotIndex < -1)
@@ -51,10 +67,13 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
-            var materials = DisjointResultCalculator.Calculate(metadata);
-            if (materials.Count == 0)
+            if (!tryResolveMaterials(source, metadata, out var materials, out errorCode)
+                || materials == null
+                || materials.Count == 0)
             {
-                result = CreateErrorResult(request, DisjointItemResult.ErrorInvalidTarget);
+                result = CreateErrorResult(
+                    request,
+                    errorCode == 0 ? DisjointItemResult.ErrorInvalidTarget : errorCode);
                 result.SourceItemTemplateId = source.ItemId;
                 return false;
             }
@@ -66,7 +85,12 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
-            if (!inventory.RemoveItem(InventoryListType.Main, request.TargetSlotIndex))
+            if (!InventoryDeleteService.TryRemoveSlot(
+                    inventory,
+                    InventoryListType.Main,
+                    request.TargetSlotIndex,
+                    out var deleteResult)
+                || !deleteResult.Success)
             {
                 result = CreateErrorResult(request, DisjointItemResult.ErrorInvalidTarget);
                 result.SourceItemTemplateId = source.ItemId;
@@ -119,10 +143,22 @@ namespace DfoServer.Game.Inventory
             if (IsTradeDeleteAttachType(metadata.AttachType))
                 return false;
 
+            return true;
+        }
+
+        private static bool TryResolveSystemMaterials(
+            ItemCore source,
+            ItemMetadata metadata,
+            out List<DisjointMaterialResult> materials,
+            out byte errorCode)
+        {
+            materials = null;
+            errorCode = DisjointItemResult.ErrorInvalidTarget;
             if (IsUnidentifiedAmplifyEquipment(source))
                 return false;
 
-            return true;
+            materials = DisjointResultCalculator.Calculate(metadata);
+            return materials.Count > 0;
         }
 
         private static bool TryValidatePortableDisjointItem(

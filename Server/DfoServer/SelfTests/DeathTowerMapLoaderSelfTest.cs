@@ -38,16 +38,16 @@ namespace DfoServer.SelfTests
             var failures = 0;
             var config = DeathTowerData.GetConfig(DeathTowerDungeonId);
             Check("death tower 11000 has all 45 floors",
-                config != null && config.StageMapIds != null && config.StageMapIds.Length == 45,
+                config != null && config.StageMapIds != null && config.StageMapIds.Count == 45,
                 ref failures);
-            if (config == null || config.StageMapIds == null || config.StageMapIds.Length != 45)
+            if (config == null || config.StageMapIds == null || config.StageMapIds.Count != 45)
                 return Finish(failures);
 
             var mapList = LstFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("map", "map.lst")));
             var aiList = LstFile.Parse(PvfArchiveAccessor.ReadText(Path.Combine("AICharacter", "AICharacter.lst")));
             var appearancePoints = LoadAppearancePoints(aiList);
 
-            for (var stage = 0; stage < config.StageMapIds.Length; stage++)
+            for (var stage = 0; stage < config.StageMapIds.Count; stage++)
             {
                 var floor = stage + 1;
                 var tower = CreateTowerAtStage(config, stage);

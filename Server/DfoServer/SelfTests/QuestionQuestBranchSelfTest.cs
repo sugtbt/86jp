@@ -61,7 +61,9 @@ namespace DfoServer.SelfTests
             Check("1862 starts with trigger 1", TryReadAcceptTrigger(acceptQuestionForPrincess, out var firstInitTrigger) && firstInitTrigger == 1, ref failures);
 
             questService.HandleSetTrigger(CharacterId, BuildSetTriggerBody(BranchQuestionQuestId, increment: false));
-            var finishPrincessChoice = questService.HandleFinishQuest(CharacterId,
+            var finishPrincessChoice = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
                 BuildFinishBody(BranchQuestionQuestId, ushort.MaxValue));
             Check("finish 1862 after first answer succeeds", IsSuccessAck(finishPrincessChoice), ref failures);
             Check("1862 stores first answer as flag 1", LoadQuestFlag(connStr, BranchQuestionQuestId) == 1, ref failures);
@@ -74,7 +76,9 @@ namespace DfoServer.SelfTests
             Check("accept 1862 for prince branch succeeds", IsSuccessAck(acceptQuestionForPrince), ref failures);
 
             questService.HandleSetTrigger(CharacterId, BuildSetTriggerBody(BranchQuestionQuestId, increment: true));
-            var finishPrinceChoice = questService.HandleFinishQuest(CharacterId,
+            var finishPrinceChoice = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
                 BuildFinishBody(BranchQuestionQuestId, 0));
             Check("finish 1862 after second answer succeeds even with reward index zero", IsSuccessAck(finishPrinceChoice), ref failures);
             Check("1862 stores second answer trigger as flag 2", LoadQuestFlag(connStr, BranchQuestionQuestId) == 2, ref failures);
@@ -101,13 +105,12 @@ namespace DfoServer.SelfTests
             return body;
         }
 
-        private static byte[] BuildFinishBody(ushort questId, ushort rewardSelectIdx)
-        {
-            var body = new byte[4];
-            BitConverter.GetBytes(questId).CopyTo(body, 0);
-            BitConverter.GetBytes(rewardSelectIdx).CopyTo(body, 2);
-            return body;
-        }
+        private static byte[] BuildFinishBody(
+            ushort questId,
+            ushort rewardSelectIdx) =>
+            QuestSelfTestCommandAdapter.BuildFinishBody(
+                questId,
+                rewardSelectIdx);
 
         private static byte[] BuildSetTriggerBody(ushort questId, bool increment)
         {

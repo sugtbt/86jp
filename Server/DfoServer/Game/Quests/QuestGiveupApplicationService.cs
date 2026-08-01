@@ -14,31 +14,13 @@ namespace DfoServer.Game.Quests
         }
 
         internal QuestGiveupResult Apply(
-            int characterId,
-            QuestGiveupCommand command,
-            InventoryLease lease)
+            QuestCommandOwnerContext owner,
+            QuestGiveupCommand command)
         {
+            var characterId = owner.CharacterId;
             var questId = command.QuestId;
-            var active = _repository.LoadActiveQuests(characterId);
-            var quest = QuestActiveListRules.FindByQuestId(active, questId);
-            if (quest == null)
-                return QuestGiveupResult.Fail(19);
-            if (!GameWorld.QuestData.CanGiveup(questId))
-                return QuestGiveupResult.Fail(20);
-
-            var recoveryPlan = QuestGiveupItemRecoveryPolicy.Build(
-                active,
-                questId);
-            if (recoveryPlan.Count == 0)
-            {
-                _repository.DeleteActiveQuest(characterId, quest.Slot);
-                FileLogger.Log(
-                    $"[QuestGiveupApplicationService] GIVEUP quest={questId} " +
-                    "reclaimed=0");
-                return new QuestGiveupResult { QuestId = questId };
-            }
-
-            if (lease == null || lease.CharacterId != characterId)
+            var lease = owner.InventoryLease;
+            if (!owner.IsCurrentInventoryOwner())
             {
                 FileLogger.Log(
                     $"[QuestGiveupApplicationService] GIVEUP rejected: " +
@@ -48,42 +30,103 @@ namespace DfoServer.Game.Quests
 
             lock (lease.SyncRoot)
             {
+                if (!owner.IsCurrentInventoryOwner())
+                    return QuestGiveupResult.Fail(0x17);
+
                 var inventory = lease.Inventory;
-                var snapshots = CaptureTargetSlots(inventory, recoveryPlan);
                 var changes = new InventoryMutationSet();
-                foreach (var entry in recoveryPlan)
-                {
-                    var current = inventory.CountMainItem(entry.ItemId);
-                    var deleteCount = Math.Max(0, current - entry.RetainCount);
-                    if (deleteCount <= 0)
-                        continue;
-
-                    if (!TryDeleteMainItem(
-                            inventory,
-                            entry.ItemId,
-                            deleteCount,
-                            changes))
-                    {
-                        RestoreTargetSlots(inventory, snapshots);
-                        FileLogger.Log(
-                            $"[QuestGiveupApplicationService] GIVEUP rejected: " +
-                            $"item reclaim failed quest={questId} item={entry.ItemId} " +
-                            $"held={current} retain={entry.RetainCount}");
-                        return QuestGiveupResult.Fail(0x17);
-                    }
-                }
-
+                Dictionary<short, ItemCore> snapshots = null;
+                var inventoryMutated = false;
                 try
                 {
-                    _repository.DeleteActiveQuest(characterId, quest.Slot);
+                    using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                               _repository.ConnectionString))
+                    {
+                        connection.Open();
+                        using (var transaction = connection.BeginTransaction(deferred: false))
+                        {
+                            var active = QuestRepository.LoadActiveQuests(
+                                connection,
+                                transaction,
+                                characterId);
+                            var quest = QuestActiveListRules.FindByQuestId(
+                                active,
+                                questId);
+                            if (quest == null)
+                                return QuestGiveupResult.Fail(19);
+                            if (!GameWorld.QuestData.CanGiveup(questId))
+                                return QuestGiveupResult.Fail(20);
+
+                            var recoveryPlan = QuestGiveupItemRecoveryPolicy.Build(
+                                active,
+                                questId);
+                            snapshots = CaptureTargetSlots(inventory, recoveryPlan);
+                            foreach (var entry in recoveryPlan)
+                            {
+                                var current = inventory.CountMainItem(entry.ItemId);
+                                var deleteCount = Math.Max(
+                                    0,
+                                    current - entry.RetainCount);
+                                if (deleteCount <= 0)
+                                    continue;
+
+                                inventoryMutated = true;
+                                if (!TryDeleteMainItem(
+                                        inventory,
+                                        entry.ItemId,
+                                        deleteCount,
+                                        changes))
+                                {
+                                    throw new InvalidOperationException(
+                                        $"item reclaim failed item={entry.ItemId} " +
+                                        $"held={current} retain={entry.RetainCount}");
+                                }
+                            }
+
+                            if (!QuestRepository.TryDeleteActiveQuestCas(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    questId,
+                                    quest.ActivationId,
+                                    quest.Version,
+                                    quest.TriggerValue))
+                            {
+                                throw new InvalidOperationException(
+                                    "quest activation changed before giveup commit");
+                            }
+
+                            if (inventoryMutated
+                                && !InventoryPersistenceService.SaveDirtyInTransaction(
+                                    connection,
+                                    transaction,
+                                    lease))
+                            {
+                                throw new InvalidOperationException(
+                                    "quest giveup inventory persistence returned false");
+                            }
+                            if (!owner.IsCurrentInventoryOwner())
+                            {
+                                throw new InvalidOperationException(
+                                    "quest giveup inventory lease was replaced");
+                            }
+
+                            transaction.Commit();
+                        }
+                    }
+
+                    if (inventoryMutated)
+                        inventory.ClearDirtyState();
                 }
                 catch (Exception ex)
                 {
-                    RestoreTargetSlots(inventory, snapshots);
+                    if (inventoryMutated && snapshots != null)
+                        RestoreTargetSlots(inventory, snapshots);
                     FileLogger.Log(
-                        $"[QuestGiveupApplicationService] GIVEUP repository failure " +
+                        $"[QuestGiveupApplicationService] GIVEUP failed before " +
+                        $"atomic commit " +
                         $"quest={questId}: {ex.Message}");
-                    return QuestGiveupResult.Fail(19);
+                    return QuestGiveupResult.Fail(0x17);
                 }
 
                 var result = new QuestGiveupResult { QuestId = questId };

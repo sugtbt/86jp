@@ -1,7 +1,8 @@
-using DfoServer.Game.Accounts;
+﻿using DfoServer.Game.Accounts;
 using DfoServer.Game.Appearance;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Lottery;
@@ -46,7 +47,10 @@ namespace DfoServer.Network
         private readonly GrowthCapsuleHandler _growthCapsuleHandler;
         private readonly GoldLimitHandler _goldLimitHandler;
         private readonly CraneMiniGameHandler _craneMiniGameHandler;
-        private readonly MonsterCardBindHandler _monsterCardBindHandler;
+        private readonly ExpertJobStoreHandler _expertJobStoreHandler;
+        private readonly ExpertJobExtractionHandler _expertJobExtractionHandler;
+        private readonly ExpertJobCompoundHandler _expertJobCompoundHandler;
+        private readonly EnchanterHandler _enchanterHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
         private readonly ISessionDirectory _sessionDirectory;
@@ -121,12 +125,21 @@ namespace DfoServer.Network
                 characterRepository,
                 databasePath,
                 schemaFilePath);
+            var expertJobStateRepository = new SqliteExpertJobStateRepository(
+                databasePath,
+                schemaFilePath);
+            var expertJobPersistence = new ExpertJobPersistenceService(databasePath, schemaFilePath);
+            var expertJobStores = new ExpertJobStoreRuntimeService();
+            var expertJobOperations = new ExpertJobOperationCoordinator();
             _inventoryHandler = new InventoryHandler(
                 experienceItemUseService,
                 sqliteSelectCharacterDataSource,
                 characterRepository,
                 _inventoryRefreshSender,
                 experienceItemNotifications,
+                expertJobStateRepository,
+                expertJobPersistence,
+                expertJobOperations,
                 broadcastGamePacket,
                 mercenaryRestrictions);
             var lotteryDoubleRewardPolicy = new LotteryDoubleRewardPolicy(
@@ -149,6 +162,47 @@ namespace DfoServer.Network
             _petCreatureHandler = new PetCreatureHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
             // 组队与城镇/副本共享同一个 PartyManager 实例: 跟随退出/副本 fan-out 都要看到同一份队伍状态。
             _partyManager = new Game.Party.PartyManager();
+            var subtype0Repository = new Game.CharacterData.SqliteSubtype0FieldsRepository(
+                databasePath,
+                schemaFilePath);
+            var honorLevel = new HonorLevelSyncService(
+                characterRepository,
+                databasePath,
+                schemaFilePath);
+            _expertJobStoreHandler = new ExpertJobStoreHandler(
+                expertJobStores,
+                _partyManager,
+                sessionDirectory,
+                expertJobStateRepository,
+                expertJobStateRepository,
+                characterRepository,
+                subtype0Repository,
+                honorLevel,
+                expertJobPersistence,
+                expertJobOperations,
+                _inventoryRefreshSender);
+            _enchanterHandler = new EnchanterHandler(
+                expertJobStores,
+                expertJobStateRepository,
+                expertJobPersistence,
+                expertJobOperations);
+            _expertJobExtractionHandler = new ExpertJobExtractionHandler(
+                expertJobStateRepository,
+                characterRepository,
+                subtype0Repository,
+                honorLevel,
+                expertJobPersistence,
+                _inventoryRefreshSender,
+                expertJobOperations);
+            _expertJobCompoundHandler = new ExpertJobCompoundHandler(
+                expertJobStores,
+                expertJobStateRepository,
+                characterRepository,
+                subtype0Repository,
+                honorLevel,
+                expertJobPersistence,
+                _inventoryRefreshSender,
+                expertJobOperations);
             _townHandler = new TownHandler(
                 characterRepository,
                 sqliteSelectCharacterDataSource,
@@ -202,7 +256,9 @@ namespace DfoServer.Network
                 _dungeonInstances,
                 _partyHandler.TryRestoreDungeonParticipantAsync,
                 _partyHandler.RollbackDungeonParticipantRestoreAsync,
-                _townHandler.NotifyLeaveAsync);
+                _townHandler.NotifyLeaveAsync,
+                recoverParticipantEffects: _dungeonHandler
+                    .RecoverDungeonParticipantEffectsAsync);
             PetCreatureRuntimeService.EnsureClockRegistered();
             _growthCapsuleHandler = new GrowthCapsuleHandler(
                 _inventoryRefreshSender, characterRepository);
@@ -210,7 +266,6 @@ namespace DfoServer.Network
                 new Game.Currency.CharacterGoldLimitRepository(databasePath, schemaFilePath),
                 _inventoryRefreshSender);
             _craneMiniGameHandler = new CraneMiniGameHandler(_inventoryRefreshSender);
-            _monsterCardBindHandler = new MonsterCardBindHandler();
 
             _cmdDispatch = new Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>>();
             RegisterLoginHandlers(_cmdDispatch);
@@ -232,6 +287,7 @@ namespace DfoServer.Network
             RegisterCollectionBoxHandlers(_cmdDispatch);
             RegisterMercenaryHandlers(_cmdDispatch);
             RegisterPartyHandlers(_cmdDispatch);
+            RegisterExpertJobHandlers(_cmdDispatch);
             RegisterMiscHandlers(_cmdDispatch);
             _cmdDispatch[0x00CF] = _shopCoinEventHandler.HandleShopCoinEvent;   // 207 SHOP_COIN_EVENT 每日免费复活币
         }
@@ -246,6 +302,7 @@ namespace DfoServer.Network
         public override async Task OnClientDisconnected(EnhancedClientSession session)
         {
             FileLogger.Log($"[{ProtocolName}] Admin client disconnected: {session.SessionId}");
+            await _expertJobStoreHandler.CloseSessionAsync(session, includeOwner: false);
             // 联机同屏: 通知同区域其它玩家移除该玩家分身(USER_LEAVE 0x0006)。须在状态清理前发。
             await _townHandler.NotifyLeaveAsync(session);
             var charId = session.Player?.CharacterId ?? 0;
@@ -317,6 +374,8 @@ namespace DfoServer.Network
             {
                 _dungeonRejoin.ClearSession(s.SessionId);
                 var prevCharId = s.Player?.CharacterId ?? 0;
+                if (prevCharId > 0)
+                    await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
                 await _characterSelectHandler.Handle_ENUM_CMDPACKET_SELECT_CHARACTER(s, h, b);
                 if (s.Player != null && s.Player.CharacterId > 0)
                 {
@@ -340,6 +399,7 @@ namespace DfoServer.Network
             d[0x0007] = async (s, h, b) =>
             {
                 var charId = s.Player?.CharacterId ?? 0;
+                if (charId > 0) await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
                 if (charId > 0) await _sessionDirectory.UnregisterAsync(charId);
                 if (charId > 0) InventoryContext.Unregister(s.SessionId, charId);
                 _townHandler.PersistPosition(s, forceImmediate: true, source: "return_select");
@@ -396,7 +456,6 @@ namespace DfoServer.Network
             d[0x00D9] = _lotteryItemHandler.HandleOverflowInfo;
             d[(ushort)CmdPacketType.CRANE_START_USE] = _craneMiniGameHandler.HandleStartUse;
             d[(ushort)CmdPacketType.CRANE_PICKUP] = _craneMiniGameHandler.HandlePickup;
-            d[(ushort)CmdPacketType.MONSTERCARD_BIND] = _monsterCardBindHandler.Handle;
             d[0x0050] = _inventoryHandler.Handle_ENUM_CMDPACKET_UPGRADE_ITEM;      //80
             d[(ushort)CmdPacketType.UPGRADE_ITEM_SEPARATE] = _inventoryHandler.Handle_UPGRADE_ITEM_SEPARATE;
             d[0x0051] = _inventoryHandler.Handle_ENUM_CMDPACKET_RESET_ITEM_ATTR;   //81 装备品级调整箱(万花镜)
@@ -408,6 +467,7 @@ namespace DfoServer.Network
             d[0x019C] = _inventoryHandler.Handle_TITLE_BOOK;                       //412
             d[0x01B6] = _inventoryHandler.Handle_CHANGE_RANDOM_OPTION;             //438
             d[0x019D] = _inventoryHandler.Handle_TITLE_BOOK;                       //413
+            d[0x019E] = _inventoryHandler.Handle_ENUM_CMDPACKET_MONSTERCARD_BIND;  //414 monster card synthesis
             d[0x0207] = _inventoryHandler.Handle_OPEN_AVATAR_PACKAGE;
             d[0x0218] = _inventoryHandler.Handle_USE_BOOSTER_ITEM;
             d[0x0239] = _inventoryHandler.Handle_SET_CLONE_TITLE;                  //569
@@ -505,6 +565,16 @@ namespace DfoServer.Network
             d[0x026B] = _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x026D] = _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x0270] = _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.TOURNAMENT_REWARD_SELECT_STATE] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.TOURNAMENT_REWARD_SELECT] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.BLOOD_ROUND_UI_PREPARE_FINISH_] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.DIE_BLOOD_MONSTER] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.SELECT_ULTIMATE_DIFFICULTY] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x0312] = PremiumQueryHandler.Handle_PREMIUM_SERVICE;                //786
             d[0x03B6] = _dungeonHandler.Handle_ENUM_CMDPACKET_GORGEOUS_CHALLENGE_TOGGLE;
             d[0x03AB] = _dungeonHandler.HandleDungeonMechanismCommand;             //939
@@ -528,7 +598,13 @@ namespace DfoServer.Network
         private void RegisterTownHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
             d[0x0023] = _townHandler.Handle_ENUM_CMDPACKET_SET_USER_POSITION;
-            d[0x0024] = _townHandler.Handle_ENUM_CMDPACKET_SET_USER_AREA;
+            d[0x0024] = async (s, h, b) =>
+            {
+                if (b != null && b.Length >= 6)
+                    await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
+                await _townHandler.Handle_ENUM_CMDPACKET_SET_USER_AREA(s, h, b);
+                await _expertJobStoreHandler.SendAreaStoresToAsync(s);
+            };
             d[0x0025] = _townHandler.Handle_ENUM_CMDPACKET_FINISH_LOADING;
             d[0x002A] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
             d[0x0084] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
@@ -560,7 +636,10 @@ namespace DfoServer.Network
             d[0x001F] = async (s, h, b) => //31
             {
                 if (s.GameSession != null)
-                    await s.GameSession.QuestManager.HandleAcceptQuestAsync(h.type, b);
+                    await s.GameSession.QuestManager.HandleAcceptQuestAsync(
+                        h.type,
+                        b,
+                        s.SessionId);
             };
             d[0x0020] = async (s, h, b) => //32
             {
@@ -581,7 +660,8 @@ namespace DfoServer.Network
                             s.Player.CharacterId,
                             "client quest set-trigger")
                         : null;
-                    var result = await s.GameSession.QuestManager.HandleSetTriggerAsync(h.type, b);
+                    var result = await s.GameSession.QuestManager
+                        .HandleSetTriggerAsync(h.type, b, s.SessionId);
                     await _dungeonHandler.HandleQuestSetTriggerResultAsync(
                         s,
                         result,
@@ -591,7 +671,10 @@ namespace DfoServer.Network
             d[0x0022] = async (s, h, b) => //34
             {
                 if (s.GameSession != null)
-                    await s.GameSession.QuestManager.HandleFinishQuestAsync(h.type, b);
+                    await s.GameSession.QuestManager.HandleFinishQuestAsync(
+                        h.type,
+                        b,
+                        s.SessionId);
             };
             d[0x01FB] = (s, h, b) =>
             {
@@ -682,6 +765,31 @@ namespace DfoServer.Network
             d[0x0373] = _luckyStarHandler.HandleShopPurchasePacket;
             d[(ushort)CmdPacketType.GET_EXPAND_EXP_GAGE_REWARD] = _growthCapsuleHandler.HandleClaimAsync;
             d[(ushort)CmdPacketType.UPGRADE_CARRY_GOLD] = _goldLimitHandler.HandleUpgradeAsync;
+        }
+
+        private void RegisterExpertJobHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
+        {
+            d[(ushort)CmdPacketType.CREATE_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleCreate;
+            d[(ushort)CmdPacketType.ENTER_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleEnter;
+            d[(ushort)CmdPacketType.CLOSE_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleClose;
+            d[(ushort)CmdPacketType.REPAIR_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleRepair;
+            d[(ushort)CmdPacketType.UPGRADE_DISJOINT_MACHINE] = _expertJobStoreHandler.HandleUpgrade;
+            d[(ushort)CmdPacketType.REQUEST_DISJOINT_ITEM] = HandleSharedDisjointOrHellParty;
+            d[(ushort)CmdPacketType.EXPERT_EXTRACTION] = _expertJobExtractionHandler.Handle;
+            d[(ushort)CmdPacketType.REPAIR_EXPERT_JOB_STORE] = _enchanterHandler.HandleRepair;
+            d[(ushort)CmdPacketType.USE_ENCHANT_STORE] = _expertJobStoreHandler.HandleEnchant;
+            d[(ushort)CmdPacketType.COMPOUND_ITEM_BY_EXPERT_JOB] =
+                _expertJobCompoundHandler.Handle;
+        }
+
+        private Task HandleSharedDisjointOrHellParty(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            return _expertJobStoreHandler.HasEnteredStore(session)
+                ? _expertJobStoreHandler.HandleDisjoint(session, header, body)
+                : _dungeonHandler.Handle_ENUM_CMDPACKET_HELLPARTY_START(session, header, body);
         }
 
         #endregion

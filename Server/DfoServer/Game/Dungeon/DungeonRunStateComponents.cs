@@ -1,4 +1,5 @@
 using DfoServer.Game.Quests;
+using DfoServer.Game.Dungeon.Tournament;
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -70,7 +71,12 @@ namespace DfoServer.Game.Dungeon
     {
         internal SemaphoreSlim CardProjectionGate { get; } =
             new SemaphoreSlim(1, 1);
+        internal SemaphoreSlim DeathTowerProjectionGate { get; } =
+            new SemaphoreSlim(1, 1);
+        internal SemaphoreSlim BloodAltarProjectionGate { get; } =
+            new SemaphoreSlim(1, 1);
         internal DungeonSettlementRuntime Runtime { get; set; }
+        internal DeathTower.DeathTowerSettlementRuntime DeathTower { get; set; }
         internal SecretShop.SecretShopOffer SecretShopOffer { get; set; }
         internal List<ClearRewardGenerator.CardReward> CardRewards { get; set; }
         internal int PaidCardCost { get; set; }
@@ -79,6 +85,9 @@ namespace DfoServer.Game.Dungeon
         internal byte[] PaidCardSlots { get; set; } = { 0xFF, 0xFF, 0xFF, 0xFF };
         internal bool FreeCardRewardDelivered { get; set; }
         internal bool PaidCardRewardDelivered { get; set; }
+        internal int CardAutoFlipDelayMs { get; set; }
+        internal int? PendingPresentationRankPoint { get; set; }
+        internal TournamentParticipantRewardState Tournament { get; set; }
     }
 
     internal sealed class DungeonRunQuestBridgeState
@@ -86,9 +95,10 @@ namespace DfoServer.Game.Dungeon
         private readonly HashSet<(int DungeonId, int MapId)> _syncedClearMapTargets =
             new HashSet<(int DungeonId, int MapId)>();
         private readonly Dictionary<(ushort QuestId, int ChannelIndex), int>
-            _pendingHuntMonsterTriggerEchoes =
+            _pendingServerTriggerEchoes =
                 new Dictionary<(ushort QuestId, int ChannelIndex), int>();
-        private readonly HashSet<int> _npcItemDropQuestIds = new HashSet<int>();
+        private readonly HashSet<QuestActivationId> _npcItemDropActivations =
+            new HashSet<QuestActivationId>();
 
         internal QuestRunSnapshot Snapshot { get; set; } = QuestRunSnapshot.Empty;
 
@@ -98,14 +108,14 @@ namespace DfoServer.Game.Dungeon
         internal void UnmarkClearMapSynced(int dungeonId, int mapId)
             => _syncedClearMapTargets.Remove((dungeonId, mapId));
 
-        internal void MarkHuntMonsterTrigger(ushort questId, int channelIndex)
+        internal void MarkServerTrigger(ushort questId, int channelIndex)
         {
             var key = (questId, channelIndex);
-            _pendingHuntMonsterTriggerEchoes.TryGetValue(key, out var pending);
-            _pendingHuntMonsterTriggerEchoes[key] = pending + 1;
+            _pendingServerTriggerEchoes.TryGetValue(key, out var pending);
+            _pendingServerTriggerEchoes[key] = pending + 1;
         }
 
-        internal bool TryConsumeHuntMonsterTrigger(
+        internal bool TryConsumeServerTrigger(
             ushort questId,
             int channelMask)
         {
@@ -114,7 +124,7 @@ namespace DfoServer.Game.Dungeon
                 if ((channelMask & (1 << channelIndex)) == 0)
                     continue;
 
-                if (!_pendingHuntMonsterTriggerEchoes.TryGetValue(
+                if (!_pendingServerTriggerEchoes.TryGetValue(
                         (questId, channelIndex),
                         out var pending)
                     || pending <= 0)
@@ -129,24 +139,30 @@ namespace DfoServer.Game.Dungeon
                     continue;
 
                 var key = (questId, channelIndex);
-                var pending = _pendingHuntMonsterTriggerEchoes[key];
+                var pending = _pendingServerTriggerEchoes[key];
                 if (pending == 1)
-                    _pendingHuntMonsterTriggerEchoes.Remove(key);
+                    _pendingServerTriggerEchoes.Remove(key);
                 else
-                    _pendingHuntMonsterTriggerEchoes[key] = pending - 1;
+                    _pendingServerTriggerEchoes[key] = pending - 1;
             }
 
             return true;
         }
 
-        internal bool HasPendingHuntMonsterTriggers()
-            => _pendingHuntMonsterTriggerEchoes.Count > 0;
+        internal bool HasPendingServerTriggers()
+            => _pendingServerTriggerEchoes.Count > 0;
 
-        internal bool TryMarkNpcItemDropGenerated(int questId)
-            => _npcItemDropQuestIds.Add(questId);
+        internal bool TryMarkNpcItemDropGenerated(
+            QuestActivationId activationId)
+            => activationId.IsValid
+                && _npcItemDropActivations.Add(activationId);
 
-        internal void UnmarkNpcItemDropGenerated(int questId)
-            => _npcItemDropQuestIds.Remove(questId);
+        internal void UnmarkNpcItemDropGenerated(
+            QuestActivationId activationId)
+        {
+            if (activationId.IsValid)
+                _npcItemDropActivations.Remove(activationId);
+        }
     }
 
     internal sealed class DungeonMechanismRuntimeSet

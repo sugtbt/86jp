@@ -55,6 +55,7 @@ namespace DfoServer.Game.Dungeon
         private DungeonSettlementState _settlementState;
         private DungeonClearedFact _clearedFact;
         private Guid _settlementSourceEventId;
+        private Guid _endSourceEventId;
 
         public DungeonInstance Instance { get; }
         public DungeonRewardPolicy RewardPolicy =>
@@ -67,6 +68,10 @@ namespace DfoServer.Game.Dungeon
         public long RunGeneration { get; }
         public long CurrentRoomInstanceId { get; private set; }
         public DungeonEffectLedger Effects { get; } = new DungeonEffectLedger();
+        internal SpecialDungeonEffectPlanJournal SpecialDungeonEffectPlans
+        {
+            get;
+        } = new SpecialDungeonEffectPlanJournal();
         public RunTimerRegistry Timers { get; } = new RunTimerRegistry();
         public DungeonRunState RunState { get { lock (SyncRoot) return _runState; } }
         public DungeonSettlementState SettlementState { get { lock (SyncRoot) return _settlementState; } }
@@ -150,6 +155,20 @@ namespace DfoServer.Game.Dungeon
             }
         }
         public DateTime StartedUtc;
+
+        internal int CalculateElapsedMilliseconds(DateTime observedUtc)
+        {
+            if (StartedUtc == DateTime.MinValue)
+                return 0;
+
+            var elapsed = observedUtc - StartedUtc;
+            if (elapsed <= TimeSpan.Zero)
+                return 0;
+            if (elapsed.TotalMilliseconds >= int.MaxValue)
+                return int.MaxValue;
+            return (int)Math.Round(elapsed.TotalMilliseconds);
+        }
+
         // Compatibility projections. New production code should address the
         // composed state objects above instead of adding fields to this root.
         internal SpecialDungeonRuntime SpecialDungeon { get => Mechanisms.SpecialDungeon; set => Mechanisms.SpecialDungeon = value; }
@@ -238,8 +257,24 @@ namespace DfoServer.Game.Dungeon
         public DungeonRunIdentity CaptureIdentity() =>
             new DungeonRunIdentity(PartyDungeonInstanceId, RunId, RunGeneration);
 
+        public DungeonInstanceIdentity CaptureInstanceIdentity() =>
+            new DungeonInstanceIdentity(PartyDungeonInstanceId);
+
+        public DungeonParticipantRunIdentity CaptureParticipantIdentity() =>
+            new DungeonParticipantRunIdentity(
+                CaptureInstanceIdentity(),
+                RunId,
+                RunGeneration);
+
         public DungeonRoomIdentity CaptureRoomIdentity() =>
-            new DungeonRoomIdentity(CaptureIdentity(), CurrentRoomInstanceId);
+            new DungeonRoomIdentity(
+                CaptureInstanceIdentity(),
+                CurrentRoomInstanceId);
+
+        public DungeonParticipantRoomIdentity CaptureParticipantRoomIdentity() =>
+            new DungeonParticipantRoomIdentity(
+                CaptureIdentity(),
+                CaptureRoomIdentity());
 
         public Guid GetSettlementSourceEventId()
         {
@@ -258,8 +293,13 @@ namespace DfoServer.Game.Dungeon
 
         public bool Matches(DungeonRoomIdentity identity) =>
             identity.IsValid
-            && CaptureIdentity().Equals(identity.Run)
+            && CaptureInstanceIdentity().Equals(identity.Instance)
             && CurrentRoomInstanceId == identity.RoomInstanceId;
+
+        public bool Matches(DungeonParticipantRoomIdentity identity) =>
+            identity.IsValid
+            && CaptureIdentity().Equals(identity.Run)
+            && Matches(identity.Room);
 
         public bool SharesPhysicalInstanceWith(DungeonRun other) =>
             other != null
@@ -269,7 +309,83 @@ namespace DfoServer.Game.Dungeon
         public bool SharesCurrentRoomWith(DungeonRun other) =>
             SharesPhysicalInstanceWith(other)
             && CurrentRoomInstanceId > 0
-            && CurrentRoomInstanceId == other.CurrentRoomInstanceId;
+            && CaptureRoomIdentity().Equals(other.CaptureRoomIdentity());
+
+        internal bool TryCaptureCurrentRoomSnapshot(
+            DungeonRoomIdentity expectedRoom,
+            out DungeonRunRoomSnapshot snapshot)
+        {
+            lock (SyncRoot)
+            {
+                snapshot = null;
+                var roomIdentity = new DungeonRoomIdentity(
+                    CaptureInstanceIdentity(),
+                    CurrentRoomInstanceId);
+                if (!expectedRoom.IsValid
+                    || !roomIdentity.Equals(expectedRoom)
+                    || !TryCreateCurrentRoomSnapshotLocked(
+                        roomIdentity,
+                        out snapshot))
+                {
+                    return false;
+                }
+
+                return true;
+            }
+        }
+
+        internal Guid GetEndSourceEventId()
+        {
+            lock (SyncRoot)
+            {
+                if (_endSourceEventId == Guid.Empty)
+                    _endSourceEventId = Guid.NewGuid();
+                return _endSourceEventId;
+            }
+        }
+
+        internal bool TryCaptureCurrentRoomSnapshot(
+            out DungeonRunRoomSnapshot snapshot)
+        {
+            lock (SyncRoot)
+            {
+                snapshot = null;
+                var roomIdentity = new DungeonRoomIdentity(
+                    CaptureInstanceIdentity(),
+                    CurrentRoomInstanceId);
+                return roomIdentity.IsValid
+                    && TryCreateCurrentRoomSnapshotLocked(
+                        roomIdentity,
+                        out snapshot);
+            }
+        }
+
+        private bool TryCreateCurrentRoomSnapshotLocked(
+            DungeonRoomIdentity roomIdentity,
+            out DungeonRunRoomSnapshot snapshot)
+        {
+            if (!RoomStates.TryGetValue(RoomKey, out var roomState))
+            {
+                snapshot = null;
+                return false;
+            }
+
+            var sourceMonsters = RoomMonsters
+                ?? Array.Empty<GameWorld.Dungeon.MonsterSumInfo>();
+            var monsters = new GameWorld.Dungeon.MonsterSumInfo[
+                sourceMonsters.Count];
+            for (var index = 0; index < sourceMonsters.Count; index++)
+                monsters[index] = sourceMonsters[index];
+
+            snapshot = new DungeonRunRoomSnapshot(
+                CaptureIdentity(),
+                roomIdentity,
+                RoomKey,
+                RoomStartSequence,
+                monsters,
+                roomState);
+            return true;
+        }
 
         public bool TryBeginSelecting()
         {
@@ -352,6 +468,95 @@ namespace DfoServer.Game.Dungeon
                 if (_settlementState != DungeonSettlementState.NotStarted)
                     return false;
                 _settlementState = DungeonSettlementState.Preparing;
+                return true;
+            }
+        }
+
+        public bool TryBeginSettlementPreparationFromClear(
+            DungeonClearedFact fact)
+        {
+            if (fact == null)
+                throw new ArgumentNullException(nameof(fact));
+
+            lock (SyncRoot)
+            {
+                if (_runState != DungeonRunState.ClearCommitting
+                    || !ReferenceEquals(_clearedFact, fact)
+                    || _settlementState != DungeonSettlementState.NotStarted)
+                {
+                    return false;
+                }
+
+                _settlementState = DungeonSettlementState.Preparing;
+                return true;
+            }
+        }
+
+        public bool CanResumeSettlementPreparationFromClear(
+            DungeonClearedFact fact)
+        {
+            lock (SyncRoot)
+            {
+                return fact != null
+                    && _runState == DungeonRunState.ClearCommitting
+                    && ReferenceEquals(_clearedFact, fact)
+                    && _settlementState == DungeonSettlementState.Preparing;
+            }
+        }
+
+        internal bool TryQueueSettlementPresentation(int rankPoint)
+        {
+            lock (SyncRoot)
+            {
+                if (_runState != DungeonRunState.ClearCommitting
+                    || !RewardPolicy.AllowsSettlement
+                    || (_settlementState != DungeonSettlementState.NotStarted
+                        && _settlementState
+                            != DungeonSettlementState.Preparing))
+                {
+                    return false;
+                }
+
+                if (!Settlement.PendingPresentationRankPoint.HasValue)
+                {
+                    Settlement.PendingPresentationRankPoint = Math.Max(
+                        0,
+                        Math.Min(255, rankPoint));
+                }
+                return true;
+            }
+        }
+
+        internal bool TryGetPendingSettlementPresentation(out int rankPoint)
+        {
+            lock (SyncRoot)
+            {
+                rankPoint = 0;
+                if (_runState != DungeonRunState.Cleared
+                    || _settlementState != DungeonSettlementState.Preparing
+                    || !Settlement.PendingPresentationRankPoint.HasValue)
+                {
+                    return false;
+                }
+
+                rankPoint = Settlement.PendingPresentationRankPoint.Value;
+                return true;
+            }
+        }
+
+        internal bool TryAcknowledgePendingSettlementPresentation(
+            int rankPoint)
+        {
+            lock (SyncRoot)
+            {
+                if (!Settlement.PendingPresentationRankPoint.HasValue
+                    || Settlement.PendingPresentationRankPoint.Value
+                        != Math.Max(0, Math.Min(255, rankPoint)))
+                {
+                    return false;
+                }
+
+                Settlement.PendingPresentationRankPoint = null;
                 return true;
             }
         }
@@ -453,7 +658,7 @@ namespace DfoServer.Game.Dungeon
                 QuestBridge.UnmarkClearMapSynced(dungeonId, mapId);
         }
 
-        internal void MarkServerDrivenHuntMonsterTrigger(
+        internal void MarkServerDrivenQuestTrigger(
             ushort questId,
             int channelIndex)
         {
@@ -461,10 +666,10 @@ namespace DfoServer.Game.Dungeon
                 return;
 
             lock (SyncRoot)
-                QuestBridge.MarkHuntMonsterTrigger(questId, channelIndex);
+                QuestBridge.MarkServerTrigger(questId, channelIndex);
         }
 
-        internal bool TryConsumeServerDrivenHuntMonsterTrigger(
+        internal bool TryConsumeServerDrivenQuestTrigger(
             ushort questId,
             byte triggerType)
         {
@@ -480,33 +685,35 @@ namespace DfoServer.Game.Dungeon
                 return false;
 
             lock (SyncRoot)
-                return QuestBridge.TryConsumeHuntMonsterTrigger(
+                return QuestBridge.TryConsumeServerTrigger(
                     questId,
                     channelMask);
         }
 
-        internal bool HasPendingServerDrivenHuntMonsterTriggers()
+        internal bool HasPendingServerDrivenQuestTriggers()
         {
             lock (SyncRoot)
-                return QuestBridge.HasPendingHuntMonsterTriggers();
+                return QuestBridge.HasPendingServerTriggers();
         }
 
-        internal bool TryMarkNpcItemDropGenerated(int questId)
+        internal bool TryMarkNpcItemDropGenerated(
+            QuestActivationId activationId)
         {
-            if (questId <= 0)
+            if (!activationId.IsValid)
                 return false;
 
             lock (SyncRoot)
-                return QuestBridge.TryMarkNpcItemDropGenerated(questId);
+                return QuestBridge.TryMarkNpcItemDropGenerated(activationId);
         }
 
-        internal void UnmarkNpcItemDropGenerated(int questId)
+        internal void UnmarkNpcItemDropGenerated(
+            QuestActivationId activationId)
         {
-            if (questId <= 0)
+            if (!activationId.IsValid)
                 return;
 
             lock (SyncRoot)
-                QuestBridge.UnmarkNpcItemDropGenerated(questId);
+                QuestBridge.UnmarkNpcItemDropGenerated(activationId);
         }
     }
 

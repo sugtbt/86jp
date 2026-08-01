@@ -1,4 +1,4 @@
-using DfoServer.Network;
+﻿using DfoServer.Network;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -11,6 +11,7 @@ namespace DfoServer
         // 自测注册表: 新增自测在这里加一行, 单跑参数与 --selftest-all 都会覆盖到。
         private static readonly (string Arg, Func<int> Run)[] SelfTestRegistry =
         {
+            ("--selftest-monster-card-bind", SelfTests.MonsterCardBindSelfTest.Run),
             ("--selftest-auction-service", SelfTests.AuctionServiceNotificationSelfTest.Run),
             ("--selftest-chronicle-growth", SelfTests.ChronicleGrowthSelfTest.Run),
             ("--selftest-chronicle-refine", SelfTests.ChronicleRefineSelfTest.Run),
@@ -39,11 +40,11 @@ namespace DfoServer
             ("--selftest-card-reward-flow", SelfTests.CardRewardFlowSelfTest.Run),
             ("--selftest-dungeon-persistent-effects", SelfTests.DungeonPersistentEffectSelfTest.Run),
             ("--selftest-monster-card-drop", SelfTests.MonsterCardDropSelfTest.Run),
-            ("--selftest-monster-card-bind", SelfTests.MonsterCardBindSelfTest.Run),
             ("--selftest-dungeon-npc-item-drop", SelfTests.DungeonNpcItemDropSelfTest.Run),
             ("--selftest-quest-dungeon-drop", SelfTests.QuestDungeonDropSelfTest.Run),
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),
             ("--selftest-expert-contract-skill", SelfTests.ExpertContractSkillSelfTest.Run),
+            ("--selftest-expert-job-store", SelfTests.ExpertJobStoreSelfTest.Run),
             ("--selftest-crystal-contract", SelfTests.CrystalContractSelfTest.Run),
             ("--selftest-slot-expansion-quest", SelfTests.SlotExpansionQuestSelfTest.Run),
             ("--selftest-character-slot-policy", SelfTests.CharacterSlotPolicySelfTest.Run),

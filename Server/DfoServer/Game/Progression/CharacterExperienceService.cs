@@ -149,18 +149,20 @@ namespace DfoServer.Game.Progression
         // 离开一局时把会话内存的等级/经验落库 -- OnLevelUpOnly 策略的配对兜底:
         // 副本杀怪经验平时只写内存, 放弃副本/断线/换角色若不在此落库,
         // 这段经验要么随会话消失, 要么之后被读库的结算逻辑用旧值覆盖掉。
-        internal static void PersistSessionExp(PlayerContext player, string source)
+        internal static bool PersistSessionExp(PlayerContext player, string source)
         {
             if (player == null || player.CharacterId <= 0)
-                return;
+                return true;
 
             try
             {
                 CharacterProgressService.PersistLevelAndExp(player.CharacterId, player.Level, player.Exp);
+                return true;
             }
             catch (Exception ex)
             {
                 FileLogger.Log($"[Progression] ERROR: exp persist failed on {source}: cid={player.CharacterId} lv={player.Level} exp={player.Exp}: {ex.Message}");
+                return false;
             }
         }
 

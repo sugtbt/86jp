@@ -299,7 +299,23 @@ namespace DfoServer.Network.Handlers.Dungeon
         }
 
         internal static DungeonRoomProgress GetCurrentRoomProgress(EnhancedClientSession session)
-            => GetRoomProgress(session, session?.Player?.CurrentRun?.RoomKilledSeqIds);
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run != null && run.Tower == null)
+            {
+                RoomState roomState;
+                lock (run.SyncRoot)
+                    run.RoomStates.TryGetValue(run.RoomKey, out roomState);
+                if (roomState?.InstanceRoom != null)
+                {
+                    return GetRoomProgress(
+                        session,
+                        roomState.InstanceRoom.CaptureKilledActorSequenceIds());
+                }
+            }
+
+            return GetRoomProgress(session, run?.RoomKilledSeqIds);
+        }
 
         internal static DungeonRoomProgress GetRoomProgress(
             EnhancedClientSession session,
@@ -317,7 +333,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             for (var i = 0; i < monsters.Count; i++)
             {
                 var monster = monsters[i];
-                if (monster.Type == 9) continue;
+                if (!IsTrackedForRoomProgress(monster.Type)) continue;
 
                 trackable++;
                 if (monster.Type >= 5) apc++; else normal++;
@@ -368,6 +384,51 @@ namespace DfoServer.Network.Handlers.Dungeon
                     killedBlockingCount++;
             }
             return killedBlockingCount >= blockingCount;
+        }
+
+        internal static bool IsTrackedForRoomProgress(byte actorType) =>
+            actorType != 9;
+
+        internal static bool TryCommitCurrentRoomClear(
+            Game.Dungeon.DungeonRun run,
+            DungeonEventEnvelope source,
+            ushort completingSequenceId,
+            out int blockingCount,
+            out int killedBlockingCount,
+            out DungeonEventEnvelope clearSource)
+        {
+            blockingCount = 0;
+            killedBlockingCount = 0;
+            clearSource = null;
+            if (run == null || source == null)
+                return false;
+
+            RoomState roomState;
+            lock (run.SyncRoot)
+                run.RoomStates.TryGetValue(run.RoomKey, out roomState);
+
+            if (run.Tower == null && roomState?.InstanceRoom != null)
+            {
+                var commit = roomState.InstanceRoom.TryCommitClearFromActorDeaths(
+                    actor => IsBlockingForRoomClear(run, actor),
+                    source,
+                    completingSequenceId);
+                blockingCount = commit.BlockingCount;
+                killedBlockingCount = commit.KilledBlockingCount;
+                clearSource = commit.Source;
+                return commit.IsCleared;
+            }
+
+            lock (run.SyncRoot)
+            {
+                var cleared = ComputeRoomClearedLocked(
+                    run,
+                    out blockingCount,
+                    out killedBlockingCount);
+                if (cleared)
+                    clearSource = source;
+                return cleared;
+            }
         }
 
         private static bool IsBlockingForRoomClear(

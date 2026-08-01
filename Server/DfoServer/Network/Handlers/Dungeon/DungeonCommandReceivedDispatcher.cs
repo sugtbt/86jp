@@ -10,7 +10,9 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static Task DispatchAsync(
             EnhancedClientSession session,
             DungeonCommand command,
-            DropService drops)
+            DropService drops,
+            TournamentDungeonCoordinator tournaments,
+            BloodAltarDungeonCoordinator bloodAltars)
         {
             if (session == null || command == null)
                 return Task.CompletedTask;
@@ -61,6 +63,36 @@ namespace DfoServer.Network.Handlers.Dungeon
                         session,
                         breakTrap,
                         sourceEvent);
+
+                case TournamentRewardSelectStateDungeonCommand tournamentState:
+                    return tournaments?.HandleRewardSelectStateAsync(
+                        session,
+                        tournamentState,
+                        sourceEvent) ?? Task.CompletedTask;
+
+                case TournamentRewardSelectDungeonCommand tournamentSelect:
+                    return tournaments?.HandleRewardSelectAsync(
+                        session,
+                        tournamentSelect,
+                        sourceEvent) ?? Task.CompletedTask;
+
+                case BloodAltarPrepareFinishedDungeonCommand altarPrepare:
+                    return bloodAltars?.HandlePrepareFinishedAsync(
+                        session,
+                        altarPrepare,
+                        sourceEvent) ?? Task.CompletedTask;
+
+                case BloodAltarMonsterDeathsDungeonCommand altarDeaths:
+                    return bloodAltars?.HandleMonsterDeathsAsync(
+                        session,
+                        altarDeaths,
+                        sourceEvent) ?? Task.CompletedTask;
+
+                case BloodAltarSelectDifficultyDungeonCommand altarDifficulty:
+                    return bloodAltars?.HandleSelectDifficultyAsync(
+                        session,
+                        altarDifficulty,
+                        sourceEvent) ?? Task.CompletedTask;
 
                 default:
                     FileLogger.Log(

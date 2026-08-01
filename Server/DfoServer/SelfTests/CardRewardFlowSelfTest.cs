@@ -32,6 +32,13 @@ namespace DfoServer.SelfTests
 
             var tempDb = Path.Combine(Path.GetTempPath(), "card-reward-flow.db");
             DeleteTempDatabase(tempDb);
+            var previousDatabasePath = Environment.GetEnvironmentVariable(
+                "INVENTORY_DATABASE_PATH");
+            Environment.SetEnvironmentVariable(
+                "INVENTORY_DATABASE_PATH",
+                tempDb);
+            try
+            {
             var connStr = SqliteDatabaseBootstrap.Initialize(tempDb, ServerPaths.SchemaFilePath);
             Seed(connStr);
             VerifyClearRewardEtc(ref failures);
@@ -152,6 +159,15 @@ namespace DfoServer.SelfTests
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    "INVENTORY_DATABASE_PATH",
+                    previousDatabasePath);
+                SqliteConnection.ClearAllPools();
+                DeleteTempDatabase(tempDb);
+            }
         }
 
         private static DungeonRun BuildRun(int freeGold, int paidCardCost)

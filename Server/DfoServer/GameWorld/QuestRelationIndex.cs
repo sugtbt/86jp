@@ -13,17 +13,28 @@ namespace DfoServer.GameWorld
 
         internal static List<int> GetPreRequiredQuests(int questId)
         {
-            var quest = QuestCatalog.Get(questId);
-            return quest != null
-                ? QuestData.ParseIntList(quest.PreRequiredQuest)
-                : new List<int>();
+            var result = new List<int>();
+            var definition = QuestPrerequisiteCatalog.Get(questId);
+            if (definition == null || !definition.IsValid)
+                return result;
+
+            var seen = new HashSet<int>();
+            foreach (var group in definition.CompletedQuestGroups)
+            {
+                foreach (var prerequisiteQuestId in group)
+                {
+                    if (seen.Add(prerequisiteQuestId))
+                        result.Add(prerequisiteQuestId);
+                }
+            }
+            return result;
         }
 
         internal static List<int> GetCollisionQuests(int questId)
         {
-            var quest = QuestCatalog.Get(questId);
-            return quest != null
-                ? QuestData.ParseIntList(quest.CollisionQuest)
+            var definition = QuestPrerequisiteCatalog.Get(questId);
+            return definition != null && definition.IsValid
+                ? new List<int>(definition.CollisionQuestIds)
                 : new List<int>();
         }
 
@@ -64,6 +75,9 @@ namespace DfoServer.GameWorld
             ISet<int> allowedCreatureKinds)
         {
             var result = new List<ushort>();
+            var prerequisiteState = new QuestPrerequisiteEvaluationState(
+                clearedQuestIds,
+                clearedFlags);
             foreach (var questId in QuestCatalog.OrderedIds)
             {
                 if (questId <= 0 || questId > 29999)
@@ -149,12 +163,13 @@ namespace DfoServer.GameWorld
                     || grade == "[special daily]";
                 if (!repeatable && clearedQuestIds.Contains(questId))
                     continue;
-                if (!MatchesPrerequisiteGroups(quest, clearedQuestIds))
+                var prerequisiteDefinition = QuestPrerequisiteCatalog.Get(questId);
+                if (prerequisiteDefinition == null
+                    || !prerequisiteDefinition.Evaluate(
+                        prerequisiteState).IsAllowed)
+                {
                     continue;
-                if (!MatchesQuestionPrerequisites(quest, clearedFlags))
-                    continue;
-                if (HasClearedCollision(quest, clearedQuestIds))
-                    continue;
+                }
 
                 result.Add((ushort)questId);
             }
@@ -291,8 +306,11 @@ namespace DfoServer.GameWorld
                 if (nextQuest == null)
                     continue;
 
-                foreach (var prerequisiteId in QuestData.ParseIntList(
-                    nextQuest.PreRequiredQuest))
+                var definition = QuestPrerequisiteCatalog.Get(nextQuestId);
+                if (definition == null || !definition.IsValid)
+                    continue;
+
+                foreach (var prerequisiteId in GetPreRequiredQuests(nextQuestId))
                 {
                     if (prerequisiteId <= 0
                         || prerequisiteId == nextQuestId)
@@ -326,14 +344,14 @@ namespace DfoServer.GameWorld
                 if (quest == null)
                     continue;
 
-                var requirements = QuestData.ParseIntList(
-                    quest.PreRequiredQuestAnswer);
-                for (var index = 0;
-                    index + 1 < requirements.Count;
-                    index += 2)
+                var definition = QuestPrerequisiteCatalog.Get(questId);
+                if (definition == null || !definition.IsValid)
+                    continue;
+
+                foreach (var requiredAnswer in definition.RequiredAnswers)
                 {
-                    var questionQuestId = requirements[index];
-                    var answerIndex = requirements[index + 1];
+                    var questionQuestId = requiredAnswer.QuestId;
+                    var answerIndex = requiredAnswer.AnswerIndex;
                     if (questionQuestId <= 0 || answerIndex < 0)
                         continue;
 
@@ -351,67 +369,6 @@ namespace DfoServer.GameWorld
             FileLogger.Log(
                 $"[QuestRelationIndex] question quests={result.Count}");
             return result;
-        }
-
-        private static bool MatchesPrerequisiteGroups(
-            QuestFile quest,
-            ISet<int> clearedQuestIds)
-        {
-            if (quest.PreRequiredQuestGroups == null
-                || quest.PreRequiredQuestGroups.Count == 0)
-            {
-                return true;
-            }
-
-            foreach (var group in quest.PreRequiredQuestGroups)
-            {
-                var groupMatches = true;
-                foreach (var prerequisite in QuestData.ParseIntList(group))
-                {
-                    if (prerequisite > 0
-                        && !clearedQuestIds.Contains(prerequisite))
-                    {
-                        groupMatches = false;
-                        break;
-                    }
-                }
-                if (groupMatches)
-                    return true;
-            }
-
-            return false;
-        }
-
-        private static bool MatchesQuestionPrerequisites(
-            QuestFile quest,
-            IReadOnlyDictionary<int, int> clearedFlags)
-        {
-            var requirements = QuestData.ParseIntList(
-                quest.PreRequiredQuestAnswer);
-            for (var index = 0; index + 1 < requirements.Count; index += 2)
-            {
-                if (!DoesClearedFlagMatchRequiredQuestAnswer(
-                        clearedFlags,
-                        requirements[index],
-                        requirements[index + 1]))
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private static bool HasClearedCollision(
-            QuestFile quest,
-            ISet<int> clearedQuestIds)
-        {
-            foreach (var collision in QuestData.ParseIntList(
-                quest.CollisionQuest))
-            {
-                if (collision > 0 && clearedQuestIds.Contains(collision))
-                    return true;
-            }
-            return false;
         }
 
         private static bool IsSelectableGrade(string grade)

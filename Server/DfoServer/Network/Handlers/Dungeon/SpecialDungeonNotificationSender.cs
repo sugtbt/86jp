@@ -5,11 +5,24 @@ using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers.Dungeon
 {
+    internal interface ISpecialDungeonNotificationSender
+    {
+        Task SendAsync(
+            EnhancedClientSession session,
+            SpecialDungeonEffectIntent effect);
+    }
+
     internal sealed class SpecialDungeonNotificationSender
+        : ISpecialDungeonNotificationSender
     {
         private const byte SummonMonsterResult = 0x01;
         private const byte SummonMonsterMode = 0x03;
         private const byte StrongWarlordResult = 0x01;
+
+        Task ISpecialDungeonNotificationSender.SendAsync(
+            EnhancedClientSession session,
+            SpecialDungeonEffectIntent effect)
+            => SendAsync(session, effect);
 
         internal async Task SendAsync(
             EnhancedClientSession session,

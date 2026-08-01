@@ -12,8 +12,14 @@ namespace DfoServer.Game.Dungeon
         internal bool IsTowerOfDespair;
         internal int TowerOfDespairFloor;
         internal bool ShouldScheduleCardRewardFlow;
+        internal BloodAltar.BloodAltarParticipantSettlementRuntime BloodAltar;
 
+        // Reward rank is server-owned. Presentation rank may be copied from a
+        // validated SET_PLAY_RESULT field, but never feeds reward generation.
         internal byte ClientRankPoint;
+        internal int PresentationRankPoint;
+        internal byte PresentationRankGrade;
+        internal int PresentationRankBonusIndex;
         internal int TimeBonusPoint;
         internal int RankPoint;
         internal byte RankGrade;

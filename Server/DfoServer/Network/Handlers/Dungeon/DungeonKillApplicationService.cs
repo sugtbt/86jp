@@ -14,6 +14,7 @@ namespace DfoServer.Network.Handlers.Dungeon
     {
         LocalReport,
         PartyRelay,
+        Recovery,
     }
 
     internal sealed class KillContext
@@ -44,13 +45,21 @@ namespace DfoServer.Network.Handlers.Dungeon
     {
         private readonly DungeonSharedServices _services;
         private readonly DungeonSettlementHandler _settlement;
+        private readonly TournamentDungeonCoordinator _tournament;
+        private readonly BloodAltarDungeonCoordinator _bloodAltar;
 
         internal DungeonKillApplicationService(
             DungeonSharedServices services,
-            DungeonSettlementHandler settlement)
+            DungeonSettlementHandler settlement,
+            TournamentDungeonCoordinator tournament,
+            BloodAltarDungeonCoordinator bloodAltar)
         {
             _services = services ?? throw new ArgumentNullException(nameof(services));
             _settlement = settlement ?? throw new ArgumentNullException(nameof(settlement));
+            _tournament = tournament
+                ?? throw new ArgumentNullException(nameof(tournament));
+            _bloodAltar = bloodAltar
+                ?? throw new ArgumentNullException(nameof(bloodAltar));
         }
 
         internal async Task ProcessAsync(KillContext context)
@@ -62,43 +71,255 @@ namespace DfoServer.Network.Handlers.Dungeon
             var run = session.Player?.CurrentRun;
             if (!IsCurrent(run, context.Envelope))
                 return;
-
-            if (run.Phase >= DungeonRunPhase.Cleared)
+            if (run.Instance.State == DungeonInstanceState.Ending
+                || run.Instance.State == DungeonInstanceState.Ended)
             {
                 await SendMonsterDieAsync(session, context, null);
                 return;
             }
 
-            bool firstApplication;
-            lock (run.SyncRoot)
-                firstApplication = run.RoomKilledSeqIds.Add(context.SequenceId);
-            if (!firstApplication)
+            if (run.Phase >= DungeonRunPhase.Cleared
+                && context.Origin != DungeonKillOrigin.Recovery)
+            {
+                await SendMonsterDieAsync(session, context, null);
+                return;
+            }
+
+            if (run.Tower != null)
+            {
+                bool firstApplication;
+                lock (run.SyncRoot)
+                    firstApplication = run.RoomKilledSeqIds.Add(context.SequenceId);
+                if (!firstApplication)
+                {
+                    await SendMonsterDieAsync(session, context, null);
+                    return;
+                }
+
+                await ProcessCoreAsync(context, run);
+                return;
+            }
+
+            if (!context.Envelope.RoomIdentity.IsValid)
             {
                 FileLogger.Log(
-                    $"[DungeonKill] duplicate ignored: cid={session.Player.CharacterId} " +
-                    $"origin={context.Origin} seq={context.SequenceId} " +
+                    $"[DungeonKill] participant event rejected: invalid room identity " +
+                    $"cid={session.Player.CharacterId} seq={context.SequenceId} " +
                     $"event={context.Envelope.SourceEventId:N}");
                 await SendMonsterDieAsync(session, context, null);
-                if (context.IsLocalReport && run.Tower == null)
-                    await RelayToPartyAsync(context, run);
                 return;
             }
 
+            if (!TryCanonicalizeSharedDeath(
+                    context,
+                    run,
+                    out var canonicalContext,
+                    out var canonicalWorldDeath,
+                    out var canonicalDynamicActor))
+            {
+                await SendMonsterDieAsync(session, context, null);
+                return;
+            }
+            context = canonicalContext;
+
+            var roster = CaptureEligibleRoster(context, run);
+            run.Instance.ParticipantEffects.TryFreeze(
+                context.Envelope,
+                DungeonParticipantEffectAudience.Room,
+                roster,
+                out var frozenRoster);
+            var participant = FindParticipant(
+                frozenRoster,
+                session.Player.CharacterId,
+                run.CaptureIdentity());
+            if (participant == null)
+            {
+                FileLogger.Log(
+                    $"[DungeonKill] participant event rejected: not in frozen roster " +
+                    $"cid={session.Player.CharacterId} seq={context.SequenceId} " +
+                    $"event={context.Envelope.SourceEventId:N}");
+                await SendMonsterDieAsync(session, context, null);
+                return;
+            }
+
+            if (!run.Instance.ParticipantEffects.TryBegin(
+                    context.Envelope.SourceEventId,
+                    DungeonParticipantEffectAudience.Room,
+                    participant,
+                    DungeonParticipantEffectKinds.MonsterKill,
+                    out var reservation,
+                    out var existingState))
+            {
+                await SendMonsterDieAsync(session, context, null);
+                if (context.IsLocalReport
+                    && existingState == DungeonParticipantEffectState.Committed)
+                {
+                    await RelayAndCompleteDeferredClearFanoutAsync(context, run);
+                }
+                return;
+            }
+
+            try
+            {
+                var completed = await ProcessCoreAsync(
+                    context,
+                    run,
+                    canonicalWorldDeath,
+                    canonicalDynamicActor);
+                if (!completed)
+                {
+                    run.Instance.ParticipantEffects.TryFail(reservation);
+                    return;
+                }
+
+                if ((canonicalDynamicActor?.Policy.CountsTowardRoomClear
+                        ?? true)
+                    && DungeonRoomTopology.IsTrackedForRoomProgress(
+                        canonicalWorldDeath.Fact.ActorType))
+                {
+                    lock (run.SyncRoot)
+                        run.RoomKilledSeqIds.Add(context.SequenceId);
+                }
+                if (!run.Instance.ParticipantEffects.TryCommit(reservation))
+                {
+                    throw new InvalidOperationException(
+                        "Participant kill effect reservation was lost before commit.");
+                }
+
+                if (context.IsLocalReport)
+                    await RelayAndCompleteDeferredClearFanoutAsync(context, run);
+            }
+            catch
+            {
+                run.Instance.ParticipantEffects.TryFail(reservation);
+                throw;
+            }
+        }
+
+        // Replays only frozen, unfinished participant effects after the same run
+        // is attached to a new session. The shared death fact remains the source
+        // of truth; this method never invents a new actor death event.
+        internal async Task RecoverParticipantEffectsAsync(
+            EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run == null || run.Tower != null)
+                return;
+
+            var participantIdentity = run.CaptureParticipantIdentity();
+            var workItems = run.Instance.ParticipantEffects
+                .GetRecoverableForParticipant(
+                    participantIdentity,
+                    DungeonParticipantEffectAudience.Room,
+                    DungeonParticipantEffectKinds.MonsterKill);
+            foreach (var work in workItems)
+            {
+                if (!ReferenceEquals(work.Participant.Run, run)
+                    || !run.Matches(work.Participant.RunIdentity)
+                    || !run.Matches(work.Participant.RoomIdentity)
+                    || !work.Source.SourceActorId.HasValue
+                    || work.Source.SourceActorId.Value <= 0
+                    || work.Source.SourceActorId.Value > ushort.MaxValue)
+                {
+                    FileLogger.Log(
+                        $"[DungeonKill] recovery deferred: " +
+                        $"cid={session.Player.CharacterId} " +
+                        $"event={work.Source.SourceEventId:N} " +
+                        $"reason=participant_or_actor_identity_mismatch");
+                    continue;
+                }
+
+                var sourceUserId = work.Source.SourcePlayerId > 0
+                    && work.Source.SourcePlayerId <= ushort.MaxValue
+                    ? (ushort)work.Source.SourcePlayerId
+                    : (ushort)0;
+                var projected = work.Source.ForAffectedPlayer(
+                    run.CaptureIdentity(),
+                    work.Participant.RoomIdentity.RoomInstanceId,
+                    session.Player.CharacterId);
+                try
+                {
+                    await ProcessAsync(new KillContext(
+                        session,
+                        projected,
+                        (ushort)work.Source.SourceActorId.Value,
+                        sourceUserId,
+                        DungeonKillOrigin.Recovery));
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        $"[DungeonKill] recovery failed: " +
+                        $"cid={session.Player.CharacterId} " +
+                        $"event={work.Source.SourceEventId:N} " +
+                        $"error={ex.Message}");
+                }
+            }
+        }
+
+        private async Task<bool> ProcessCoreAsync(
+            KillContext context,
+            DungeonRun run,
+            DungeonRoomActorDeathApplication? recordedWorldDeath = null,
+            DungeonDynamicActorDefinition dynamicActor = null)
+        {
+            var session = context.Session;
+
             var identity = run.CaptureIdentity();
-            var roomLocalIndex = context.SequenceId - run.RoomStartSequence;
-            var monsters = run.RoomMonsters;
+            DungeonRunRoomSnapshot roomSnapshot = null;
+            run.TryCaptureCurrentRoomSnapshot(
+                context.Envelope.RoomIdentity,
+                out roomSnapshot);
+            var roomStartSequence = roomSnapshot?.RoomStartSequence
+                ?? run.RoomStartSequence;
+            var roomLocalIndex = context.SequenceId - roomStartSequence;
+            var monsters = roomSnapshot?.Monsters ?? run.RoomMonsters;
             DungeonData.MonsterSumInfo? monster = null;
-            if (roomLocalIndex >= 0 && roomLocalIndex < monsters.Count)
+            if (dynamicActor == null
+                && roomLocalIndex >= 0
+                && roomLocalIndex < monsters.Count)
                 monster = monsters[roomLocalIndex];
+
+            var sharedRoomState = roomSnapshot?.RoomState;
+            var hasSharedRoom = run.Tower == null
+                && sharedRoomState != null
+                && sharedRoomState.InstanceRoom != null;
+            var worldDeath = recordedWorldDeath
+                ?? default(DungeonRoomActorDeathApplication);
+            if (monster != null && hasSharedRoom)
+            {
+                if (!recordedWorldDeath.HasValue)
+                {
+                    worldDeath = sharedRoomState.InstanceRoom.TryRecordActorDeath(
+                        context.Envelope,
+                        context.SequenceId,
+                        monster.Value.Code,
+                        monster.Value.Type);
+                }
+                if (!worldDeath.Accepted)
+                {
+                    FileLogger.Log(
+                        $"[DungeonKill] shared death rejected: " +
+                        $"cid={session.Player.CharacterId} seq={context.SequenceId} " +
+                        $"instance={context.Envelope.PartyDungeonInstanceId} " +
+                        $"room={context.Envelope.RoomInstanceId.GetValueOrDefault()} " +
+                        $"event={context.Envelope.SourceEventId:N}");
+                    await SendMonsterDieAsync(session, context, null);
+                    return false;
+                }
+            }
 
             IReadOnlyList<DropInfo> drops = null;
             if (monster != null)
             {
-                run.Instance.TryRecordMonsterKill(
-                    run.CurrentRoomInstanceId,
-                    run.RoomKey,
-                    context.SequenceId,
-                    monster.Value.Type);
+                if (!hasSharedRoom || worldDeath.Created)
+                {
+                    run.Instance.TryRecordMonsterKill(
+                        run.CurrentRoomInstanceId,
+                        run.RoomKey,
+                        context.SequenceId,
+                        monster.Value.Type);
+                }
                 drops = await ApplyParticipantRewardAsync(
                     session,
                     run,
@@ -106,7 +327,38 @@ namespace DfoServer.Network.Handlers.Dungeon
                     context.SequenceId,
                     monster.Value);
                 if (!session.Player.IsCurrentDungeonRun(identity))
-                    return;
+                    return false;
+            }
+            else if (dynamicActor != null)
+            {
+                if (worldDeath.Created
+                    && dynamicActor.Policy.TracksKillStatistics)
+                {
+                    run.Instance.TryRecordMonsterKill(
+                        run.CurrentRoomInstanceId,
+                        run.RoomKey,
+                        context.SequenceId,
+                        dynamicActor.ActorType);
+                }
+
+                if (dynamicActor.Policy.GrantsMonsterExperience
+                    || dynamicActor.Policy.GeneratesMonsterDrops)
+                {
+                    drops = await ApplyParticipantRewardAsync(
+                        session,
+                        run,
+                        identity,
+                        context.SequenceId,
+                        new DungeonData.MonsterSumInfo
+                        {
+                            Code = dynamicActor.ActorCode,
+                            Type = dynamicActor.ActorType,
+                            Level = dynamicActor.ActorLevel,
+                        },
+                        dynamicActor.Policy);
+                    if (!session.Player.IsCurrentDungeonRun(identity))
+                        return false;
+                }
             }
             else if (TryGetCurrentRoomState(run, out var outOfRangeRoomState)
                 && outOfRangeRoomState.IsHellPartyRoom)
@@ -120,58 +372,134 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             await SendMonsterDieAsync(session, context, drops);
             if (!IsCurrent(run, context.Envelope))
-                return;
+                return false;
 
-            var killedMonsterCode = monster?.Code ?? 0;
-            var killedMonsterType = monster?.Type ?? (byte)0;
-            if (killedMonsterCode > 0)
+            if (worldDeath.Accepted
+                && worldDeath.Fact != null
+                && (dynamicActor == null
+                    || dynamicActor.Policy.AppliesGeneralMechanisms))
             {
-                if (DungeonCombatHandler.IsAiCharacterActorType(killedMonsterType))
-                    await _services.QuestDrops.CheckAiCharacterDrop(session, killedMonsterCode);
-                else if (run.Tower == null)
-                    await _services.QuestDrops.CheckMonsterDrop(session, killedMonsterCode);
+                await _tournament.OnActorDeathAsync(
+                    session,
+                    run,
+                    worldDeath.Fact);
                 if (!IsCurrent(run, context.Envelope))
-                    return;
+                    return false;
+            }
+            await _tournament.EnsureParticipantRewardsAsync(
+                session,
+                run,
+                forceProjection: false);
+            if (!IsCurrent(run, context.Envelope))
+                return false;
+
+            if (dynamicActor != null
+                && worldDeath.Accepted
+                && worldDeath.Fact != null)
+            {
+                await _bloodAltar.OnDynamicActorDeathAsync(
+                    session,
+                    run,
+                    dynamicActor,
+                    worldDeath.Fact.Source);
+                if (!IsCurrent(run, context.Envelope))
+                    return false;
             }
 
-            await DungeonHuntMonsterQuestSync.SyncAsync(
-                session,
-                killedMonsterCode,
-                context.Envelope);
-            if (!IsCurrent(run, context.Envelope))
-                return;
-
-            var mechanismKill = await DungeonMechanismCoordinator.OnMonsterKilledAsync(
-                session,
-                context.Envelope,
-                context.SequenceId,
-                killedMonsterCode,
-                killedMonsterType);
-            if (!IsCurrent(run, context.Envelope))
-                return;
-
-            int blockingCount;
-            int killedBlockingCount;
-            bool roomCleared;
-            lock (run.SyncRoot)
+            var killedMonsterCode = dynamicActor?.ActorCode
+                ?? monster?.Code
+                ?? 0;
+            var killedMonsterType = dynamicActor?.ActorType
+                ?? monster?.Type
+                ?? (byte)0;
+            var generatesQuestDrops = dynamicActor == null
+                || dynamicActor.Policy.GeneratesQuestDrops;
+            var advancesQuestObjectives = dynamicActor == null
+                || dynamicActor.Policy.AdvancesQuestObjectives;
+            if (killedMonsterCode > 0 && generatesQuestDrops)
             {
-                roomCleared = DungeonRoomTopology.ComputeRoomClearedLocked(
+                if (DungeonCombatHandler.IsAiCharacterActorType(killedMonsterType))
+                    await _services.QuestDrops.CheckAiCharacterDrop(
+                        session,
+                        run,
+                        context.Envelope,
+                        killedMonsterCode);
+                else if (run.Tower == null)
+                    await _services.QuestDrops.CheckMonsterDrop(
+                        session,
+                        run,
+                        context.Envelope,
+                        killedMonsterCode);
+                if (!IsCurrent(run, context.Envelope))
+                    return false;
+            }
+
+            if (advancesQuestObjectives)
+            {
+                await DungeonActorQuestSync.SyncAsync(
+                    session,
+                    killedMonsterCode,
+                    killedMonsterType,
+                    context.Envelope);
+                if (!IsCurrent(run, context.Envelope))
+                    return false;
+            }
+
+            var appliesGeneralMechanisms = dynamicActor == null
+                || dynamicActor.Policy.AppliesGeneralMechanisms;
+            var mechanismKill = default(DungeonMechanismCoordinator.ClearRequest);
+            if (appliesGeneralMechanisms)
+            {
+                mechanismKill = await DungeonMechanismCoordinator
+                    .OnMonsterKilledAsync(
+                        session,
+                        context.Envelope,
+                        context.SequenceId,
+                        killedMonsterCode,
+                        killedMonsterType);
+                if (!IsCurrent(run, context.Envelope))
+                    return false;
+            }
+
+            var roomCleared = false;
+            var blockingCount = 0;
+            var killedBlockingCount = 0;
+            DungeonEventEnvelope roomClearSource = null;
+            if (dynamicActor == null
+                || dynamicActor.Policy.CountsTowardRoomClear)
+            {
+                roomCleared = DungeonRoomTopology.TryCommitCurrentRoomClear(
                     run,
+                    context.Envelope,
+                    context.SequenceId,
                     out blockingCount,
-                    out killedBlockingCount);
+                    out killedBlockingCount,
+                    out roomClearSource);
             }
 
             if (roomCleared)
             {
+                var projectedClearSource = (roomClearSource ?? context.Envelope)
+                    .ForAffectedPlayer(
+                        run.CaptureIdentity(),
+                        run.CurrentRoomInstanceId > 0
+                            ? run.CurrentRoomInstanceId
+                            : null,
+                        session.Player.CharacterId);
                 await ApplyRoomClearedAsync(
                     session,
                     run,
-                    context,
+                    new KillContext(
+                        session,
+                        projectedClearSource,
+                        context.SequenceId,
+                        context.SourceUserId,
+                        context.Origin),
                     killedMonsterCode,
                     blockingCount,
                     killedBlockingCount);
                 if (!IsCurrent(run, context.Envelope))
-                    return;
+                    return false;
             }
 
             if (roomCleared
@@ -183,7 +511,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 FileLogger.Log("[DungeonKill] HELLPARTY complete: tracked monsters cleared");
             }
 
-            if (run.ClearCondition != null)
+            if (appliesGeneralMechanisms && run.ClearCondition != null)
             {
                 var conditionType = IsBossActorType(killedMonsterType)
                     ? 4
@@ -198,10 +526,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                         new DungeonClearIntent(
                             context.Envelope,
                             $"ClearCondition type={conditionType} target={killedMonsterCode}",
-                            killedMonsterCode));
+                            killedMonsterCode),
+                        deferParticipantFanout: true);
                 }
                 if (!IsCurrent(run, context.Envelope))
-                    return;
+                    return false;
             }
 
             if (mechanismKill.ShouldClearDungeon)
@@ -211,12 +540,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                     new DungeonClearIntent(
                         context.Envelope,
                         mechanismKill.ClearReason,
-                        mechanismKill.BossCode));
+                        mechanismKill.BossCode),
+                    deferParticipantFanout: true);
                 if (!IsCurrent(run, context.Envelope))
-                    return;
+                    return false;
             }
 
-            if (IsBossActorType(killedMonsterType)
+            if (appliesGeneralMechanisms
+                && IsBossActorType(killedMonsterType)
                 && run.Phase < DungeonRunPhase.Cleared)
             {
                 WriteUnclearedBossDiagnostic(
@@ -230,8 +561,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     killedBlockingCount);
             }
 
-            if (context.IsLocalReport && run.Tower == null)
-                await RelayToPartyAsync(context, run);
+            return true;
         }
 
         private async Task<IReadOnlyList<DropInfo>> ApplyParticipantRewardAsync(
@@ -239,7 +569,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             DungeonRun run,
             DungeonRunIdentity identity,
             ushort sequenceId,
-            DungeonData.MonsterSumInfo monster)
+            DungeonData.MonsterSumInfo monster,
+            DungeonDynamicActorPolicy dynamicPolicy = null)
         {
             var isDeathTowerRun = run.Tower != null;
             IReadOnlyList<DropInfo> towerDrops = null;
@@ -250,8 +581,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                     out towerDrops);
 
             TryGetCurrentRoomState(run, out var roomState);
-            var allowsExperience = run.RewardPolicy.AllowsMonsterExperience;
-            var allowsDrops = run.RewardPolicy.AllowsMonsterDrops;
+            var allowsExperience = run.RewardPolicy.AllowsMonsterExperience
+                && (dynamicPolicy?.GrantsMonsterExperience ?? true);
+            var allowsDrops = run.RewardPolicy.AllowsMonsterDrops
+                && (dynamicPolicy?.GeneratesMonsterDrops ?? true);
             var rewardMonsterType = GetRewardMonsterType(monster.Type);
             var isBoss = IsBossActorType(monster.Type);
             var isChampion = monster.Type == 1;
@@ -447,7 +780,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     new DungeonClearIntent(
                         context.Envelope,
                         $"prepare_dungeon_clear ccType1={explicitMapClear} endPoint={endPoint}",
-                        killedMonsterCode));
+                        killedMonsterCode),
+                    deferParticipantFanout: true);
             }
             if (!IsCurrent(run, context.Envelope))
                 return;
@@ -483,41 +817,209 @@ namespace DfoServer.Network.Handlers.Dungeon
                 context.Envelope);
         }
 
-        private async Task RelayToPartyAsync(KillContext source, DungeonRun sourceRun)
+        private bool TryCanonicalizeSharedDeath(
+            KillContext context,
+            DungeonRun run,
+            out KillContext canonicalContext,
+            out DungeonRoomActorDeathApplication worldDeath,
+            out DungeonDynamicActorDefinition dynamicActor)
         {
-            var partyManager = _services.PartyManager;
-            var sessions = _services.Sessions;
-            if (partyManager == null
-                || sessions == null
-                || source.Session.Player == null
-                || !IsCurrent(sourceRun, source.Envelope))
+            canonicalContext = null;
+            worldDeath = default;
+            dynamicActor = null;
+            if (context?.Session?.Player == null
+                || run == null
+                || !run.TryCaptureCurrentRoomSnapshot(
+                    context.Envelope.RoomIdentity,
+                    out var roomSnapshot)
+                || roomSnapshot.RoomState?.InstanceRoom == null)
             {
-                return;
+                return false;
             }
 
-            var sourceCharacterId = (ushort)source.Session.Player.CharacterId;
-            var party = partyManager.GetPartyByUser(sourceCharacterId);
-            if (party == null || party.Count <= 1)
-                return;
+            var localIndex = context.SequenceId - roomSnapshot.RoomStartSequence;
+            var hasStaticActor = localIndex >= 0
+                && localIndex < roomSnapshot.Monsters.Count;
+            var actorCode = 0;
+            var actorType = (byte)0;
+            if (hasStaticActor)
+            {
+                var monster = roomSnapshot.Monsters[localIndex];
+                actorCode = monster.Code;
+                actorType = monster.Type;
+            }
+            else if (run.Instance.Mechanisms.DynamicActors.TryResolve(
+                         context.Envelope,
+                         context.SequenceId,
+                         out dynamicActor))
+            {
+                actorCode = dynamicActor.ActorCode;
+                actorType = dynamicActor.ActorType;
+                if (!roomSnapshot.RoomState.InstanceRoom.TryGetActorDeathFact(
+                        context.SequenceId,
+                        out _)
+                    && !_bloodAltar.CanAcceptDynamicActorDeath(
+                        run,
+                        dynamicActor))
+                {
+                    FileLogger.Log(
+                        $"[DungeonKill] dynamic actor death rejected before " +
+                        $"world ledger: cid={context.Session.Player.CharacterId} " +
+                        $"seq={context.SequenceId} provider={dynamicActor.Provider} " +
+                        $"generation={dynamicActor.ProviderGeneration}");
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
+
+            if (hasStaticActor
+                && !_tournament.CanAcceptActorDeath(
+                    run,
+                    context.Envelope.SourceEventId,
+                    context.SequenceId))
+            {
+                FileLogger.Log(
+                    $"[Tournament] actor death rejected before world ledger: " +
+                    $"cid={context.Session.Player.CharacterId} " +
+                    $"seq={context.SequenceId} " +
+                    $"event={context.Envelope.SourceEventId:N}");
+                return false;
+            }
+            worldDeath = roomSnapshot.RoomState.InstanceRoom.TryRecordActorDeath(
+                context.Envelope,
+                context.SequenceId,
+                actorCode,
+                actorType);
+            if (!worldDeath.Accepted || worldDeath.Fact == null)
+                return false;
+
+            var canonicalEnvelope = worldDeath.Fact.Source.ForAffectedPlayer(
+                run.CaptureIdentity(),
+                roomSnapshot.RoomIdentity.RoomInstanceId,
+                context.Session.Player.CharacterId);
+            canonicalContext = new KillContext(
+                context.Session,
+                canonicalEnvelope,
+                context.SequenceId,
+                context.SourceUserId,
+                context.Origin);
+            return true;
+        }
+
+        private IReadOnlyList<DungeonParticipantRosterEntry> CaptureEligibleRoster(
+            KillContext source,
+            DungeonRun sourceRun)
+        {
+            var result = new List<DungeonParticipantRosterEntry>();
+            var seen = new HashSet<DungeonParticipantRunIdentity>();
+            var roomIdentity = source.Envelope.RoomIdentity;
+
+            void Add(
+                int characterId,
+                ushort participantUserId,
+                DungeonRun candidateRun,
+                long attachmentGeneration)
+            {
+                if (candidateRun == null
+                    || characterId <= 0
+                    || participantUserId == 0
+                    || !candidateRun.TryCaptureCurrentRoomSnapshot(
+                        roomIdentity,
+                        out var snapshot)
+                    || !seen.Add(snapshot.RunIdentity.ParticipantIdentity))
+                {
+                    return;
+                }
+
+                result.Add(new DungeonParticipantRosterEntry(
+                    characterId,
+                    participantUserId,
+                    candidateRun,
+                    snapshot.RunIdentity,
+                    snapshot.RoomIdentity,
+                    attachmentGeneration));
+            }
+
+            foreach (var participant in _services.InstanceRegistry
+                         .CaptureParticipantRoster(roomIdentity))
+            {
+                if (seen.Add(participant.RunIdentity.ParticipantIdentity))
+                    result.Add(participant);
+            }
+
+            var sourcePlayer = source.Session.Player;
+            Add(
+                sourcePlayer.CharacterId,
+                sourcePlayer.UserId,
+                sourceRun,
+                attachmentGeneration: 0);
+
+            var partyManager = _services.PartyManager;
+            var sessions = _services.Sessions;
+            if (partyManager == null || sessions == null)
+                return result;
+
+            var party = partyManager.GetPartyByUser(sourcePlayer.UserId);
+            if (party == null)
+                return result;
 
             foreach (var member in party.MembersBySlot())
             {
-                if (member.UserId == sourceCharacterId)
+                if (!sessions.TryGet(member.CharacterId, out var memberSession))
                     continue;
-                sessions.TryGet(member.CharacterId, out var memberSession);
-                var memberRun = memberSession?.Player?.CurrentRun;
-                if (memberRun == null
+                var memberPlayer = memberSession?.Player;
+                Add(
+                    member.CharacterId,
+                    memberPlayer?.UserId ?? 0,
+                    memberPlayer?.CurrentRun,
+                    attachmentGeneration: 0);
+            }
+
+            return result;
+        }
+
+        private async Task RelayToFrozenRosterAsync(
+            KillContext source,
+            DungeonRun sourceRun)
+        {
+            var sessions = _services.Sessions;
+            if (sessions == null || source.Session.Player == null)
+                return;
+
+            var sourceCharacterId = source.Session.Player.CharacterId;
+            var roster = sourceRun.Instance.ParticipantEffects.GetRoster(
+                source.Envelope.SourceEventId,
+                DungeonParticipantEffectAudience.Room);
+            foreach (var participant in roster)
+            {
+                if (participant.CharacterId == sourceCharacterId
+                    && participant.RunIdentity.Equals(sourceRun.CaptureIdentity()))
+                {
+                    continue;
+                }
+                if (!sessions.TryGet(participant.CharacterId, out var memberSession)
+                    || memberSession?.Player?.CurrentRun == null
                     || memberSession.TcpClient == null
-                    || !memberSession.TcpClient.Connected
-                    || !sourceRun.SharesCurrentRoomWith(memberRun))
+                    || !memberSession.TcpClient.Connected)
+                {
+                    continue;
+                }
+
+                var memberRun = memberSession.Player.CurrentRun;
+                if (!ReferenceEquals(memberRun, participant.Run)
+                    || !memberRun.Matches(participant.RunIdentity)
+                    || !memberRun.Matches(participant.RoomIdentity))
                 {
                     continue;
                 }
 
                 var memberEvent = source.Envelope.ForAffectedPlayer(
-                    memberRun.CaptureIdentity(),
-                    memberRun.CurrentRoomInstanceId,
-                    memberSession.Player.CharacterId);
+                    participant.RunIdentity,
+                    participant.RoomIdentity.RoomInstanceId,
+                    participant.CharacterId);
                 try
                 {
                     await ProcessAsync(new KillContext(
@@ -530,12 +1032,48 @@ namespace DfoServer.Network.Handlers.Dungeon
                 catch (Exception ex)
                 {
                     FileLogger.Log(
-                        $"[DungeonKill] party relay failed: " +
-                        $"source={sourceCharacterId} member={member.UserId} " +
+                        $"[DungeonKill] frozen participant relay failed: " +
+                        $"source={sourceCharacterId} member={participant.CharacterId} " +
                         $"seq={source.SequenceId} event={source.Envelope.SourceEventId:N} " +
                         $"error={ex.Message}");
                 }
             }
+        }
+
+        private async Task RelayAndCompleteDeferredClearFanoutAsync(
+            KillContext source,
+            DungeonRun sourceRun)
+        {
+            try
+            {
+                await RelayToFrozenRosterAsync(source, sourceRun);
+            }
+            finally
+            {
+                await _settlement.CompleteDeferredClearFanoutAsync(
+                    source.Session,
+                    sourceRun,
+                    source.Envelope.SourceEventId);
+            }
+        }
+
+        private static DungeonParticipantRosterEntry FindParticipant(
+            IReadOnlyList<DungeonParticipantRosterEntry> roster,
+            int characterId,
+            DungeonRunIdentity runIdentity)
+        {
+            if (roster == null)
+                return null;
+
+            foreach (var participant in roster)
+            {
+                if (participant.CharacterId == characterId
+                    && participant.RunIdentity.Equals(runIdentity))
+                {
+                    return participant;
+                }
+            }
+            return null;
         }
 
         private static Task SendMonsterDieAsync(
@@ -578,7 +1116,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return false;
             }
 
-            return run.RoomStates.TryGetValue(run.RoomKey, out roomState);
+            lock (run.SyncRoot)
+                return run.RoomStates.TryGetValue(run.RoomKey, out roomState);
         }
 
         private static bool ShouldDeferQuestConnectedStartMapSync(

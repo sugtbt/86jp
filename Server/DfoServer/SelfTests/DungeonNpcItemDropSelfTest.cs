@@ -77,40 +77,62 @@ namespace DfoServer.SelfTests
                     out _),
                 ref failures);
 
-            var active = new List<ActiveQuest>
+            var activation = QuestActivationId.New();
+            var snapshot = QuestRunSnapshot.Capture(new List<ActiveQuest>
             {
                 new ActiveQuest
                 {
                     QuestId = 2358,
                     TriggerValue = 1,
+                    ActivationId = activation,
                 },
-            };
-            VerifyNpcDropJobCandidates(active, 0, 5, "swordman", ref failures);
-            VerifyNpcDropJobCandidates(active, 1, 6, "fighter", ref failures);
-            VerifyNpcDropJobCandidates(active, 2, 5, "gunner", ref failures);
-            VerifyNpcDropJobCandidates(active, 3, 5, "mage", ref failures);
-            VerifyNpcDropJobCandidates(active, 4, 4, "priest", ref failures);
-            VerifyNpcDropJobCandidates(active, 6, 5, "thief", ref failures);
+            });
+            VerifyNpcDropJobCandidates(snapshot, 0, 5, "swordman", ref failures);
+            VerifyNpcDropJobCandidates(snapshot, 1, 6, "fighter", ref failures);
+            VerifyNpcDropJobCandidates(snapshot, 2, 5, "gunner", ref failures);
+            VerifyNpcDropJobCandidates(snapshot, 3, 5, "mage", ref failures);
+            VerifyNpcDropJobCandidates(snapshot, 4, 4, "priest", ref failures);
+            VerifyNpcDropJobCandidates(snapshot, 6, 5, "thief", ref failures);
 
-            active[0].TriggerValue = 0;
+            var completedSnapshot = QuestRunSnapshot.Capture(
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        QuestId = 2358,
+                        TriggerValue = 0,
+                        ActivationId = activation,
+                    },
+                });
             Check("completed get-item-check quest no longer matches NPC drop",
                 DungeonNpcItemDropCoordinator.ResolveQuestMatches(
-                    active,
+                    completedSnapshot,
+                    3066,
+                    0,
+                    0).Count == 0,
+                ref failures);
+            Check("quest accepted after entry is absent from the NPC drop snapshot",
+                DungeonNpcItemDropCoordinator.ResolveQuestMatches(
+                    QuestRunSnapshot.Empty,
                     3066,
                     0,
                     0).Count == 0,
                 ref failures);
 
             var run = new DungeonRun();
-            Check("NPC item drop run marker accepts a quest once",
-                run.TryMarkNpcItemDropGenerated(2358),
+            var replacementActivation = QuestActivationId.New();
+            Check("NPC item drop run marker accepts an activation once",
+                run.TryMarkNpcItemDropGenerated(activation),
                 ref failures);
             Check("NPC item drop run marker rejects a duplicate command",
-                !run.TryMarkNpcItemDropGenerated(2358),
+                !run.TryMarkNpcItemDropGenerated(activation),
                 ref failures);
-            run.UnmarkNpcItemDropGenerated(2358);
+            Check("NPC marker does not conflate a reaccepted activation",
+                run.TryMarkNpcItemDropGenerated(replacementActivation),
+                ref failures);
+            run.UnmarkNpcItemDropGenerated(activation);
             Check("failed NPC item registration can release its run marker",
-                run.TryMarkNpcItemDropGenerated(2358),
+                run.TryMarkNpcItemDropGenerated(activation),
                 ref failures);
 
             Check("EVENT_NPC_DROP_ITEM command keeps extracted packet id",
@@ -123,20 +145,21 @@ namespace DfoServer.SelfTests
         }
 
         private static void VerifyNpcDropJobCandidates(
-            IReadOnlyList<ActiveQuest> active,
+            QuestRunSnapshot snapshot,
             byte job,
             int expectedCount,
             string label,
             ref int failures)
         {
             var matches = DungeonNpcItemDropCoordinator.ResolveQuestMatches(
-                active,
+                snapshot,
                 3066,
                 0,
                 job);
             Check($"NPC item drop filters exact {label} usable-job candidates",
                 matches.Count == 1
                 && matches[0].QuestId == 2358
+                && matches[0].ActivationId.IsValid
                 && matches[0].ItemIds.Count == expectedCount,
                 ref failures);
         }

@@ -43,12 +43,12 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static async Task AdvanceAfterStartMapAsync(
             EnhancedClientSession session,
             DungeonRun run,
-            DungeonRoomIdentity roomIdentity)
+            DungeonParticipantRoomIdentity roomIdentity)
         {
             if (run == null
                 || session?.Player == null
                 || !run.Matches(roomIdentity)
-                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+                || !session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
                 return;
 
             RoomKey roomKey;
@@ -82,7 +82,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 roomState.EventMonsterConditionAdvanced = true;
             }
 
-            if (!session.Player.IsCurrentDungeonRoom(roomIdentity))
+            if (!session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
                 return;
 
             await DungeonMechanismNotificationSender

@@ -35,14 +35,77 @@ namespace DfoServer.Network.Handlers.Dungeon
             var scheduledSeconds =
                 seconds + GentInfiltrateClientTimerSyncGraceSeconds;
             var identity = run.CaptureIdentity();
+            var deadlineUtc = DateTime.UtcNow.AddSeconds(scheduledSeconds);
             var ticket = run.Timers.Begin(
-                DungeonRunTimerKeys.GentInfiltrateTimeout);
+                DungeonRunTimerKeys.GentInfiltrateTimeout,
+                deadlineUtc,
+                RunTimerDetachPolicy.SuspendUntilResume);
+            Schedule(
+                session,
+                run,
+                identity,
+                ticket,
+                deadlineUtc);
+
+            FileLogger.Log(
+                $"[SpecialDungeonModule] GENT_INFILTRATE timer scheduled " +
+                $"source={source} cid={session.Player.CharacterId} " +
+                $"dungeon={special.DungeonId} configSeconds={seconds} " +
+                $"scheduledSeconds={scheduledSeconds} " +
+                $"clientSyncGrace={GentInfiltrateClientTimerSyncGraceSeconds} " +
+                $"deadline={deadlineUtc:O} generation={ticket.Generation}");
+        }
+
+        internal static bool Recover(EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            var special = run?.SpecialDungeon;
+            if (run == null
+                || special?.Kind != SpecialDungeonKind.GentInfiltrate)
+            {
+                return false;
+            }
+            if (special.GentInfiltrateConditionComplete
+                || special.GentInfiltrateTimedOut)
+            {
+                run.Timers.Cancel(
+                    DungeonRunTimerKeys.GentInfiltrateTimeout);
+                return false;
+            }
+            if (!run.Timers.TryResume(
+                    DungeonRunTimerKeys.GentInfiltrateTimeout,
+                    out var ticket,
+                    out var deadlineUtc))
+            {
+                return false;
+            }
+
+            Schedule(
+                session,
+                run,
+                run.CaptureIdentity(),
+                ticket,
+                deadlineUtc);
+            FileLogger.Log(
+                $"[SpecialDungeonModule] GENT_INFILTRATE timer resumed " +
+                $"cid={session.Player.CharacterId} dungeon={special.DungeonId} " +
+                $"deadline={deadlineUtc:O} generation={ticket.Generation}");
+            return true;
+        }
+
+        private static void Schedule(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonRunIdentity identity,
+            RunTimerTicket ticket,
+            DateTime deadlineUtc)
+        {
             var timerName =
                 $"special-dungeon:gent-infiltrate:{session.Player.CharacterId}:" +
                 $"{run.RunId}:{ticket.Generation}";
-            var handle = ClockService.Instance.ScheduleOneShotAfterAsync(
+            var handle = ClockService.Instance.ScheduleOneShotAsync(
                 timerName,
-                TimeSpan.FromSeconds(scheduledSeconds),
+                deadlineUtc,
                 async _ => await OnTimeoutElapsedAsync(
                     session,
                     run,
@@ -50,13 +113,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                     ticket));
 
             run.Timers.Attach(ticket, handle);
-            FileLogger.Log(
-                $"[SpecialDungeonModule] GENT_INFILTRATE timer scheduled " +
-                $"source={source} cid={session.Player.CharacterId} " +
-                $"dungeon={special.DungeonId} configSeconds={seconds} " +
-                $"scheduledSeconds={scheduledSeconds} " +
-                $"clientSyncGrace={GentInfiltrateClientTimerSyncGraceSeconds} " +
-                $"generation={ticket.Generation}");
         }
 
         internal static void Cancel(EnhancedClientSession session)
@@ -85,10 +141,17 @@ namespace DfoServer.Network.Handlers.Dungeon
                 || !run.Timers.IsCurrent(ticket))
                 return;
 
-            await SpecialDungeonNotifier.MarkGentInfiltrateTimeoutAsync(
-                session,
-                run,
-                "timer");
+            try
+            {
+                await SpecialDungeonNotifier.MarkGentInfiltrateTimeoutAsync(
+                    session,
+                    run,
+                    "timer");
+            }
+            finally
+            {
+                run.Timers.TryComplete(ticket);
+            }
         }
     }
 }

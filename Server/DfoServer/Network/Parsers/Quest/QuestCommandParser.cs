@@ -5,6 +5,8 @@ namespace DfoServer.Network.Parsers.Quest
 {
     internal static class QuestCommandParser
     {
+        private const int FinishBodyLength = 8;
+
         internal static bool TryParseImageCommunicationUse(
             byte[] body,
             out ImageCommunicationUseCommand command)
@@ -40,23 +42,21 @@ namespace DfoServer.Network.Parsers.Quest
             out QuestFinishCommand command)
         {
             command = default;
-            if (body == null || body.Length < 2)
+            if (body == null || body.Length != FinishBodyLength)
                 return false;
 
             var questId = BitConverter.ToUInt16(body, 0);
-            var rewardSelection = body.Length >= 4
-                ? BitConverter.ToUInt16(body, 2)
-                : (ushort)0;
-            var hasRewardSelection = body.Length >= 4
-                && rewardSelection != ushort.MaxValue;
-            var multiplier = body.Length >= 6
-                ? BitConverter.ToUInt16(body, 4)
-                : (ushort)1;
+            var rewardSelection = BitConverter.ToUInt16(body, 2);
+            var completionCount = BitConverter.ToUInt16(body, 4);
+            var sentinel = BitConverter.ToUInt16(body, 6);
+            if (sentinel != ushort.MaxValue)
+                return false;
+
             command = new QuestFinishCommand(
                 questId,
-                hasRewardSelection,
+                rewardSelection != ushort.MaxValue,
                 rewardSelection,
-                multiplier);
+                completionCount);
             return true;
         }
 

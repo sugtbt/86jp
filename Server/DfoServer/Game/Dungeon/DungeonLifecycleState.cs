@@ -1,5 +1,14 @@
 namespace DfoServer.Game.Dungeon
 {
+    public enum DungeonInstanceState
+    {
+        Created = 0,
+        Active = 1,
+        Cleared = 2,
+        Ending = 3,
+        Ended = 4,
+    }
+
     public enum DungeonRunState
     {
         None = 0,
@@ -21,6 +30,7 @@ namespace DfoServer.Game.Dungeon
         SessionTeardown = 4,
         CharacterSwitch = 5,
         ReplacedByNewRun = 6,
+        EntryRejected = 7,
     }
 
     public enum DungeonSettlementState

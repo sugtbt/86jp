@@ -20,6 +20,18 @@ namespace DfoServer.Game.Quests
             {
                 case QuestProgressOperation.ClientTrigger:
                 {
+                    var authority = QuestClientTriggerAuthority.Resolve(
+                        quest.QuestId,
+                        request.TriggerType);
+                    if (authority == QuestClientTriggerDisposition.Reject)
+                        return result;
+                    if (authority == QuestClientTriggerDisposition.EchoOnly)
+                    {
+                        result.Matched = true;
+                        result.AddChange(quest.QuestId, current, current);
+                        return result;
+                    }
+
                     var next = QuestProgressReducer.ApplyClientMutation(
                         current,
                         request.TriggerType,
@@ -32,6 +44,9 @@ namespace DfoServer.Game.Quests
 
                 case QuestProgressOperation.HuntMonster:
                     return EvaluateHuntMonster(quest, request, current);
+
+                case QuestProgressOperation.HuntEnemy:
+                    return EvaluateHuntEnemy(quest, request, current);
 
                 case QuestProgressOperation.ClearMap:
                 case QuestProgressOperation.ClearDungeon:
@@ -94,6 +109,41 @@ namespace DfoServer.Game.Quests
             return result;
         }
 
+        private static QuestProgressEvaluation EvaluateHuntEnemy(
+            ActiveQuest quest,
+            QuestProgressApplicationRequest request,
+            QuestTrigger current)
+        {
+            var result = new QuestProgressEvaluation { Trigger = current };
+            if (current.IsComplete)
+                return result;
+
+            var targets = GameWorld.QuestData.GetHuntEnemyTargets(quest.QuestId);
+            foreach (var target in targets)
+            {
+                if (target.ProgressSource
+                        != GameWorld.HuntEnemyProgressSource.Server
+                    || !GameWorld.QuestData.MatchesHuntEnemyTarget(
+                        target,
+                        request.DungeonId,
+                        request.Difficulty,
+                        request.MonsterCode,
+                        request.EnemyType))
+                {
+                    continue;
+                }
+
+                result.Matched = true;
+                var previous = result.Trigger;
+                result.Trigger = QuestProgressReducer.DecrementChannel(
+                    result.Trigger,
+                    target.ChannelIndex);
+                if (!result.Trigger.Equals(previous))
+                    result.AddChange(quest.QuestId, previous, result.Trigger);
+            }
+            return result;
+        }
+
         private static QuestProgressEvaluation EvaluateSeekingItems(
             ActiveQuest quest,
             QuestProgressApplicationRequest request,
@@ -111,7 +161,7 @@ namespace DfoServer.Game.Quests
             var matchesFilter = filter == null || filter.Count == 0;
             foreach (var item in seekItems)
             {
-                if (item.ItemId <= 0 || item.Count <= 0)
+                if (item.ItemId < 0 || item.Count <= 0)
                     continue;
                 relevant.Add(item);
                 if (!matchesFilter && filter.Contains(item.ItemId))

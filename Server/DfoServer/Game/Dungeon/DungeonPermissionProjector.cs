@@ -135,8 +135,11 @@ namespace DfoServer.Game.Dungeon
                 && CanProjectDungeon(permission.DungeonId);
 
         private static bool CanProjectDungeon(int dungeonId)
-            => DungeonPermissionScopePolicy.Resolve(dungeonId)
-                != DungeonPermissionPersistenceScope.None;
+        {
+            var scope = DungeonPermissionScopePolicy.Resolve(dungeonId);
+            return scope == DungeonPermissionPersistenceScope.AccountDifficulty
+                || scope == DungeonPermissionPersistenceScope.CharacterMechanism;
+        }
 
         private static DungeonPermissionEntrySnapshot CreateEntry(
             int dungeonId,

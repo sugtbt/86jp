@@ -78,6 +78,60 @@ namespace DfoServer.GameWorld
             return grade == "[daily]" || grade == "[normaly repeat]" || grade == "[special daily]";
         }
 
+        internal static bool TryResolveCompletionDefinition(
+            int questId,
+            out QuestCompletionDefinition definition,
+            out string error)
+        {
+            definition = null;
+            error = string.Empty;
+            var quest = GetQuestFile(questId);
+            if (quest == null)
+            {
+                error = "quest definition not found";
+                return false;
+            }
+
+            if (!QuestRewardDefinition.TryCreate(
+                    questId,
+                    quest,
+                    out var rewardDefinition,
+                    out error))
+            {
+                return false;
+            }
+
+            return QuestCompletionDefinition.TryCreate(
+                questId,
+                NormalizeQuestTag(quest.Grade),
+                NormalizeQuestTag(quest.Type),
+                quest.IntData,
+                IsRepeatableQuest(questId),
+                rewardDefinition,
+                out definition,
+                out error);
+        }
+
+        internal static bool TryResolveRewardDefinition(
+            int questId,
+            out QuestRewardDefinition definition,
+            out string error)
+        {
+            definition = null;
+            error = string.Empty;
+            var quest = GetQuestFile(questId);
+            if (quest == null)
+            {
+                error = "quest definition not found";
+                return false;
+            }
+            return QuestRewardDefinition.TryCreate(
+                questId,
+                quest,
+                out definition,
+                out error);
+        }
+
         internal static bool IsDailyChallengeQuest(int questId)
         {
             if (!DailyChallengeData.IsConfiguredQuest(questId))
@@ -163,6 +217,24 @@ namespace DfoServer.GameWorld
             int questId)
             => QuestTargetIndex.GetHuntMonsterTargets(questId);
 
+        internal static List<HuntEnemyQuestTarget> GetHuntEnemyTargets(
+            int questId)
+            => QuestTargetIndex.GetHuntEnemyTargets(questId);
+
+        internal static HuntEnemyProgressSource GetHuntEnemyProgressSource(
+            int questId)
+            => QuestTargetIndex.GetHuntEnemyProgressSource(questId);
+
+        internal static bool IsServerDrivenHuntEnemyActorType(int enemyType)
+            => QuestTargetIndex.IsServerDrivenHuntEnemyActorType(enemyType);
+
+        internal static bool IsClientHuntEnemyTriggerAuthorized(
+            int questId,
+            byte triggerType)
+            => QuestTargetIndex.IsClientHuntEnemyTriggerAuthorized(
+                questId,
+                triggerType);
+
         internal static List<DungeonQuestActorTarget>
             GetUnfinishedDungeonActorTargets(
                 int questId,
@@ -196,6 +268,19 @@ namespace DfoServer.GameWorld
                 dungeonId,
                 difficulty,
                 monsterCode);
+
+        internal static bool MatchesHuntEnemyTarget(
+            HuntEnemyQuestTarget target,
+            int dungeonId,
+            int difficulty,
+            int enemyCode,
+            int enemyType)
+            => QuestTargetIndex.MatchesHuntEnemyTarget(
+                target,
+                dungeonId,
+                difficulty,
+                enemyCode,
+                enemyType);
 
         internal static bool ReferencesDungeon(int questId, int dungeonId)
             => QuestTargetIndex.ReferencesDungeon(questId, dungeonId);
@@ -257,12 +342,39 @@ namespace DfoServer.GameWorld
             int playerLevel = 1,
             int playerJob = -1,
             int playerGrowType = -1)
-            => QuestRewardProjector.Resolve(
+            => ResolveReward(
                 questId,
+                rewardSelectIdx >= 0,
                 rewardSelectIdx,
                 playerLevel,
                 playerJob,
                 playerGrowType);
+
+        internal static QuestRewardResolution ResolveReward(
+            int questId,
+            bool hasRewardSelection,
+            int rewardSelectIdx,
+            int playerLevel,
+            int playerJob,
+            int playerGrowType)
+        {
+            if (!TryResolveRewardDefinition(
+                    questId,
+                    out var definition,
+                    out var error))
+            {
+                return QuestRewardResolution.Invalid(
+                    QuestRewardProjector.CreateEmptyReward(),
+                    error);
+            }
+            return QuestRewardProjector.Resolve(
+                definition,
+                hasRewardSelection,
+                rewardSelectIdx,
+                playerLevel,
+                playerJob,
+                playerGrowType);
+        }
 
         public static QuestReward GetRewardExp(
             int questId,

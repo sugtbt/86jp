@@ -17,7 +17,7 @@ namespace DfoServer.Game.Quests
 {
     public sealed class QuestManager
     {
-        private static readonly TimeSpan DefaultHuntMonsterEchoGrace =
+        private static readonly TimeSpan DefaultServerTriggerEchoGrace =
             TimeSpan.FromMilliseconds(500);
 
         private readonly ISessionPacketSender _sender;
@@ -28,17 +28,17 @@ namespace DfoServer.Game.Quests
             _imageCommunicationService;
         private readonly QuestNotifySelectionService _notifySelectionService;
         private readonly QuestNotificationProjector _notifications;
-        private readonly TimeSpan _huntMonsterEchoGrace;
+        private readonly TimeSpan _serverTriggerEchoGrace;
         private readonly ClockService _clock;
-        private readonly object _huntMonsterProjectionSync = new object();
-        private ClockService.ClockTimerHandle _huntMonsterProjectionTimer;
-        private int _huntMonsterProjectionVersion;
+        private readonly object _serverTriggerProjectionSync = new object();
+        private ClockService.ClockTimerHandle _serverTriggerProjectionTimer;
+        private int _serverTriggerProjectionVersion;
 
         public QuestManager(ISessionPacketSender sender, string connStr)
             : this(
                 sender,
                 connStr,
-                DefaultHuntMonsterEchoGrace,
+                DefaultServerTriggerEchoGrace,
                 ClockService.Instance)
         {
         }
@@ -46,14 +46,14 @@ namespace DfoServer.Game.Quests
         internal QuestManager(
             ISessionPacketSender sender,
             string connStr,
-            TimeSpan huntMonsterEchoGrace,
+            TimeSpan serverTriggerEchoGrace,
             ClockService clock)
         {
             _sender = sender;
             _connStr = connStr;
-            _huntMonsterEchoGrace = huntMonsterEchoGrace > TimeSpan.Zero
-                ? huntMonsterEchoGrace
-                : DefaultHuntMonsterEchoGrace;
+            _serverTriggerEchoGrace = serverTriggerEchoGrace > TimeSpan.Zero
+                ? serverTriggerEchoGrace
+                : DefaultServerTriggerEchoGrace;
             _clock = clock ?? throw new ArgumentNullException(nameof(clock));
             _service = new QuestService(connStr);
             _dailyChallengeService = new DailyChallengeService(connStr);
@@ -103,14 +103,23 @@ namespace DfoServer.Game.Quests
             return stripped;
         }
 
-        public async Task HandleAcceptQuestAsync(ushort wireType, byte[] body)
+        public async Task HandleAcceptQuestAsync(
+            ushort wireType,
+            byte[] body,
+            Guid sessionId)
         {
             var qBody = StripEcho(body);
             FileLogger.Log($"[GameProtocol] ACCEPT_QUEST payload: {(qBody != null ? BitConverter.ToString(qBody) : "null")} ({qBody?.Length ?? 0}B)");
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
+            InventoryContext.TryGetOwnedLease(sessionId, cid, out var lease);
+            var owner = new QuestCommandOwnerContext(
+                cid,
+                _sender.AccountId,
+                sessionId,
+                lease);
             var result = QuestCommandParser.TryParseAccept(qBody, out var command)
-                ? _service.HandleAcceptQuest(cid, command, _sender.AccountId)
+                ? _service.HandleAcceptQuest(owner, command, _sender.AccountId)
                 : QuestAcceptResult.Fail(23);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildAccept(result));
         }
@@ -157,14 +166,14 @@ namespace DfoServer.Game.Quests
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
-            InventoryLease lease = null;
-            if (InventoryContext.TryGetLease(cid, out var candidateLease)
-                && candidateLease.IsOwnedBy(sessionId))
-            {
-                lease = candidateLease;
-            }
+            InventoryContext.TryGetOwnedLease(sessionId, cid, out var lease);
+            var owner = new QuestCommandOwnerContext(
+                cid,
+                _sender.AccountId,
+                sessionId,
+                lease);
             var result = QuestCommandParser.TryParseGiveup(qBody, out var command)
-                ? _service.HandleGiveupQuest(cid, command, lease)
+                ? _service.HandleGiveupQuest(owner, command, lease)
                 : QuestGiveupResult.Fail(19);
             if (result.Success && result.InventoryChanges.HasChanges)
             {
@@ -182,11 +191,26 @@ namespace DfoServer.Game.Quests
 
         public async Task<QuestSetTriggerResult> HandleSetTriggerAsync(
             ushort wireType,
-            byte[] body)
+            byte[] body,
+            Guid sessionId)
         {
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
             if (cid <= 0) return null;
+            if (!InventoryContext.TryGetOwnedLease(sessionId, cid, out var lease))
+            {
+                var rejected = QuestSetTriggerResult.Fail(22);
+                await _sender.SendCmdAckAsync(
+                    wireType,
+                    QuestAckBuilder.BuildSetTrigger(rejected));
+                return rejected;
+            }
+            var owner = new QuestCommandOwnerContext(
+                cid,
+                _sender.AccountId,
+                sessionId,
+                lease,
+                _sender.Player?.Exp);
 
             if (_dailyChallengeService.TryHandleSetTrigger(cid, qBody, out var dailyChallenge))
             {
@@ -197,7 +221,7 @@ namespace DfoServer.Game.Quests
             }
 
             QuestSetTriggerResult deferred;
-            if (TryBuildServerDrivenHuntMonsterEcho(cid, qBody, out deferred))
+            if (TryBuildServerDrivenQuestTriggerEcho(cid, qBody, out deferred))
             {
                 await _sender.SendCmdAckAsync(
                     wireType,
@@ -211,7 +235,7 @@ namespace DfoServer.Game.Quests
                 return deferred;
             }
 
-            var result = _service.HandleSetTrigger(cid, qBody);
+            var result = _service.HandleSetTrigger(owner, qBody);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildSetTrigger(result));
             return result;
         }
@@ -246,13 +270,23 @@ namespace DfoServer.Game.Quests
                 lease);
         }
 
-        public async Task HandleFinishQuestAsync(ushort wireType, byte[] body)
+        public async Task HandleFinishQuestAsync(
+            ushort wireType,
+            byte[] body,
+            Guid sessionId)
         {
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
+            InventoryContext.TryGetOwnedLease(sessionId, cid, out var lease);
+            var owner = new QuestCommandOwnerContext(
+                cid,
+                _sender.AccountId,
+                sessionId,
+                lease,
+                _sender.Player?.Exp);
             var result = QuestCommandParser.TryParseFinish(qBody, out var command)
-                ? _service.HandleFinishQuest(cid, command, _sender.Player?.Exp)
+                ? _service.HandleFinishQuest(owner, command)
                 : QuestFinishResult.Fail(22);
             await _notifications.SendPreFinishAckNotificationsAsync(cid, result);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildFinish(result));
@@ -331,7 +365,9 @@ namespace DfoServer.Game.Quests
             int dungeonId,
             int mapId,
             Guid sourceEventId = default,
-            IReadOnlyCollection<ushort> eligibleQuestIds = null)
+            IReadOnlyCollection<ushort> eligibleQuestIds = null,
+            IReadOnlyDictionary<ushort, QuestActivationId>
+                eligibleQuestActivations = null)
         {
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
@@ -341,24 +377,27 @@ namespace DfoServer.Game.Quests
                 dungeonId,
                 mapId,
                 sourceEventId,
-                eligibleQuestIds);
+                eligibleQuestIds,
+                eligibleQuestActivations);
             if (!changed)
                 return;
 
             await _notifications.SendActiveQuestListAsync(cid);
         }
 
-        public async Task SyncHuntMonsterQuestProgressAsync(
+        public Task SyncHuntMonsterQuestProgressAsync(
             int dungeonId,
             int difficulty,
             int monsterCode,
             Guid sourceEventId = default,
             IReadOnlyCollection<ushort> eligibleQuestIds = null,
-            DungeonRunIdentity sourceRunIdentity = default)
+            DungeonRunIdentity sourceRunIdentity = default,
+            IReadOnlyDictionary<ushort, QuestActivationId>
+                eligibleQuestActivations = null)
         {
             var cid = _sender.CharacterId;
             if (cid <= 0 || dungeonId <= 0 || monsterCode <= 0)
-                return;
+                return Task.CompletedTask;
 
             var changes = _service.SyncHuntMonsterQuestProgress(
                 cid,
@@ -366,32 +405,78 @@ namespace DfoServer.Game.Quests
                 difficulty,
                 monsterCode,
                 sourceEventId,
-                eligibleQuestIds);
-            if (changes.Count == 0)
+                eligibleQuestIds,
+                eligibleQuestActivations);
+            TrackServerDrivenTriggerChanges(
+                cid,
+                changes,
+                sourceRunIdentity);
+            return Task.CompletedTask;
+        }
+
+        public Task SyncHuntEnemyQuestProgressAsync(
+            int dungeonId,
+            int difficulty,
+            int enemyCode,
+            int enemyType,
+            Guid sourceEventId = default,
+            IReadOnlyCollection<ushort> eligibleQuestIds = null,
+            DungeonRunIdentity sourceRunIdentity = default,
+            IReadOnlyDictionary<ushort, QuestActivationId>
+                eligibleQuestActivations = null)
+        {
+            var cid = _sender.CharacterId;
+            if (cid <= 0 || dungeonId <= 0 || enemyCode <= 0)
+                return Task.CompletedTask;
+
+            var changes = _service.SyncHuntEnemyQuestProgress(
+                cid,
+                dungeonId,
+                difficulty,
+                enemyCode,
+                enemyType,
+                sourceEventId,
+                eligibleQuestIds,
+                eligibleQuestActivations);
+            TrackServerDrivenTriggerChanges(
+                cid,
+                changes,
+                sourceRunIdentity);
+            return Task.CompletedTask;
+        }
+
+        private void TrackServerDrivenTriggerChanges(
+            int characterId,
+            IReadOnlyList<QuestSetTriggerResult> changes,
+            DungeonRunIdentity sourceRunIdentity)
+        {
+            if (changes == null || changes.Count == 0)
                 return;
 
             var run = _sender.Player?.CurrentRun;
-            if (run != null
-                && (!sourceRunIdentity.IsValid
-                    || run.Matches(sourceRunIdentity)))
+            if (run == null
+                || (sourceRunIdentity.IsValid
+                    && !run.Matches(sourceRunIdentity)))
             {
-                foreach (var change in changes)
-                {
-                    var channelIndex = FindDecrementedTriggerChannel(change);
-                    if (channelIndex >= 0)
-                    {
-                        run.MarkServerDrivenHuntMonsterTrigger(
-                            change.QuestId,
-                            channelIndex);
-                    }
-                }
-
-                if (run.HasPendingServerDrivenHuntMonsterTriggers())
-                    ScheduleHuntMonsterProjectionFallback(run, cid);
+                return;
             }
+
+            foreach (var change in changes)
+            {
+                var channelIndex = FindDecrementedTriggerChannel(change);
+                if (channelIndex >= 0)
+                {
+                    run.MarkServerDrivenQuestTrigger(
+                        change.QuestId,
+                        channelIndex);
+                }
+            }
+
+            if (run.HasPendingServerDrivenQuestTriggers())
+                ScheduleServerTriggerProjectionFallback(run, characterId);
         }
 
-        private bool TryBuildServerDrivenHuntMonsterEcho(
+        private bool TryBuildServerDrivenQuestTriggerEcho(
             int characterId,
             byte[] qBody,
             out QuestSetTriggerResult result)
@@ -408,15 +493,15 @@ namespace DfoServer.Game.Quests
             var questId = BitConverter.ToUInt16(qBody, 0);
             var run = _sender.Player?.CurrentRun;
             if (run == null
-                || !run.TryConsumeServerDrivenHuntMonsterTrigger(
+                || !run.TryConsumeServerDrivenQuestTrigger(
                     questId,
                     triggerType))
             {
                 return false;
             }
 
-            if (!run.HasPendingServerDrivenHuntMonsterTriggers())
-                CancelHuntMonsterProjectionFallback();
+            if (!run.HasPendingServerDrivenQuestTriggers())
+                CancelServerTriggerProjectionFallback();
 
             var active = QuestService.LoadActiveQuests(_connStr, characterId);
             var quest = QuestService.FindByQuestId(active, questId);
@@ -429,7 +514,7 @@ namespace DfoServer.Game.Quests
             };
             FileLogger.Log(
                 $"[QuestManager] SET_TRIGGER echo suppressed after " +
-                $"server hunt progress: cid={characterId} quest={questId} " +
+                $"server quest progress: cid={characterId} quest={questId} " +
                 $"type=0x{triggerType:X2} trigger={trigger}");
             return true;
         }
@@ -454,7 +539,7 @@ namespace DfoServer.Game.Quests
             return -1;
         }
 
-        private void ScheduleHuntMonsterProjectionFallback(
+        private void ScheduleServerTriggerProjectionFallback(
             DungeonRun run,
             int characterId)
         {
@@ -464,47 +549,47 @@ namespace DfoServer.Game.Quests
             var identity = run.CaptureIdentity();
             ClockService.ClockTimerHandle previous;
             int version;
-            lock (_huntMonsterProjectionSync)
+            lock (_serverTriggerProjectionSync)
             {
-                previous = _huntMonsterProjectionTimer;
-                _huntMonsterProjectionTimer = null;
-                version = NextProjectionVersion(_huntMonsterProjectionVersion);
-                _huntMonsterProjectionVersion = version;
+                previous = _serverTriggerProjectionTimer;
+                _serverTriggerProjectionTimer = null;
+                version = NextProjectionVersion(_serverTriggerProjectionVersion);
+                _serverTriggerProjectionVersion = version;
             }
             previous?.Cancel();
 
             var timer = _clock.ScheduleOneShotAfterAsync(
-                $"quest-hunt:{characterId}:{identity.RunId}:projection",
-                _huntMonsterEchoGrace,
-                _ => FlushHuntMonsterProjectionFallbackAsync(
+                $"quest-trigger:{characterId}:{identity.RunId}:projection",
+                _serverTriggerEchoGrace,
+                _ => FlushServerTriggerProjectionFallbackAsync(
                     run,
                     identity,
                     characterId,
                     version));
 
-            lock (_huntMonsterProjectionSync)
+            lock (_serverTriggerProjectionSync)
             {
-                if (_huntMonsterProjectionVersion != version)
+                if (_serverTriggerProjectionVersion != version)
                 {
                     timer.Cancel();
                     return;
                 }
 
-                _huntMonsterProjectionTimer = timer;
+                _serverTriggerProjectionTimer = timer;
             }
         }
 
-        private async Task FlushHuntMonsterProjectionFallbackAsync(
+        private async Task FlushServerTriggerProjectionFallbackAsync(
             DungeonRun run,
             DungeonRunIdentity identity,
             int characterId,
             int version)
         {
-            lock (_huntMonsterProjectionSync)
+            lock (_serverTriggerProjectionSync)
             {
-                if (_huntMonsterProjectionVersion != version)
+                if (_serverTriggerProjectionVersion != version)
                     return;
-                _huntMonsterProjectionTimer = null;
+                _serverTriggerProjectionTimer = null;
             }
 
             var currentRun = _sender.Player?.CurrentRun;
@@ -512,27 +597,27 @@ namespace DfoServer.Game.Quests
                 || currentRun == null
                 || !ReferenceEquals(currentRun, run)
                 || !currentRun.Matches(identity)
-                || !run.HasPendingServerDrivenHuntMonsterTriggers())
+                || !run.HasPendingServerDrivenQuestTriggers())
             {
                 return;
             }
 
             await _notifications.SendActiveQuestListAsync(characterId);
             FileLogger.Log(
-                $"[QuestManager] HUNT_MONSTER projection fallback: " +
+                $"[QuestManager] SERVER_TRIGGER projection fallback: " +
                 $"cid={characterId} run={identity.RunId} " +
-                $"pending client echo after {_huntMonsterEchoGrace.TotalMilliseconds:F0}ms");
+                $"pending client echo after {_serverTriggerEchoGrace.TotalMilliseconds:F0}ms");
         }
 
-        private void CancelHuntMonsterProjectionFallback()
+        private void CancelServerTriggerProjectionFallback()
         {
             ClockService.ClockTimerHandle timer;
-            lock (_huntMonsterProjectionSync)
+            lock (_serverTriggerProjectionSync)
             {
-                _huntMonsterProjectionVersion = NextProjectionVersion(
-                    _huntMonsterProjectionVersion);
-                timer = _huntMonsterProjectionTimer;
-                _huntMonsterProjectionTimer = null;
+                _serverTriggerProjectionVersion = NextProjectionVersion(
+                    _serverTriggerProjectionVersion);
+                timer = _serverTriggerProjectionTimer;
+                _serverTriggerProjectionTimer = null;
             }
             timer?.Cancel();
         }

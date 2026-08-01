@@ -256,16 +256,22 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"quest load failed: {ex.Message}");
             }
 
-            if (!WorldMap.IsTaskExclusiveDungeonAvailable(
-                    req.DungeonId,
-                    activeQuestIds))
+            var admission = WorldMap.EvaluateDungeonAdmission(
+                req.DungeonId,
+                activeQuestIds,
+                clearedQuestIds);
+            if (!admission.Allowed)
             {
                 FileLogger.Log(
                     $"[{DungeonSharedServices.ProtocolLogName}] " +
-                    $"SELECT_DUNGEON task-exclusive entry rejected: " +
+                    $"SELECT_DUNGEON admission rejected: " +
                     $"cid={session.Player.CharacterId} dungeon={req.DungeonId} " +
-                    $"requiredQuests={string.Join(",", WorldMap.GetTaskExclusiveQuestIds(req.DungeonId))}");
-                await SendDungeonSelectionErrorAsync(session, header);
+                    $"mode={admission.Mode} reason={admission.Reason} " +
+                    $"requiredQuests={string.Join(",", admission.RequiredQuestIds)}");
+                await _svc.AdmissionRejects.SendAsync(
+                    session,
+                    header.type,
+                    DungeonAdmissionReject.DungeonUnavailable);
                 return;
             }
 
@@ -288,8 +294,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     tower,
                     req.Difficulty,
                     _svc.InstanceRegistry);
-                var towerRunIdentity = session.Player.CurrentRun?.CaptureIdentity()
-                    ?? default(DungeonRunIdentity);
+                var towerRun = session.Player.CurrentRun;
+                if (towerRun == null || !ReferenceEquals(towerRun.Tower, tower))
+                    return;
+                RegisterActiveParticipant(session, towerRun);
+                var towerRunIdentity = towerRun.CaptureIdentity();
                 await _svc.DeathTower.SendEntryPacketsAsync(session, tower, req.Difficulty);
                 if (!session.Player.IsCurrentDungeonRun(towerRunIdentity))
                     return;
@@ -334,18 +343,17 @@ namespace DfoServer.Network.Handlers.Dungeon
                 selection.Maze,
                 activeQuestIds,
                 req.Difficulty);
+            var bossPos = DungeonData.RandomizeBossPosition(selection.Maze.BossMap);
+            run.BossMapPos = bossPos;
             var startPos = DungeonData.RandomizeStartPosition(selection.Maze.StartMap);
             run.MazeStartX = startPos != null ? startPos[0] : -1;
             run.MazeStartY = startPos != null ? startPos[1] : -1;
-            run.MazeStartMapId = ResolveMazeStartMapId(
-                selection.Maze,
+            run.MazeStartMapId = ResolveSelectedRoomMapId(
+                req.DungeonId,
+                selection.Index,
                 run.MazeStartX,
-                run.MazeStartY);
-            var bossPos = DungeonData.RandomizeBossPosition(selection.Maze.BossMap);
-            run.BossMapPos = bossPos;
-            var bossMapId = bossPos != null && bossPos.Length >= 2
-                ? ResolveMazeStartMapId(selection.Maze, bossPos[0], bossPos[1])
-                : 0;
+                run.MazeStartY,
+                bossPos);
             FileLogger.Log(
                 $"[DungeonHandler] SELECT_DUNGEON route: " +
                 $"cid={session.Player.CharacterId} dungeon={req.DungeonId} " +
@@ -353,15 +361,35 @@ namespace DfoServer.Network.Handlers.Dungeon
                 $"questConnected={run.MazeQuestConnected} " +
                 $"start=({run.MazeStartX},{run.MazeStartY}) startMap={run.MazeStartMapId} " +
                 $"boss=({(bossPos != null && bossPos.Length >= 2 ? bossPos[0] : -1)}," +
-                $"{(bossPos != null && bossPos.Length >= 2 ? bossPos[1] : -1)}) bossMap={bossMapId}");
-            run.RidableObjects = DungeonMapHandler.InitRidableObjects(selection.Maze);
-            run.ClearCondition = new ClearConditionState(selection.Maze.ClearConditions);
+                $"{(bossPos != null && bossPos.Length >= 2 ? bossPos[1] : -1)})");
+            var randomizedObjectDefinition =
+                DungeonRandomizedObjectDefinitionProjector.Project(selection.Maze);
+            var randomizedObjects = DungeonRandomizedObjectSelectionService.Select(
+                randomizedObjectDefinition);
+            var clearConditionTemplate = new ClearConditionState(
+                selection.Maze.ClearConditions);
             DungeonMechanismCoordinator.ConfigureSelection(
                 session,
                 selection.Maze,
                 bossPos,
                 activeQuests,
                 "select_dungeon");
+            var entryPartyMemberCount = ResolveEntryPartyMemberCount(session);
+            if (!await PrepareTournamentEntryAsync(
+                    session,
+                    header,
+                    run,
+                    entryPartyMemberCount))
+            {
+                return;
+            }
+            if (!await PrepareBloodAltarEntryAsync(
+                    session,
+                    header,
+                    run))
+            {
+                return;
+            }
             ConfigureLinkedDungeonRunState(req.DungeonId, run);
             if (run.HellMode)
                 await PrepareManualHellPartyAsync(session, req, selection.Maze, selection.Index);
@@ -371,9 +399,12 @@ namespace DfoServer.Network.Handlers.Dungeon
             var selectionSnapshot = CaptureSelectionSnapshot(
                 run,
                 selection.Maze,
-                ResolveEntryPartyMemberCount(session));
+                entryPartyMemberCount,
+                randomizedObjects,
+                clearConditionTemplate);
             if (!run.Instance.TryFreezeSelection(selectionSnapshot))
                 throw new InvalidOperationException("Dungeon selection was already frozen for this instance.");
+            selectionSnapshot.ApplyTo(run);
             if (!run.TryActivate())
                 throw new InvalidOperationException("Dungeon run could not enter the active state after selection.");
             RegisterActiveParticipant(session, run);
@@ -474,7 +505,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             return false;
         }
 
-        private static async Task<int> ResolveLinkedDungeonSelectionSourceAsync(
+        private async Task<int> ResolveLinkedDungeonSelectionSourceAsync(
             EnhancedClientSession session,
             GamePacketHeader header,
             int dungeonId,
@@ -543,9 +574,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                     linkedSourceDungeonId,
                     previousDungeonIds,
                     authorizationReason);
-                await SendDungeonSelectionErrorAsync(
+                await _svc.AdmissionRejects.SendAsync(
                     session,
-                    header);
+                    header.type,
+                    DungeonAdmissionReject.DungeonUnavailable);
                 return -1;
             }
 
@@ -568,9 +600,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 linkedSourceDungeonId,
                 previousDungeonIds,
                 "PVF predecessor mismatch");
-            await SendDungeonSelectionErrorAsync(
+            await _svc.AdmissionRejects.SendAsync(
                 session,
-                header);
+                header.type,
+                DungeonAdmissionReject.DungeonUnavailable);
             return -1;
         }
 
@@ -588,20 +621,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 $"source={linkedSourceDungeonId} target={dungeonId} " +
                 $"prev={string.Join(",", previousDungeonIds)} " +
                 $"reason={reason}");
-        }
-
-        private static Task SendDungeonSelectionErrorAsync(
-            EnhancedClientSession session,
-            GamePacketHeader header)
-        {
-            if (session == null)
-                return Task.CompletedTask;
-
-            return session.SendPacketAsync(
-                GamePacketEnvelopeBuilder.Build(
-                    0x01,
-                    header.type,
-                    CommonPacketBodyBuilder.BuildCmdError(0x11)));
         }
 
         // 给指定会话发送 SELECT_DUNGEON 出站序列；秘密商店 NPC 上下文只在通关后发送。
@@ -650,7 +669,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 hasSelectedStart ? run.MazeStartY : 0xFF,
                 overrideMapId: -1);
             if (!startRoomIdentity.HasValue
-                || !s.Player.IsCurrentDungeonRoom(startRoomIdentity.Value))
+                || !s.Player.IsCurrentDungeonParticipantRoom(
+                    startRoomIdentity.Value))
                 return;
 
             if (StrikerSupportTagCharacterPacketBuilder.TryBuildOwnerSupportBody(s.Player.CharacterId, out var strikerBody))
@@ -828,31 +848,43 @@ namespace DfoServer.Network.Handlers.Dungeon
             return body[13] == 0;
         }
 
-        private static int ResolveMazeStartMapId(
-            PvfLib.MazeInfo maze,
-            int startX,
-            int startY)
+        private static int ResolveSelectedRoomMapId(
+            int dungeonId,
+            int mazeIndex,
+            int x,
+            int y,
+            int[] bossPosition)
         {
-            if (maze == null
-                || startX < 0
-                || startY < 0
-                || maze.MapSpecifications == null)
+            if (dungeonId <= 0 || mazeIndex < 0 || x < 0 || y < 0)
                 return 0;
 
-            foreach (var spec in maze.MapSpecifications)
+            try
             {
-                if (spec.X != startX || spec.Y != startY || spec.Index <= 0)
-                    continue;
-                return spec.Index;
+                var room = DungeonData.GetDungeonMapMonsterSummaryInformation(
+                    dungeonId,
+                    x,
+                    y,
+                    mazeIndex,
+                    overrideMapId: -1,
+                    bossPos: bossPosition);
+                return room.Index > 0 ? room.Index : 0;
             }
-
-            return 0;
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[DungeonHandler] selection room resolution failed: " +
+                    $"dungeon={dungeonId} maze={mazeIndex} room=({x},{y}) " +
+                    $"error={ex.Message}");
+                return 0;
+            }
         }
 
         private static DungeonSelectionSnapshot CaptureSelectionSnapshot(
             DungeonRun run,
             PvfLib.MazeInfo maze,
-            int partyMemberCount)
+            int partyMemberCount,
+            IReadOnlyList<RidableObjectSpawnEntry> randomizedObjects,
+            ClearConditionState clearConditionTemplate)
         {
             if (run == null)
                 throw new ArgumentNullException(nameof(run));
@@ -869,10 +901,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 BossMapPosition = run.BossMapPos == null
                     ? null
                     : (int[])run.BossMapPos.Clone(),
-                RidableObjects = run.RidableObjects == null
-                    ? Array.Empty<RidableObjectSpawnEntry>()
-                    : run.RidableObjects.ToArray(),
-                ClearConditionTemplate = run.ClearCondition?.CloneFresh(),
+                RidableObjects = randomizedObjects,
+                ClearConditionTemplate = clearConditionTemplate,
             };
         }
 
@@ -884,6 +914,159 @@ namespace DfoServer.Network.Handlers.Dungeon
             return party == null
                 ? 1
                 : Math.Max(1, Math.Min(4, party.Count));
+        }
+
+        private async Task<bool> PrepareTournamentEntryAsync(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            DungeonRun run,
+            int partyMemberCount)
+        {
+            if (!_svc.Tournaments.TryPrepareRun(
+                    run,
+                    partyMemberCount,
+                    ServerRandom.Next,
+                    out var definition,
+                    out var failureReason))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON tournament rejected: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"dungeon={run?.DungeonId ?? 0} " +
+                    $"map={run?.MazeStartMapId ?? 0} " +
+                    $"partyCount={partyMemberCount} reason={failureReason}");
+                var selection = await DungeonRunLifecycle
+                    .RejectSelectingRunAsync(
+                        session,
+                        run.CaptureIdentity(),
+                        _svc.InstanceRegistry);
+                if (selection != null)
+                {
+                    await _svc.AdmissionRejects.SendAsync(
+                        session,
+                        header.type,
+                        DungeonAdmissionReject.DungeonUnavailable);
+                }
+                return false;
+            }
+
+            if (definition == null)
+                return true;
+            var memberSlot = ResolvePartySlot(session);
+            var changes = new InventoryMutationSet();
+            var rejection = DungeonAdmissionReject.InvalidSelectionState;
+            var entryAccepted = false;
+            if (!TryGetOwnedInventoryLease(session, out var lease))
+            {
+                failureReason = "owned inventory lease is missing";
+            }
+            else
+            {
+                entryAccepted = _svc.Tournaments.TryConsumeEntryItems(
+                    lease,
+                    definition,
+                    memberSlot,
+                    out changes,
+                    out rejection,
+                    out failureReason);
+            }
+            if (!entryAccepted)
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON tournament entry cost rejected: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"dungeon={run.DungeonId} reason={failureReason}");
+                var selection = await DungeonRunLifecycle
+                    .RejectSelectingRunAsync(
+                        session,
+                        run.CaptureIdentity(),
+                        _svc.InstanceRegistry);
+                if (selection != null)
+                {
+                    await _svc.AdmissionRejects.SendAsync(
+                        session,
+                        header.type,
+                        rejection);
+                }
+                return false;
+            }
+
+            if (_svc.InventoryRefresh != null)
+            {
+                foreach (var slot in changes.Slots)
+                {
+                    await _svc.InventoryRefresh.SendUpdateItemList(
+                        session,
+                        slot.ListType,
+                        slot.SlotIndex);
+                    if (!session.Player.IsCurrentDungeonRun(
+                            run.CaptureIdentity()))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] Tournament ready: " +
+                $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                $"map={definition.MapId} partyCount={partyMemberCount} " +
+                $"pathActors={run.Instance.Mechanisms.Tournament.PathActors.Count} " +
+                $"entryUpdates={changes.Slots.Count} " +
+                $"roundFatigue={definition.RoundFatigue} " +
+                $"goldRate={definition.ClearRewardGoldRate}");
+            return true;
+        }
+
+        private async Task<bool> PrepareBloodAltarEntryAsync(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            DungeonRun run)
+        {
+            if (_svc.BloodAltars.TryPrepareRun(
+                    run,
+                    out var definition,
+                    out var failureReason))
+            {
+                if (definition != null)
+                {
+                    FileLogger.Log(
+                        $"[{DungeonSharedServices.ProtocolLogName}] " +
+                        $"Blood Altar ready: cid={session.Player.CharacterId} " +
+                        $"dungeon={run.DungeonId} kind={definition.Kind} " +
+                        $"rounds={definition.MaxRounds}");
+                }
+                return true;
+            }
+
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] " +
+                $"SELECT_DUNGEON blood altar rejected: " +
+                $"cid={session?.Player?.CharacterId ?? 0} " +
+                $"dungeon={run?.DungeonId ?? 0} reason={failureReason}");
+            var selection = await DungeonRunLifecycle.RejectSelectingRunAsync(
+                session,
+                run.CaptureIdentity(),
+                _svc.InstanceRegistry);
+            if (selection != null)
+            {
+                await _svc.AdmissionRejects.SendAsync(
+                    session,
+                    header.type,
+                    DungeonAdmissionReject.DungeonUnavailable);
+            }
+            return false;
+        }
+
+        private byte ResolvePartySlot(EnhancedClientSession session)
+        {
+            var party = session?.Player == null
+                ? null
+                : _svc.PartyManager?.GetPartyByUser(session.Player.UserId);
+            var member = party?.GetMember(session.Player.UserId);
+            return member?.SlotIndex ?? 0;
         }
 
         private async Task PrepareManualHellPartyAsync(
@@ -1118,27 +1301,5 @@ namespace DfoServer.Network.Handlers.Dungeon
                 && lease.IsOwnedBy(session.SessionId);
         }
 
-        // 小地图特殊图标坐标。两种来源:
-        // 1. [randomized object creation] → 已有 [map] 坐标(根特系列)
-        // 2. [boss room entrance condition] → [hunt monster] 条件怪需随机分配房间(陷落的村庄)
-        //    照 df_game_r SetGridPath: 从非起点/非BOSS房的有效房间里随机选。
-        private static IReadOnlyList<IReadOnlyList<(byte, byte)>> BuildMinimapIconGroups(int dungeonId, int mazeIndex)
-        {
-            PvfLib.MazeInfo maze;
-            try { maze = DungeonData.GetDungeonMaze(dungeonId, mazeIndex); }
-            catch { return null; }
-
-            // 来源1: [randomized object creation]
-            if (maze?.RidableScript != null && maze.RidableScript.Objects.Count > 0)
-            {
-                var groups = new List<IReadOnlyList<(byte, byte)>>();
-                var pairs = new List<(byte, byte)>();
-                foreach (var obj in maze.RidableScript.Objects)
-                    pairs.Add(((byte)obj.MapX, (byte)obj.MapY));
-                groups.Add(pairs);
-                return groups;
-            }
-            return null;
-        }
     }
 }

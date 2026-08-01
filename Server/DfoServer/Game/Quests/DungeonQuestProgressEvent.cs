@@ -8,6 +8,7 @@ namespace DfoServer.Game.Quests
         HuntMonster = 0,
         ClearMap = 1,
         ClearDungeon = 2,
+        HuntEnemy = 3,
     }
 
     public sealed class DungeonQuestProgressEvent
@@ -18,14 +19,16 @@ namespace DfoServer.Game.Quests
             int dungeonId,
             int difficulty,
             int mapId,
-            int monsterCode)
+            int actorCode,
+            int enemyType)
         {
             Envelope = envelope ?? throw new ArgumentNullException(nameof(envelope));
             Kind = kind;
             DungeonId = dungeonId;
             Difficulty = difficulty;
             MapId = mapId;
-            MonsterCode = monsterCode;
+            ActorCode = actorCode;
+            EnemyType = enemyType;
         }
 
         public DungeonEventEnvelope Envelope { get; }
@@ -34,7 +37,9 @@ namespace DfoServer.Game.Quests
         public int DungeonId { get; }
         public int Difficulty { get; }
         public int MapId { get; }
-        public int MonsterCode { get; }
+        public int ActorCode { get; }
+        public int MonsterCode => ActorCode;
+        public int EnemyType { get; }
 
         public static DungeonQuestProgressEvent HuntMonster(
             DungeonEventEnvelope envelope,
@@ -47,7 +52,23 @@ namespace DfoServer.Game.Quests
                 dungeonId,
                 difficulty,
                 mapId: 0,
-                monsterCode);
+                actorCode: monsterCode,
+                enemyType: 0);
+
+        public static DungeonQuestProgressEvent HuntEnemy(
+            DungeonEventEnvelope envelope,
+            int dungeonId,
+            int difficulty,
+            int enemyCode,
+            int enemyType) =>
+            new DungeonQuestProgressEvent(
+                envelope,
+                DungeonQuestProgressKind.HuntEnemy,
+                dungeonId,
+                difficulty,
+                mapId: 0,
+                actorCode: enemyCode,
+                enemyType);
 
         public static DungeonQuestProgressEvent ClearMap(
             DungeonEventEnvelope envelope,
@@ -61,6 +82,7 @@ namespace DfoServer.Game.Quests
                 dungeonId,
                 difficulty: 0,
                 mapId,
-                monsterCode: 0);
+                actorCode: 0,
+                enemyType: 0);
     }
 }

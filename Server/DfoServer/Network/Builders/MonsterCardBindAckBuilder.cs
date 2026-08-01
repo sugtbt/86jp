@@ -1,4 +1,4 @@
-using DfoServer.Game.ExpertJob;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Network.Builders
 {
@@ -6,11 +6,7 @@ namespace DfoServer.Network.Builders
     {
         internal const int SuccessLength = 19;
 
-        internal static byte[] BuildSuccess(
-            short binderSlot,
-            short firstCardSlot,
-            short secondCardSlot,
-            MonsterCardBindResult result)
+        internal static byte[] BuildSuccess(short binderSlot, short firstCardSlot, short secondCardSlot, MonsterCardBindResult result)
         {
             var writer = new GamePacketWriter();
             writer.WriteByte(0x01);

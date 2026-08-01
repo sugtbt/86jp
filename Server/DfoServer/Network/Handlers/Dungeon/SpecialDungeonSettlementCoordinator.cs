@@ -13,13 +13,9 @@ namespace DfoServer.Network.Handlers.Dungeon
     // Generic settlement still owns phase transitions, rewards and card flow.
     internal static class SpecialDungeonSettlementCoordinator
     {
-        // S4A14 SET_PLAY_RESULT: the SeizeMoney hit counter is int32 at body + 6.
-        private const int SeizeMoneyHitCountOffset = 6;
-
-        internal static async Task OnResultPreparingAsync(
+        internal static async Task OnDungeonClearedAsync(
             EnhancedClientSession session,
-            DungeonRun run,
-            byte[] body)
+            DungeonRun run)
         {
             var special = run?.SpecialDungeon;
             if (run == null
@@ -62,33 +58,42 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var config = special.Definition.SeizeMoney;
-            var unitValue = Math.Max(1, config.GaugeSubOnDamage);
-            var maxUnits = Math.Max(1, config.GaugeMax / unitValue);
-            var hitCount = Math.Max(
-                0,
-                ReadInt32(body, SeizeMoneyHitCountOffset));
-            var remainingUnits =
-                Math.Max(0, maxUnits - Math.Min(maxUnits, hitCount));
-            if (bossSequence == 0
-                || !special.TryReserveSeizeMoneyClearReward(
-                    remainingUnits,
-                    maxDropCount,
-                    out var count,
-                    out var gauge))
+            if (bossSequence == 0)
             {
                 FileLogger.Log(
                     $"[SpecialDungeonModule] SEIZE_MONEY drops skipped: " +
                     $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
-                    $"bossSeq={bossSequence} hitCount={hitCount} " +
-                    $"remainingUnits={remainingUnits} gauge={special.SeizeMoneyGauge}");
+                    $"reason=missing_boss_sequence");
+                return;
+            }
+            if (!special.TryReserveAuthoritativeSeizeMoneyClearReward(
+                    maxDropCount,
+                    out var rewardPlan,
+                    out var failureReason))
+            {
+                FileLogger.Log(
+                    $"[SpecialDungeonModule] SEIZE_MONEY drops skipped: " +
+                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                    $"bossSeq={bossSequence} reason={failureReason} " +
+                    $"gauge={special.SeizeMoneyGauge}");
+                return;
+            }
+            if (rewardPlan.Count <= 0)
+            {
+                FileLogger.Log(
+                    $"[SpecialDungeonModule] SEIZE_MONEY drops skipped: " +
+                    $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                    $"bossSeq={bossSequence} reason=no_remaining_reward " +
+                    $"hitCount={rewardPlan.HitCount} " +
+                    $"remainingUnits={rewardPlan.RemainingUnits} " +
+                    $"gauge={rewardPlan.Gauge}");
                 return;
             }
 
             var drops = new List<DropInfo>();
             lock (run.SyncRoot)
             {
-                for (var i = 0; i < count; i++)
+                for (var i = 0; i < rewardPlan.Count; i++)
                 {
                     run.SceneSlotCounter++;
                     var drop = new DropInfo
@@ -115,9 +120,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                 $"[SpecialDungeonModule] SEIZE_MONEY drops sent: " +
                 $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
                 $"boss={bossCode} bossSeq={bossSequence} " +
-                $"item={rewardItemId} count={count}/{maxDropCount} " +
-                $"hitCount={hitCount} remainingUnits={remainingUnits} " +
-                $"gauge={gauge}/{config.GaugeMax}");
+                $"item={rewardItemId} count={rewardPlan.Count}/{maxDropCount} " +
+                $"hitCount={rewardPlan.HitCount} " +
+                $"remainingUnits={rewardPlan.RemainingUnits} " +
+                $"gauge={rewardPlan.Gauge}/" +
+                $"{special.Definition.SeizeMoney.GaugeMax}");
         }
 
         private static int ResolveBossCode(DungeonRun run, ushort bossSequence)
@@ -141,12 +148,5 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
         }
 
-        private static int ReadInt32(byte[] body, int offset)
-        {
-            if (body == null || offset < 0 || offset + 4 > body.Length)
-                return 0;
-
-            return BitConverter.ToInt32(body, offset);
-        }
     }
 }

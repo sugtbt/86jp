@@ -73,7 +73,7 @@ namespace DfoServer.Game.Dungeon
             DungeonParticipantAttachmentState state,
             DungeonRun run,
             DungeonRunIdentity runIdentity,
-            DungeonRoomIdentity roomIdentity,
+            DungeonParticipantRoomIdentity roomIdentity,
             DateTime detachedUtc,
             DateTime hardExpiresUtc,
             DateTime idleExpiresUtc,
@@ -102,7 +102,7 @@ namespace DfoServer.Game.Dungeon
         internal DungeonParticipantAttachmentState State { get; }
         internal DungeonRun Run { get; }
         internal DungeonRunIdentity RunIdentity { get; }
-        internal DungeonRoomIdentity RoomIdentity { get; }
+        internal DungeonParticipantRoomIdentity RoomIdentity { get; }
         internal DateTime DetachedUtc { get; }
         internal DateTime HardExpiresUtc { get; }
         internal DateTime IdleExpiresUtc { get; }

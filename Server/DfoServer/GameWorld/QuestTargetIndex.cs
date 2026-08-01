@@ -13,6 +13,45 @@ namespace DfoServer.GameWorld
         public int ChannelIndex;
     }
 
+    internal enum HuntEnemyProgressSource
+    {
+        Invalid = 0,
+        Server = 1,
+        Client = 2,
+    }
+
+    internal sealed class HuntEnemyQuestTarget
+    {
+        internal HuntEnemyQuestTarget(
+            int questId,
+            int dungeonId,
+            int minimumDifficulty,
+            int enemyCode,
+            int enemyType,
+            int requiredCount,
+            int channelIndex,
+            HuntEnemyProgressSource progressSource)
+        {
+            QuestId = questId;
+            DungeonId = dungeonId;
+            MinimumDifficulty = minimumDifficulty;
+            EnemyCode = enemyCode;
+            EnemyType = enemyType;
+            RequiredCount = requiredCount;
+            ChannelIndex = channelIndex;
+            ProgressSource = progressSource;
+        }
+
+        internal int QuestId { get; }
+        internal int DungeonId { get; }
+        internal int MinimumDifficulty { get; }
+        internal int EnemyCode { get; }
+        internal int EnemyType { get; }
+        internal int RequiredCount { get; }
+        internal int ChannelIndex { get; }
+        internal HuntEnemyProgressSource ProgressSource { get; }
+    }
+
     internal sealed class DungeonQuestActorTarget
     {
         public int QuestId;
@@ -28,6 +67,19 @@ namespace DfoServer.GameWorld
         public int DungeonId;
         public int Difficulty;
         public List<int> ItemIds = new List<int>();
+    }
+
+    internal sealed class ClearMapQuestDefinition
+    {
+        internal ClearMapQuestDefinition(int targetId, int companionApcId)
+        {
+            TargetId = targetId;
+            CompanionApcId = companionApcId;
+        }
+
+        internal int TargetId { get; }
+        internal int CompanionApcId { get; }
+        internal bool HasCompanion => CompanionApcId > 0;
     }
 
     internal static class QuestTargetIndex
@@ -72,6 +124,85 @@ namespace DfoServer.GameWorld
             }
 
             return result;
+        }
+
+        internal static List<HuntEnemyQuestTarget> GetHuntEnemyTargets(
+            int questId)
+        {
+            return TryParseHuntEnemyTargets(
+                questId,
+                out var targets,
+                out _)
+                    ? targets
+                    : new List<HuntEnemyQuestTarget>();
+        }
+
+        internal static HuntEnemyProgressSource GetHuntEnemyProgressSource(
+            int questId)
+        {
+            return TryParseHuntEnemyTargets(
+                questId,
+                out _,
+                out var source)
+                    ? source
+                    : HuntEnemyProgressSource.Invalid;
+        }
+
+        internal static bool IsServerDrivenHuntEnemyActorType(int enemyType)
+            => enemyType == QuestDropProvider.EnemyTypeMonster
+                || enemyType == QuestDropProvider.EnemyTypeAiCharacter;
+
+        internal static bool IsClientHuntEnemyTriggerAuthorized(
+            int questId,
+            byte triggerType)
+        {
+            if (!TryParseHuntEnemyTargets(
+                    questId,
+                    out var targets,
+                    out var source)
+                || source != HuntEnemyProgressSource.Client)
+            {
+                return false;
+            }
+
+            if (triggerType == 0)
+            {
+                foreach (var target in targets)
+                {
+                    if (target.EnemyCode > 0
+                        && target.EnemyType != 10)
+                    {
+                        return false;
+                    }
+                }
+                return targets.Count > 0;
+            }
+
+            if ((triggerType & ~0x70) != 0 || (triggerType & 0x70) == 0)
+                return false;
+
+            for (var channelIndex = 0; channelIndex < 3; channelIndex++)
+            {
+                var channelMask = 0x10 << channelIndex;
+                if ((triggerType & channelMask) == 0)
+                    continue;
+
+                var matched = false;
+                foreach (var target in targets)
+                {
+                    if (target.ChannelIndex == channelIndex
+                        && target.ProgressSource
+                            == HuntEnemyProgressSource.Client)
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched)
+                    return false;
+            }
+
+            return true;
         }
 
         internal static List<DungeonQuestActorTarget>
@@ -247,6 +378,34 @@ namespace DfoServer.GameWorld
                 || difficulty >= target.MinimumDifficulty;
         }
 
+        internal static bool MatchesHuntEnemyTarget(
+            HuntEnemyQuestTarget target,
+            int dungeonId,
+            int difficulty,
+            int enemyCode,
+            int enemyType)
+        {
+            if (target == null
+                || enemyCode <= 0
+                || enemyType < QuestDropProvider.EnemyTypeMonster
+                || enemyType > QuestDropProvider.EnemyTypePassiveObject
+                || target.EnemyCode != enemyCode
+                || target.EnemyType != enemyType)
+            {
+                return false;
+            }
+
+            if (target.DungeonId != -1
+                && target.DungeonId != dungeonId)
+            {
+                return false;
+            }
+
+            return target.MinimumDifficulty < 0
+                || difficulty < 0
+                || difficulty >= target.MinimumDifficulty;
+        }
+
         internal static bool ReferencesDungeon(int questId, int dungeonId)
         {
             if (questId <= 0 || dungeonId <= 0)
@@ -285,22 +444,47 @@ namespace DfoServer.GameWorld
             => IsClearMapQuest(quest)
                 && MatchesClearMapTargetData(quest.IntData, dungeonId, mapId);
 
+        internal static bool TryGetClearMapDefinition(
+            int questId,
+            out ClearMapQuestDefinition definition)
+        {
+            var quest = QuestData.GetQuestFile(questId);
+            if (!IsClearMapQuest(quest))
+            {
+                definition = null;
+                return false;
+            }
+
+            return TryParseClearMapDefinition(quest.IntData, out definition);
+        }
+
         internal static bool MatchesClearMapTargetData(
             string intData,
             int dungeonId,
             int mapId)
         {
-            foreach (var target in QuestData.ParseIntList(intData))
-            {
-                if (target <= 0)
-                    continue;
-                if (dungeonId > 0 && target == dungeonId)
-                    return true;
-                if (mapId > 0 && target == mapId)
-                    return true;
-            }
+            return TryParseClearMapDefinition(intData, out var definition)
+                && ((dungeonId > 0 && definition.TargetId == dungeonId)
+                    || (mapId > 0 && definition.TargetId == mapId));
+        }
 
-            return false;
+        private static bool TryParseClearMapDefinition(
+            string intData,
+            out ClearMapQuestDefinition definition)
+        {
+            definition = null;
+            var values = QuestData.ParseIntList(intData);
+            if (values.Count < 1 || values.Count > 2 || values[0] <= 0)
+                return false;
+
+            var companionApcId = values.Count == 2 ? values[1] : 0;
+            if (companionApcId < 0)
+                return false;
+
+            definition = new ClearMapQuestDefinition(
+                values[0],
+                companionApcId);
+            return true;
         }
 
         internal static List<QuestRewardItem> GetSeekingConsumeItems(int questId)
@@ -315,8 +499,10 @@ namespace DfoServer.GameWorld
             if (QuestData.NormalizeQuestTag(quest.Type) != "seeking")
                 return new List<QuestRewardItem>();
 
-            var items = QuestData.ParseItemPairs(quest.IntData);
-            items.RemoveAll(item => item.ItemId <= 0 || item.Count <= 0);
+            var items = QuestData.ParseItemPairs(
+                quest.IntData,
+                preserveGoldMarker: true);
+            items.RemoveAll(item => item.ItemId < 0 || item.Count <= 0);
             return items;
         }
 
@@ -335,6 +521,124 @@ namespace DfoServer.GameWorld
             return configuredDifficulty < 0
                 || difficulty < 0
                 || configuredDifficulty == difficulty;
+        }
+
+        private static bool TryParseHuntEnemyTargets(
+            int questId,
+            out List<HuntEnemyQuestTarget> targets,
+            out HuntEnemyProgressSource source)
+        {
+            targets = new List<HuntEnemyQuestTarget>();
+            source = HuntEnemyProgressSource.Invalid;
+            var quest = QuestData.GetQuestFile(questId);
+            if (quest == null
+                || QuestData.NormalizeQuestTag(quest.Type) != "hunt enemy")
+            {
+                return false;
+            }
+
+            var values = QuestData.ParseIntList(quest.IntData);
+            const int stride = 5;
+            if (values.Count == 0 || values.Count % stride != 0)
+                return false;
+
+            var hasServerTargets = false;
+            var hasClientTargets = false;
+            for (var offset = 0; offset < values.Count; offset += stride)
+            {
+                var dungeonId = values[offset];
+                var minimumDifficulty = values[offset + 1];
+                var enemyCode = values[offset + 2];
+                var enemyType = values[offset + 3];
+                var requiredCount = values[offset + 4];
+                if ((dungeonId <= 0 && dungeonId != -1)
+                    || minimumDifficulty < -1
+                    || requiredCount <= 0)
+                {
+                    return false;
+                }
+
+                if (!TryResolveHuntEnemyProgressSource(
+                        enemyCode,
+                        enemyType,
+                        out var targetSource))
+                    return false;
+
+                hasServerTargets |= targetSource
+                    == HuntEnemyProgressSource.Server;
+                hasClientTargets |= targetSource
+                    == HuntEnemyProgressSource.Client;
+                targets.Add(new HuntEnemyQuestTarget(
+                    questId,
+                    dungeonId,
+                    minimumDifficulty,
+                    enemyCode,
+                    enemyType,
+                    requiredCount,
+                    offset / stride,
+                    targetSource));
+            }
+
+            if (hasServerTargets == hasClientTargets)
+                return false;
+
+            source = hasServerTargets
+                ? HuntEnemyProgressSource.Server
+                : HuntEnemyProgressSource.Client;
+            return true;
+        }
+
+        private static bool TryResolveHuntEnemyProgressSource(
+            int enemyCode,
+            int enemyType,
+            out HuntEnemyProgressSource source)
+        {
+            source = HuntEnemyProgressSource.Invalid;
+            if (enemyType == QuestDropProvider.EnemyTypeMonster
+                || enemyType == QuestDropProvider.EnemyTypeAiCharacter)
+            {
+                if (enemyCode > 0)
+                {
+                    source = HuntEnemyProgressSource.Server;
+                    return true;
+                }
+                if (IsClientReportedHuntEnemyWildcard(enemyCode, enemyType))
+                {
+                    source = HuntEnemyProgressSource.Client;
+                    return true;
+                }
+                return false;
+            }
+
+            if (enemyType == QuestDropProvider.EnemyTypePassiveObject)
+            {
+                if (enemyCode <= 0)
+                    return false;
+                source = HuntEnemyProgressSource.Client;
+                return true;
+            }
+
+            if (enemyType == 10 && enemyCode == -11)
+            {
+                source = HuntEnemyProgressSource.Client;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsClientReportedHuntEnemyWildcard(
+            int enemyCode,
+            int enemyType)
+        {
+            if (enemyCode == -1)
+            {
+                return enemyType == QuestDropProvider.EnemyTypeMonster
+                    || enemyType == QuestDropProvider.EnemyTypeAiCharacter;
+            }
+
+            return enemyCode == -3
+                && enemyType == QuestDropProvider.EnemyTypeMonster;
         }
 
         private static bool IsClearMapQuest(QuestFile quest)

@@ -15,7 +15,7 @@ namespace DfoServer.Game.Dungeon
             internal Guid ActiveSessionId;
             internal DungeonRun Run;
             internal DungeonRunIdentity RunIdentity;
-            internal DungeonRoomIdentity DetachedRoomIdentity;
+            internal DungeonParticipantRoomIdentity DetachedRoomIdentity;
             internal long AttachmentGeneration;
             internal long LastAcceptedOfferGeneration;
             internal long LastCancelledOfferGeneration;
@@ -151,7 +151,8 @@ namespace DfoServer.Game.Dungeon
                 entry.ActiveSessionId = Guid.Empty;
                 entry.AttachmentGeneration = NextGeneration(
                     entry.AttachmentGeneration);
-                entry.DetachedRoomIdentity = entry.Run.CaptureRoomIdentity();
+                entry.DetachedRoomIdentity =
+                    entry.Run.CaptureParticipantRoomIdentity();
                 entry.DetachedUtc = now;
                 entry.HardExpiresUtc = now.Add(_options.HardTimeout);
                 entry.IdleExpiresUtc = Min(
@@ -490,21 +491,134 @@ namespace DfoServer.Game.Dungeon
             return false;
         }
 
+        // Captures the participant set for one physical room. The returned list
+        // is a value snapshot; callers must not re-query PartyManager while
+        // executing the event because membership/room changes are then TOCTOU.
+        internal IReadOnlyList<DungeonParticipantRosterEntry> CaptureParticipantRoster(
+            DungeonRoomIdentity roomIdentity,
+            int partyId = 0)
+        {
+            var result = new List<DungeonParticipantRosterEntry>();
+            if (!roomIdentity.IsValid)
+                return result;
+
+            lock (_syncRoot)
+            {
+                if (_disposed
+                    || !_charactersByInstance.TryGetValue(
+                        roomIdentity.Instance.PartyDungeonInstanceId,
+                        out var characterIds))
+                {
+                    return result;
+                }
+
+                foreach (var characterId in characterIds)
+                {
+                    if (!_byCharacterId.TryGetValue(characterId, out var entry)
+                        || (entry.State != DungeonParticipantAttachmentState.Active
+                            && entry.State != DungeonParticipantAttachmentState.Detached)
+                        || (partyId > 0 && entry.PartyId != partyId))
+                    {
+                        continue;
+                    }
+
+                    var participantRoom = entry.State ==
+                        DungeonParticipantAttachmentState.Detached
+                        ? entry.DetachedRoomIdentity.Room
+                        : entry.Run.CaptureRoomIdentity();
+                    if (!participantRoom.Equals(roomIdentity))
+                        continue;
+
+                    result.Add(new DungeonParticipantRosterEntry(
+                        entry.CharacterId,
+                        entry.ParticipantUserId,
+                        entry.Run,
+                        entry.RunIdentity,
+                        roomIdentity,
+                        entry.AttachmentGeneration));
+                }
+            }
+
+            result.Sort((left, right) =>
+                left.CharacterId.CompareTo(right.CharacterId));
+            return result;
+        }
+
+        // Clear facts are instance-wide. Their frozen roster deliberately does
+        // not require every participant to remain in the source room.
+        internal IReadOnlyList<DungeonParticipantRosterEntry>
+            CaptureInstanceParticipantRoster(
+                DungeonInstanceIdentity instanceIdentity,
+                int partyId = 0)
+        {
+            var result = new List<DungeonParticipantRosterEntry>();
+            if (!instanceIdentity.IsValid)
+                return result;
+
+            lock (_syncRoot)
+            {
+                if (_disposed
+                    || !_charactersByInstance.TryGetValue(
+                        instanceIdentity.PartyDungeonInstanceId,
+                        out var characterIds))
+                {
+                    return result;
+                }
+
+                foreach (var characterId in characterIds)
+                {
+                    if (!_byCharacterId.TryGetValue(characterId, out var entry)
+                        || (entry.State != DungeonParticipantAttachmentState.Active
+                            && entry.State != DungeonParticipantAttachmentState.Detached)
+                        || (partyId > 0 && entry.PartyId != partyId))
+                    {
+                        continue;
+                    }
+
+                    var roomIdentity = entry.State ==
+                        DungeonParticipantAttachmentState.Detached
+                        ? entry.DetachedRoomIdentity.Room
+                        : entry.Run.CaptureRoomIdentity();
+                    if (!roomIdentity.IsValid
+                        || !roomIdentity.Instance.Equals(instanceIdentity))
+                    {
+                        continue;
+                    }
+
+                    result.Add(new DungeonParticipantRosterEntry(
+                        entry.CharacterId,
+                        entry.ParticipantUserId,
+                        entry.Run,
+                        entry.RunIdentity,
+                        roomIdentity,
+                        entry.AttachmentGeneration));
+                }
+            }
+
+            result.Sort((left, right) =>
+                left.CharacterId.CompareTo(right.CharacterId));
+            return result;
+        }
+
         public void Dispose()
         {
             List<ClockService.ClockTimerHandle> timers;
+            HashSet<DungeonInstance> instances;
             lock (_syncRoot)
             {
                 if (_disposed)
                     return;
                 _disposed = true;
                 timers = new List<ClockService.ClockTimerHandle>();
+                instances = new HashSet<DungeonInstance>();
                 foreach (var entry in _byCharacterId.Values)
                 {
                     if (entry.ExpiryTimer != null)
                         timers.Add(entry.ExpiryTimer);
                     entry.ExpiryTimer = null;
                     entry.State = DungeonParticipantAttachmentState.Terminated;
+                    if (entry.Run?.Instance != null)
+                        instances.Add(entry.Run.Instance);
                 }
                 _byCharacterId.Clear();
                 _charactersByInstance.Clear();
@@ -512,6 +626,11 @@ namespace DfoServer.Game.Dungeon
 
             foreach (var timer in timers)
                 timer.Cancel();
+            foreach (var instance in instances)
+            {
+                instance.TryBeginEnding();
+                instance.TryMarkEnded();
+            }
         }
 
         private void ReplaceExpiryTimer(
@@ -728,8 +847,12 @@ namespace DfoServer.Game.Dungeon
             }
             characterIds.Remove(entry.CharacterId);
             if (characterIds.Count == 0)
+            {
                 _charactersByInstance.Remove(
                     entry.RunIdentity.PartyDungeonInstanceId);
+                entry.Run?.Instance?.TryBeginEnding();
+                entry.Run?.Instance?.TryMarkEnded();
+            }
         }
 
         private string BuildTimerName(int characterId) =>

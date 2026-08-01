@@ -23,7 +23,7 @@ namespace DfoServer.Game.Inventory
 
         public int AccountId => Inventory.AccountId;
 
-        public InventoryService Inventory { get; }
+        public InventoryService Inventory { get; private set; }
 
         public object SyncRoot { get; } = new object();
 
@@ -32,6 +32,16 @@ namespace DfoServer.Game.Inventory
         public bool IsOwnedBy(Guid sessionId)
         {
             return SessionId == sessionId;
+        }
+
+        internal void ReplaceInventory(InventoryService inventory)
+        {
+            if (inventory == null)
+                throw new ArgumentNullException(nameof(inventory));
+            if (inventory.CharacterId != CharacterId || inventory.AccountId != AccountId)
+                throw new ArgumentException("replacement inventory owner does not match the lease", nameof(inventory));
+
+            Inventory = inventory;
         }
     }
 }

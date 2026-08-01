@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace DfoServer.Game.Dungeon
 {
@@ -119,5 +120,68 @@ namespace DfoServer.Game.Dungeon
             => value == null || value.Length == 0
                 ? Array.Empty<byte>()
                 : (byte[])value.Clone();
+    }
+
+    internal sealed class TournamentRewardSelectStateDungeonCommand
+        : DungeonCommand
+    {
+        internal TournamentRewardSelectStateDungeonCommand(ushort wireType)
+            : base(wireType)
+        {
+        }
+    }
+
+    internal sealed class TournamentRewardSelectDungeonCommand
+        : DungeonCommand
+    {
+        internal TournamentRewardSelectDungeonCommand(
+            ushort wireType,
+            byte cardType,
+            byte cardIndex)
+            : base(wireType)
+        {
+            CardType = cardType;
+            CardIndex = cardIndex;
+        }
+
+        internal byte CardType { get; }
+        internal byte CardIndex { get; }
+    }
+
+    internal sealed class BloodAltarPrepareFinishedDungeonCommand
+        : DungeonCommand
+    {
+        internal BloodAltarPrepareFinishedDungeonCommand(ushort wireType)
+            : base(wireType)
+        {
+        }
+    }
+
+    internal sealed class BloodAltarMonsterDeathsDungeonCommand
+        : DungeonCommand
+    {
+        internal BloodAltarMonsterDeathsDungeonCommand(
+            ushort wireType,
+            IReadOnlyList<ushort> sequenceIds)
+            : base(wireType)
+        {
+            SequenceIds = sequenceIds ?? Array.Empty<ushort>();
+        }
+
+        internal IReadOnlyList<ushort> SequenceIds { get; }
+    }
+
+    internal sealed class BloodAltarSelectDifficultyDungeonCommand
+        : DungeonCommand
+    {
+        internal BloodAltarSelectDifficultyDungeonCommand(
+            ushort wireType,
+            byte difficulty)
+            : base(wireType)
+        {
+            Difficulty = difficulty;
+        }
+
+        internal byte Difficulty { get; }
     }
 }

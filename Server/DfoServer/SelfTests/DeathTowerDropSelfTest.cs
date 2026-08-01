@@ -137,13 +137,11 @@ namespace DfoServer.SelfTests
 
         private static bool StagePacketCapsMonsterCount()
         {
-            var tower = new DeathTowerSession(new DeathTowerData.TowerConfig
-            {
-                DungeonId = DeathTowerDungeonId,
-                TotalStages = 1,
-                StageMapIds = new[] { 1 },
-                BasisLevel = 50,
-            });
+            var tower = new DeathTowerSession(
+                DeathTowerSelfTestFactory.CreateConfig(
+                    DeathTowerDungeonId,
+                    new[] { 1 },
+                    50));
             var monsters = new List<StageMonster>();
             for (var index = 0; index <= byte.MaxValue; index++)
             {

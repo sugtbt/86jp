@@ -10,6 +10,8 @@ namespace DfoServer.Game.Inventory
         public bool SourceIsItemId { get; set; }
 
         public ushort RequestedCount { get; set; }
+
+        public ushort? OutputCount { get; set; }
     }
 
     public sealed class CompoundItemRecipeResult
