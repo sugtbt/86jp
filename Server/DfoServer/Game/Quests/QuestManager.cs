@@ -337,6 +337,62 @@ namespace DfoServer.Game.Quests
             await _notifications.SendActiveQuestListAsync(cid);
         }
 
+        internal async Task SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+            InventoryLease expectedLease,
+            InventoryMutationResult mutation)
+        {
+            var cid = _sender.CharacterId;
+            if (mutation == null
+                || expectedLease == null
+                || !InventoryContext.IsCurrentLease(
+                    expectedLease,
+                    expectedLease.SessionId,
+                    cid))
+            {
+                return;
+            }
+
+            var itemFilter = new HashSet<int>();
+            var pending = new Stack<InventoryMutationResult>();
+            var visited = new HashSet<InventoryMutationResult>();
+            pending.Push(mutation);
+            while (pending.Count > 0)
+            {
+                var current = pending.Pop();
+                if (current == null || !visited.Add(current))
+                    continue;
+
+                if (current.ItemTemplateId > 0)
+                    itemFilter.Add(current.ItemTemplateId);
+                if (current.CostItemTemplateId > 0)
+                    itemFilter.Add(current.CostItemTemplateId);
+                if (current.GoldSpent)
+                    itemFilter.Add(0);
+
+                foreach (var extra in current.ExtraResults)
+                {
+                    if (extra != null)
+                        pending.Push(extra);
+                }
+            }
+
+            if (itemFilter.Count == 0)
+                return;
+
+            var matched = SyncItemSeekingQuestProgressWithoutNotification(
+                itemFilter);
+            if (!matched
+                || !InventoryContext.IsCurrentLease(
+                    expectedLease,
+                    expectedLease.SessionId,
+                    cid))
+            {
+                return;
+            }
+
+            await _notifications.SendActiveQuestListAsync(cid);
+        }
+
         public bool SyncItemSeekingQuestProgressWithoutNotification(
             ICollection<int> itemFilter,
             IReadOnlyDictionary<int, int> temporaryHeldCounts = null)

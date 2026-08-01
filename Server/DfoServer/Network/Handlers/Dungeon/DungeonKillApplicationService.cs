@@ -196,6 +196,44 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
         }
 
+        internal async Task<DungeonEventEnvelope>
+            ProcessConfirmedBossDeathAsync(
+                EnhancedClientSession session,
+                DungeonEventEnvelope source,
+                int actorCode,
+                ushort sourceUserId)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (!IsCurrent(run, source)
+                || actorCode <= 0
+                || !TryResolvePendingBossSequence(
+                    run,
+                    source.RoomIdentity,
+                    actorCode,
+                    out var sequenceId))
+            {
+                return source;
+            }
+
+            var actorSource = new DungeonEventEnvelope(
+                source.SourceEventId,
+                source.RunIdentity,
+                source.RoomInstanceId,
+                source.SourcePlayerId,
+                source.AffectedPlayerId,
+                sequenceId,
+                actorCode,
+                source.Cause,
+                source.OccurredTick);
+            await ProcessAsync(new KillContext(
+                session,
+                actorSource,
+                sequenceId,
+                sourceUserId,
+                DungeonKillOrigin.LocalReport));
+            return actorSource;
+        }
+
         // Replays only frozen, unfinished participant effects after the same run
         // is attached to a new session. The shared death fact remains the source
         // of truth; this method never invents a new actor death event.
@@ -1074,6 +1112,47 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
             }
             return null;
+        }
+
+        private static bool TryResolvePendingBossSequence(
+            DungeonRun run,
+            DungeonRoomIdentity roomIdentity,
+            int actorCode,
+            out ushort sequenceId)
+        {
+            sequenceId = 0;
+            if (run == null
+                || actorCode <= 0
+                || !run.TryCaptureCurrentRoomSnapshot(
+                    roomIdentity,
+                    out var snapshot)
+                || snapshot.RoomState?.InstanceRoom == null)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < snapshot.Monsters.Count; index++)
+            {
+                if (snapshot.Monsters[index].Code != actorCode
+                    || !IsBossActorType(snapshot.Monsters[index].Type))
+                    continue;
+
+                var sequenceValue = (int)snapshot.RoomStartSequence + index;
+                if (sequenceValue <= 0 || sequenceValue > ushort.MaxValue)
+                    continue;
+
+                var candidate = (ushort)sequenceValue;
+                if (snapshot.RoomState.InstanceRoom.TryGetActorDeathFact(
+                        candidate,
+                        out _))
+                {
+                    continue;
+                }
+
+                sequenceId = candidate;
+                return true;
+            }
+            return false;
         }
 
         private static Task SendMonsterDieAsync(

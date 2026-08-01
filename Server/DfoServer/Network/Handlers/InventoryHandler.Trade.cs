@@ -151,6 +151,14 @@ namespace DfoServer.Network.Handlers
                 await _refresh.SendUpdateItemList(session, result.ListType, result.SlotIndex);
                 FileLogger.Log($"[{ProtocolName}] BUY_ITEM: ITEM_LIST update sent list={result.ListType} slot={result.SlotIndex}");
             }
+
+            if (session.GameSession?.QuestManager != null)
+            {
+                await session.GameSession.QuestManager
+                    .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                        lease,
+                        result);
+            }
         }
 
         public async Task Handle_ENUM_CMDPACKET_SELL_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)

@@ -7,14 +7,17 @@ using DfoServer.Game.Accounts;
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.DeathTower;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Dungeon.BloodAltar;
 using DfoServer.GameWorld;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Party;
+using DfoServer.Game.Quests;
 using DfoServer.Game.ReviveCoin;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Handlers;
+using DfoServer.Network.Handlers.Dungeon;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
@@ -24,6 +27,17 @@ namespace DfoServer.SelfTests
         private const int KillerCharacterId = 48001;
         private const int MemberCharacterId = 48002;
         private const ushort MonsterSequence = 10;
+        private const ushort OrdinaryKillQuestId = 20722;
+        private const int OrdinaryKillDungeonId = 3536;
+        private const int OrdinaryKillMonsterCode = 100003;
+        private const ushort ConditionalBossQuestId = 13504;
+        private const int ConditionalBossDungeonId = 2010;
+        private const int ConditionalBossMonsterCode = 69264;
+        private const ushort BloodAltarQuestId = 5651;
+        private const int BloodAltarDungeonId = 11006;
+        private const int BloodAltarMapId = 16351;
+        private const int BloodAltarMonsterCode = 56004;
+        private const int BloodAltarQuestItemId = 4363;
 
         public static int Run()
         {
@@ -160,6 +174,35 @@ namespace DfoServer.SelfTests
                     && !memberPackets.Contains(0x0025)
                     && !memberPackets.Contains(0x0026),
                     ref failures);
+
+                fixture.PrepareOrdinaryQuestKill();
+                fixture.KillMonster();
+                Check("ordinary canonical monster kill advances the frozen active quest",
+                    fixture.LoadKillerQuestTrigger(OrdinaryKillQuestId) == 2,
+                    ref failures);
+                fixture.KillMonster();
+                Check("duplicate ordinary monster report does not repeat quest progress",
+                    fixture.LoadKillerQuestTrigger(OrdinaryKillQuestId) == 2,
+                    ref failures);
+
+                var bloodAltarSequence = fixture.PrepareBloodAltarQuestDrop();
+                fixture.KillMonster(bloodAltarSequence);
+                Check("blood altar dynamic actor grants its configured quest material",
+                    fixture.LoadKillerQuestTrigger(BloodAltarQuestId) == 0
+                    && fixture.CountKillerItem(BloodAltarQuestItemId) == 1,
+                    ref failures);
+                var bloodAltarRun = fixture.Killer.Session.Player.CurrentRun;
+                Check("blood altar quest drop does not enable ordinary monster rewards",
+                    bloodAltarRun.TotalExp == 0
+                    && bloodAltarRun.TotalGold == 0
+                    && bloodAltarRun.Drops.Count == 0,
+                    ref failures);
+
+                fixture.PrepareConditionalBossQuest();
+                fixture.ConfirmConditionalBossDeath();
+                Check("BOSS_DIE_CHECK confirms the conditional boss kill before clear",
+                    fixture.LoadKillerQuestTrigger(ConditionalBossQuestId) == 0,
+                    ref failures);
             }
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
@@ -176,6 +219,7 @@ namespace DfoServer.SelfTests
         private sealed class Fixture : IDisposable
         {
             private readonly string _dbPath;
+            private readonly string _connectionString;
             private readonly string _previousDatabasePath;
             private readonly ConnectedSession _killer;
             private readonly ConnectedSession _member;
@@ -183,12 +227,14 @@ namespace DfoServer.SelfTests
 
             private Fixture(
                 string dbPath,
+                string connectionString,
                 string previousDatabasePath,
                 ConnectedSession killer,
                 ConnectedSession member,
                 DungeonHandler handler)
             {
                 _dbPath = dbPath;
+                _connectionString = connectionString;
                 _previousDatabasePath = previousDatabasePath;
                 _killer = killer;
                 _member = member;
@@ -226,6 +272,18 @@ namespace DfoServer.SelfTests
                 var sessions = new SessionDirectory();
                 var killer = ConnectedSession.Create(KillerCharacterId, "combat-killer");
                 var member = ConnectedSession.Create(MemberCharacterId, "combat-member");
+                killer.Session.GameSession = new GameSession(
+                    killer.Session,
+                    connectionString);
+                member.Session.GameSession = new GameSession(
+                    member.Session,
+                    connectionString);
+                InventoryContext.Register(
+                    killer.Session.SessionId,
+                    new InventoryService(KillerCharacterId, KillerCharacterId));
+                InventoryContext.Register(
+                    member.Session.SessionId,
+                    new InventoryService(MemberCharacterId, MemberCharacterId));
                 sessions.Register(KillerCharacterId, killer.Session);
                 sessions.Register(MemberCharacterId, member.Session);
                 var created = parties.CreateParty(ToPartyMember(killer));
@@ -246,7 +304,13 @@ namespace DfoServer.SelfTests
                         characters,
                         dbPath,
                         ServerPaths.SchemaFilePath));
-                return new Fixture(dbPath, previousDatabasePath, killer, member, handler);
+                return new Fixture(
+                    dbPath,
+                    connectionString,
+                    previousDatabasePath,
+                    killer,
+                    member,
+                    handler);
             }
 
             public DeathTowerSession PrepareTowerKill()
@@ -347,10 +411,162 @@ namespace DfoServer.SelfTests
                     monsterCode: 1001);
             }
 
-            public void KillMonster()
+            public void PrepareOrdinaryQuestKill()
+            {
+                var active = SaveKillerActiveQuest(
+                    OrdinaryKillQuestId,
+                    triggerValue: 3);
+                var runs = CreateSharedRuns(
+                    monsterType: 0,
+                    monsterCode: OrdinaryKillMonsterCode,
+                    dungeonId: OrdinaryKillDungeonId,
+                    difficulty: 2);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public ushort PrepareBloodAltarQuestDrop()
+            {
+                var active = SaveKillerActiveQuest(
+                    BloodAltarQuestId,
+                    triggerValue: 1);
+                var runs = CreateSharedRuns(
+                    monsterType: 0,
+                    monsterCode: 0,
+                    dungeonId: BloodAltarDungeonId,
+                    mapId: BloodAltarMapId);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+
+                var rewards = BloodAltarRewardDefinitionCatalog.Current;
+                var definition = new BloodAltarDungeonDefinition(
+                    BloodAltarDungeonId,
+                    BloodAltarDungeonKind.Endless,
+                    maxRounds: 2,
+                    basisLevel: 60,
+                    rewards);
+                var runtime = new BloodAltarDungeonRuntime(definition);
+                if (!runs.Killer.Instance.Mechanisms.TryAttachBloodAltar(runtime))
+                    throw new InvalidOperationException("Unable to attach blood altar fixture runtime.");
+
+                var map = new BloodAltarMapDefinition(
+                    BloodAltarMapId,
+                    new[]
+                    {
+                        new BloodAltarMonsterDefinition(
+                            BloodAltarMonsterCode,
+                            templateType: 0,
+                            x: 640,
+                            y: 300,
+                            z: 0,
+                            durationMilliseconds: 0,
+                            spawnIntervalMilliseconds: 0,
+                            baseSpawnCount: 1,
+                            spawnCountIncrement: 0,
+                            batchCount: 1),
+                    },
+                    new[]
+                    {
+                        new BloodAltarRoundDefinition(
+                            number: 0,
+                            new[]
+                            {
+                                new BloodAltarPhaseDefinition(
+                                    round: 0,
+                                    monsterTemplateIndex: 0,
+                                    delayMilliseconds: 0,
+                                    scale: 1f,
+                                    flag: 0,
+                                    concurrentPhaseCount: 1,
+                                    difficulty: 0),
+                            }),
+                    });
+                if (!runtime.TryBindMap(
+                        map,
+                        runs.Killer.CaptureParticipantRoomIdentity().Room,
+                        out _)
+                    || !runtime.TryBeginNextRound(DateTime.UtcNow, out var schedule))
+                {
+                    throw new InvalidOperationException("Unable to start blood altar fixture round.");
+                }
+
+                var application = new BloodAltarDungeonApplicationService();
+                if (!application.TryMaterializeWave(
+                        runs.Killer,
+                        schedule.Generation,
+                        waveIndex: 0,
+                        out var wave,
+                        out _,
+                        out var failureReason)
+                    || wave.Monsters.Count != 1)
+                {
+                    throw new InvalidOperationException(
+                        "Unable to materialize blood altar fixture wave: "
+                        + failureReason);
+                }
+                return wave.Monsters[0].SequenceId;
+            }
+
+            public void PrepareConditionalBossQuest()
+            {
+                var active = SaveKillerActiveQuest(
+                    ConditionalBossQuestId,
+                    triggerValue: 1);
+                var runs = CreateSharedRuns(
+                    monsterType: 3,
+                    monsterCode: ConditionalBossMonsterCode,
+                    dungeonId: ConditionalBossDungeonId,
+                    difficulty: 1,
+                    mapId: 17114);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                runs.Killer.BossEntranceConditionTargets.Add(
+                    new BossEntranceConditionTargetState
+                    {
+                        MonsterCode = 56611,
+                    });
+                runs.Killer.BossEntranceConditionalSummonCodes.Add(
+                    ConditionalBossMonsterCode);
+                runs.Killer.BossEntranceConditionComplete = true;
+                runs.Killer.ConditionalBossSpawned = true;
+                runs.Killer.ConditionalBossCode = ConditionalBossMonsterCode;
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void ConfirmConditionalBossDeath()
             {
                 var body = new byte[4];
-                BitConverter.GetBytes(MonsterSequence).CopyTo(body, 0);
+                BitConverter.GetBytes((ushort)KillerCharacterId).CopyTo(body, 0);
+                BitConverter.GetBytes(SpecialDungeonNotifier.BossSummonRuntimeKey)
+                    .CopyTo(body, 2);
+                _handler.Handle_BOSS_DIE_CHECK(
+                        _killer.Session,
+                        new GamePacketHeader(),
+                        body)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
+            public uint LoadKillerQuestTrigger(ushort questId)
+            {
+                var quest = QuestActiveListRules.FindByQuestId(
+                    QuestService.LoadActiveQuests(
+                        _connectionString,
+                        KillerCharacterId),
+                    questId);
+                return quest?.TriggerValue ?? uint.MaxValue;
+            }
+
+            public int CountKillerItem(int itemId)
+                => InventoryContext.Get(KillerCharacterId)?.CountMainItem(itemId)
+                    ?? 0;
+
+            public void KillMonster(ushort sequenceId = MonsterSequence)
+            {
+                var body = new byte[4];
+                BitConverter.GetBytes(sequenceId).CopyTo(body, 0);
                 BitConverter.GetBytes((ushort)KillerCharacterId).CopyTo(body, 2);
                 _handler.Handle_ENUM_CMDPACKET_DIE_MONSTER(
                         _killer.Session,
@@ -391,16 +607,20 @@ namespace DfoServer.SelfTests
             private static (DungeonRun Killer, DungeonRun Member) CreateSharedRuns(
                 byte monsterType,
                 int monsterCode,
-                DungeonRewardPolicy rewardPolicy = null)
+                DungeonRewardPolicy rewardPolicy = null,
+                int dungeonId = 11000,
+                int difficulty = 0,
+                int mapId = 33060)
             {
                 var instance = new DungeonInstance(
-                    11000,
-                    0,
+                    checked((short)dungeonId),
+                    checked((byte)difficulty),
                     rewardPolicy ?? DungeonRewardPolicy.Standard);
-                var roomKey = new RoomKey(1, 1, 33060);
-                var monsters = new List<GameWorld.Dungeon.MonsterSumInfo>
+                var roomKey = new RoomKey(1, 1, mapId);
+                var monsters = new List<GameWorld.Dungeon.MonsterSumInfo>();
+                if (monsterCode > 0)
                 {
-                    new GameWorld.Dungeon.MonsterSumInfo
+                    monsters.Add(new GameWorld.Dungeon.MonsterSumInfo
                     {
                         Code = monsterCode,
                         Level = 50,
@@ -408,11 +628,11 @@ namespace DfoServer.SelfTests
                         IsBlocking = true,
                         TemplateOrder = 0,
                         PacketIndex = MonsterSequence,
-                    },
-                };
+                    });
+                }
                 var maze = new GameWorld.Dungeon.MazeSumInfo
                 {
-                    Index = 33060,
+                    Index = mapId,
                     X = 1,
                     Y = 1,
                     Monsters = monsters,
@@ -423,7 +643,8 @@ namespace DfoServer.SelfTests
                         roomId,
                         roomKey,
                         maze,
-                        0x87654321),
+                        0x87654321,
+                        MonsterSequence),
                     out _);
 
                 DungeonRun CreateParticipant(long generation)
@@ -457,6 +678,27 @@ namespace DfoServer.SelfTests
                 }
 
                 return (CreateParticipant(1), CreateParticipant(1));
+            }
+
+            private List<ActiveQuest> SaveKillerActiveQuest(
+                ushort questId,
+                uint triggerValue)
+            {
+                QuestService.SaveActiveQuests(
+                    _connectionString,
+                    KillerCharacterId,
+                    new List<ActiveQuest>
+                    {
+                        new ActiveQuest
+                        {
+                            Slot = 0,
+                            QuestId = questId,
+                            TriggerValue = triggerValue,
+                        },
+                    });
+                return QuestService.LoadActiveQuests(
+                    _connectionString,
+                    KillerCharacterId);
             }
 
             private static PartyMember ToPartyMember(ConnectedSession connected)
@@ -496,6 +738,12 @@ VALUES (@id);";
 
             public void Dispose()
             {
+                InventoryContext.Unregister(
+                    _killer.Session.SessionId,
+                    KillerCharacterId);
+                InventoryContext.Unregister(
+                    _member.Session.SessionId,
+                    MemberCharacterId);
                 _killer.Dispose();
                 _member.Dispose();
                 Environment.SetEnvironmentVariable("INVENTORY_DATABASE_PATH", _previousDatabasePath);

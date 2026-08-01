@@ -155,6 +155,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 return;
             }
+            var runIdentity = run.CaptureIdentity();
 
             var mechanismClear = DungeonMechanismCoordinator.OnBossDieCheck(
                 session,
@@ -171,6 +172,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 sourceActorCode: mechanismClear.BossCode > 0
                     ? mechanismClear.BossCode
                     : null);
+            bossCheckEvent = await _kills.ProcessConfirmedBossDeathAsync(
+                session,
+                bossCheckEvent,
+                mechanismClear.BossCode,
+                session.Player.UserId);
+            if (!session.Player.IsCurrentDungeonRun(runIdentity))
+                return;
             await _settlement.SubmitClearIntentAsync(
                 session,
                 new DungeonClearIntent(

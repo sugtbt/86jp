@@ -27,6 +27,7 @@ namespace DfoServer.SelfTests
         private const ushort SeekAndMeetQuestId = 2043;
         private const ushort DragonObstacleQuestId = 20722;
         private const ushort FitzLieutenantQuestId = 2547;
+        private const ushort SeekingPurchaseQuestId = 10;
         private const ushort SyntheticQuestId = 65000;
 
         public static int Run()
@@ -56,9 +57,10 @@ namespace DfoServer.SelfTests
             var questService = new QuestService(connStr);
             var failures = 0;
             var inventorySessionId = Guid.NewGuid();
-            InventoryContext.Register(
+            var inventory = new InventoryService(CharacterId, AccountId);
+            var inventoryLease = InventoryContext.Register(
                 inventorySessionId,
-                new InventoryService(CharacterId, AccountId));
+                inventory);
 
             CheckQuestSlotLayout(ref failures);
 
@@ -223,6 +225,13 @@ namespace DfoServer.SelfTests
             failures += CheckHuntMonsterClientProjectionAsync(
                     connStr,
                     inventorySessionId)
+                .GetAwaiter()
+                .GetResult();
+            failures += CheckNpcShopSeekingProjectionAsync(
+                    connStr,
+                    dbPath,
+                    inventoryLease,
+                    inventory)
                 .GetAwaiter()
                 .GetResult();
 
@@ -619,6 +628,178 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 staleSender.CountCalls("NOTI:023F") == 0,
                 ref failures);
             return failures;
+        }
+
+        private static async Task<int> CheckNpcShopSeekingProjectionAsync(
+            string connStr,
+            string dbPath,
+            InventoryLease inventoryLease,
+            InventoryService inventory)
+        {
+            var failures = 0;
+            var seekingItems = GameWorld.QuestData.GetSeekingConsumeItems(
+                SeekingPurchaseQuestId);
+            Check("quest 10 exposes its five seeking item requirements",
+                seekingItems.Count == 5,
+                ref failures);
+
+            const int purchasedItemId = 3034;
+            var purchasedCount = 0;
+            var prepared = true;
+            foreach (var item in seekingItems)
+            {
+                if (item.ItemId == purchasedItemId)
+                {
+                    purchasedCount = item.Count;
+                    continue;
+                }
+
+                prepared &= TrySetHeldItemCount(
+                    inventory,
+                    item.ItemId,
+                    item.Count);
+            }
+
+            var metadata = ItemMetadataResolver.Resolve(purchasedItemId);
+            prepared &= metadata != null
+                && metadata.NeedMaterialId > 0
+                && metadata.NeedMaterialCount > 0
+                && purchasedCount > 0;
+            if (prepared)
+            {
+                prepared &= InventoryRewardGrantService.TryCreateAndInsert(
+                    inventory,
+                    metadata.NeedMaterialId,
+                    ItemCreateReason.NpcShopPurchase,
+                    checked(metadata.NeedMaterialCount * purchasedCount),
+                    out _);
+            }
+            inventory.SetMainVirtualCount(
+                InventoryService.MainVirtualCurrencySlotStart,
+                100000000);
+            Check("NPC seeking fixture prepares every non-purchased requirement",
+                prepared,
+                ref failures);
+
+            SaveActiveQuest(
+                connStr,
+                SeekingPurchaseQuestId,
+                (uint)Math.Max(1, purchasedCount));
+            var previousDatabasePath = Environment.GetEnvironmentVariable(
+                "INVENTORY_DATABASE_PATH");
+            InventoryMutationResult purchase = null;
+            var purchased = false;
+            try
+            {
+                Environment.SetEnvironmentVariable(
+                    "INVENTORY_DATABASE_PATH",
+                    dbPath);
+                purchased = InventoryShopRuntimeService.TryBuyNpcItem(
+                    inventory,
+                    purchasedItemId,
+                    purchasedCount,
+                    out purchase);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(
+                    "INVENTORY_DATABASE_PATH",
+                    previousDatabasePath);
+            }
+            Check("NPC shop buys the final seeking requirement",
+                purchased
+                    && purchase != null
+                    && inventory.CountMainItem(purchasedItemId)
+                        == purchasedCount,
+                ref failures);
+
+            var sender = new RecordingSender();
+            var manager = new QuestManager(sender, connStr);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                purchase);
+            Check("NPC purchase immediately completes the seeking quest",
+                LoadTrigger(connStr, SeekingPurchaseQuestId) == 0,
+                ref failures);
+            Check("NPC purchase projects one active quest refresh",
+                sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            var consumed = inventory.TryConsumeMainItem(
+                purchasedItemId,
+                1,
+                out _);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                new InventoryMutationResult
+                {
+                    ItemTemplateId = 1004,
+                    CostItemTemplateId = purchasedItemId,
+                });
+            Check("NPC purchase cost item reduction recalibrates seeking progress",
+                consumed
+                    && LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                new InventoryMutationResult
+                {
+                    ItemTemplateId = 1004,
+                });
+            Check("unrelated NPC purchase does not refresh seeking quests",
+                LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+
+            InventoryService.TryResolveMainVirtualSlotByItemId(
+                purchasedItemId,
+                out var purchasedSlot,
+                out _);
+            inventory.SetMainVirtualCount(purchasedSlot, purchasedCount);
+            var staleLease = new InventoryLease(
+                Guid.NewGuid(),
+                CharacterId,
+                inventory,
+                inventoryLease.Version + 1);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                staleLease,
+                new InventoryMutationResult
+                {
+                    ItemTemplateId = purchasedItemId,
+                });
+            Check("stale inventory lease cannot project seeking progress",
+                LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+            return failures;
+        }
+
+        private static bool TrySetHeldItemCount(
+            InventoryService inventory,
+            int itemId,
+            int count)
+        {
+            if (inventory == null || itemId < 0 || count <= 0)
+                return false;
+
+            if (InventoryService.TryResolveMainVirtualSlotByItemId(
+                    itemId,
+                    out var slotIndex,
+                    out _))
+            {
+                return inventory.SetMainVirtualCount(slotIndex, count);
+            }
+
+            return InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                itemId,
+                ItemCreateReason.QuestReward,
+                count,
+                out var result)
+                && result != null
+                && result.Success;
         }
 
         private static byte[] BuildQuestBody(ushort questId)

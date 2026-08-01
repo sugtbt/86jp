@@ -10,7 +10,7 @@ namespace DfoServer.Game.Dungeon
             new DungeonDynamicActorPolicy(
                 grantsMonsterExperience: false,
                 generatesMonsterDrops: false,
-                generatesQuestDrops: false,
+                generatesQuestDrops: true,
                 advancesQuestObjectives: true,
                 appliesGeneralMechanisms: false,
                 countsTowardRoomClear: false,

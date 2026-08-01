@@ -124,24 +124,11 @@ namespace DfoServer.Game.Quests
                 if (request.Operation == QuestProgressOperation.ClientTrigger)
                     foundClientQuest = true;
 
-                if (request.SourceEventId != Guid.Empty)
+                if (request.SourceEventId != Guid.Empty
+                    && !quest.ActivationId.IsValid)
                 {
-                    if (!quest.ActivationId.IsValid)
-                    {
-                        return Failed(
-                            $"quest={quest.QuestId} has invalid activation identity");
-                    }
-                    if (!QuestRepository.TryInsertProgressEvent(
-                            connection,
-                            transaction,
-                            request.CharacterId,
-                            quest.ActivationId,
-                            request.SourceEventId,
-                            request.EventKind))
-                    {
-                        result.DuplicateEvent = true;
-                        continue;
-                    }
+                    return Failed(
+                        $"quest={quest.QuestId} has invalid activation identity");
                 }
 
                 QuestProgressEvaluation evaluation;
@@ -161,6 +148,18 @@ namespace DfoServer.Game.Quests
                 if (!evaluation.Matched)
                     continue;
                 result.MatchedObjective = true;
+                if (request.SourceEventId != Guid.Empty
+                    && !QuestRepository.TryInsertProgressEvent(
+                        connection,
+                        transaction,
+                        request.CharacterId,
+                        quest.ActivationId,
+                        request.SourceEventId,
+                        request.EventKind))
+                {
+                    result.DuplicateEvent = true;
+                    continue;
+                }
                 if (evaluation.Trigger.PackedValue == quest.TriggerValue)
                 {
                     result.AddChanges(evaluation.Changes);
