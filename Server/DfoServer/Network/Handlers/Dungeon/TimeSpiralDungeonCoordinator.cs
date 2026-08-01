@@ -32,8 +32,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             DungeonEventEnvelope sourceEvent)
         {
             var run = session?.Player?.CurrentRun;
-            var roomIdentity = run?.CaptureRoomIdentity()
-                ?? default(DungeonRoomIdentity);
+            var roomIdentity = run?.CaptureParticipantRoomIdentity()
+                ?? default(DungeonParticipantRoomIdentity);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x01,
                 command?.WireType ?? (ushort)CmdPacketType.BREAK_TRAP_RESULT,
@@ -45,7 +45,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 || !sourceEvent.RunIdentity.Equals(roomIdentity.Run)
                 || (sourceEvent.RoomInstanceId.HasValue
                     && sourceEvent.RoomInstanceId.Value != roomIdentity.RoomInstanceId)
-                || !session.Player.IsCurrentDungeonRoom(roomIdentity)
+                || !session.Player.IsCurrentDungeonParticipantRoom(roomIdentity)
                 || !IsDungeon(run.DungeonId))
                 return;
 
@@ -384,14 +384,14 @@ namespace DfoServer.Network.Handlers.Dungeon
         private static async Task SendConditionPassGateAsync(
             EnhancedClientSession session,
             DungeonRun run,
-            DungeonRoomIdentity roomIdentity,
+            DungeonParticipantRoomIdentity roomIdentity,
             int mapId,
             int objectCode,
             string source,
             string objectPath)
         {
             if (run == null
-                || !session.Player.IsCurrentDungeonRoom(roomIdentity))
+                || !session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
             {
                 return;
             }
@@ -401,7 +401,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     session,
                     "time-spiral-trap",
                     source);
-            if (!session.Player.IsCurrentDungeonRoom(roomIdentity))
+            if (!session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
                 return;
             FileLogger.Log(
                 $"[TimeSpiral] trap condition advanced: " +

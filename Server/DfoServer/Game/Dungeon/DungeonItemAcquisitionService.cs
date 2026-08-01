@@ -1,4 +1,5 @@
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Quests;
 using DfoServer.Network;
 using System;
 using System.Collections.Generic;
@@ -15,9 +16,112 @@ namespace DfoServer.Game.Dungeon
     internal sealed class DungeonItemGrantRequest
     {
         internal int QuestId { get; set; }
+        internal QuestActivationId QuestActivationId { get; set; }
         internal int ItemTemplateId { get; set; }
         internal int Count { get; set; }
         internal DungeonItemAcquisitionSource Source { get; set; }
+    }
+
+    internal sealed class DungeonItemGrantBatchPlan
+    {
+        internal IReadOnlyList<DungeonItemGrantRequest> Requests { get; set; }
+            = Array.Empty<DungeonItemGrantRequest>();
+        internal InventoryRewardGrantBatchPlan InventoryPlan { get; set; }
+        internal InventoryRewardGrantError Error { get; set; }
+        internal bool Success { get; set; }
+    }
+
+    internal sealed class DungeonItemGrantMutationSnapshot
+    {
+        private readonly Dictionary<(InventoryListType, short), ItemCore> _items =
+            new Dictionary<(InventoryListType, short), ItemCore>();
+        private readonly Dictionary<short, int> _virtualCounts =
+            new Dictionary<short, int>();
+
+        internal static bool TryCapture(
+            InventoryService inventory,
+            DungeonItemGrantBatchPlan plan,
+            out DungeonItemGrantMutationSnapshot snapshot)
+        {
+            snapshot = null;
+            if (inventory == null
+                || plan == null
+                || !plan.Success
+                || plan.InventoryPlan == null)
+            {
+                return false;
+            }
+
+            var captured = new DungeonItemGrantMutationSnapshot();
+            foreach (var entry in plan.InventoryPlan.Entries)
+            {
+                if (entry.Kind == InventoryRewardGrantKind.InventoryItem)
+                {
+                    var key = (entry.ListType, entry.SlotIndex);
+                    if (!captured._items.ContainsKey(key))
+                    {
+                        captured._items[key] = inventory.TryGetItem(
+                            entry.ListType,
+                            entry.SlotIndex,
+                            out var item)
+                            ? item.Copy()
+                            : null;
+                    }
+                    continue;
+                }
+                if (entry.Kind == InventoryRewardGrantKind.MainVirtualCount)
+                {
+                    if (!captured._virtualCounts.ContainsKey(entry.SlotIndex))
+                    {
+                        captured._virtualCounts[entry.SlotIndex] =
+                            inventory.GetMainVirtualCount(entry.SlotIndex)?.Count ?? 0;
+                    }
+                    continue;
+                }
+
+                return false;
+            }
+
+            snapshot = captured;
+            return true;
+        }
+
+        internal void Restore(
+            InventoryService inventory,
+            DungeonItemGrantBatchPlan plan)
+        {
+            if (inventory == null)
+                return;
+
+            if (plan?.InventoryPlan != null)
+            {
+                foreach (var entry in plan.InventoryPlan.Entries)
+                {
+                    if (entry.Kind == InventoryRewardGrantKind.InventoryItem
+                        && entry.CreateResult != null)
+                    {
+                        InventoryCreateService.DetachCreatedDetails(
+                            inventory,
+                            entry.CreateResult);
+                    }
+                }
+            }
+
+            foreach (var pair in _items)
+            {
+                if (pair.Value == null)
+                    inventory.RemoveItem(pair.Key.Item1, pair.Key.Item2);
+                else
+                {
+                    inventory.SetItem(
+                        pair.Key.Item1,
+                        pair.Key.Item2,
+                        pair.Value.Copy());
+                }
+            }
+            foreach (var pair in _virtualCounts)
+                inventory.SetMainVirtualCount(pair.Key, pair.Value);
+        }
     }
 
     internal sealed class DungeonItemGrantEntry
@@ -87,21 +191,34 @@ namespace DfoServer.Game.Dungeon
             IReadOnlyList<DungeonItemGrantRequest> requests,
             out DungeonItemGrantBatchResult result)
         {
-            result = new DungeonItemGrantBatchResult();
+            if (!TryPlanItems(inventory, requests, out var plan))
+            {
+                result = Failed(plan?.Error
+                    ?? InventoryRewardGrantError.InvalidRequest);
+                return false;
+            }
+
+            return TryApplyPlannedItems(inventory, plan, out result);
+        }
+
+        internal bool TryPlanItems(
+            InventoryService inventory,
+            IReadOnlyList<DungeonItemGrantRequest> requests,
+            out DungeonItemGrantBatchPlan plan)
+        {
+            plan = new DungeonItemGrantBatchPlan
+            {
+                Requests = requests ?? Array.Empty<DungeonItemGrantRequest>(),
+            };
             if (inventory == null)
             {
-                result.Error = InventoryRewardGrantError.InvalidInventory;
+                plan.Error = InventoryRewardGrantError.InvalidInventory;
                 return false;
             }
             if (requests == null)
             {
-                result.Error = InventoryRewardGrantError.InvalidRequest;
+                plan.Error = InventoryRewardGrantError.InvalidRequest;
                 return false;
-            }
-            if (requests.Count == 0)
-            {
-                result.Success = true;
-                return true;
             }
 
             var grants = new List<InventoryRewardGrantRequest>(requests.Count);
@@ -109,9 +226,11 @@ namespace DfoServer.Game.Dungeon
             {
                 if (request == null
                     || request.ItemTemplateId <= 0
-                    || request.Count <= 0)
+                    || request.Count <= 0
+                    || (request.QuestId > 0
+                        && !request.QuestActivationId.IsValid))
                 {
-                    result.Error = InventoryRewardGrantError.InvalidRequest;
+                    plan.Error = InventoryRewardGrantError.InvalidRequest;
                     return false;
                 }
 
@@ -121,9 +240,44 @@ namespace DfoServer.Game.Dungeon
                     ItemCreateReason.QuestReward));
             }
 
-            if (!InventoryRewardGrantService.TryGrantBatch(
+            if (!InventoryRewardGrantService.TryPlanBatch(
                     inventory,
                     grants,
+                    out var inventoryPlan)
+                || inventoryPlan == null
+                || !inventoryPlan.Success)
+            {
+                plan.Error = inventoryPlan?.Error
+                    ?? InventoryRewardGrantError.InsertPlanFailed;
+                return false;
+            }
+
+            plan.InventoryPlan = inventoryPlan;
+            plan.Success = true;
+            plan.Error = InventoryRewardGrantError.None;
+            return true;
+        }
+
+        internal bool TryApplyPlannedItems(
+            InventoryService inventory,
+            DungeonItemGrantBatchPlan plan,
+            out DungeonItemGrantBatchResult result)
+        {
+            result = new DungeonItemGrantBatchResult();
+            if (inventory == null
+                || plan == null
+                || !plan.Success
+                || plan.InventoryPlan == null
+                || plan.Requests == null)
+            {
+                result.Error = plan?.Error
+                    ?? InventoryRewardGrantError.InvalidRequest;
+                return false;
+            }
+
+            if (!InventoryRewardGrantService.TryApplyPreparedBatch(
+                    inventory,
+                    plan.InventoryPlan,
                     out var granted))
             {
                 result.Error = granted?.Error
@@ -131,18 +285,22 @@ namespace DfoServer.Game.Dungeon
                 return false;
             }
 
-            for (var index = 0; index < requests.Count; index++)
+            if (granted.Results.Count != plan.Requests.Count)
             {
-                var grant = index < granted.Results.Count
-                    ? granted.Results[index]
-                    : null;
+                result.Error = InventoryRewardGrantError.InsertApplyFailed;
+                return false;
+            }
+
+            for (var index = 0; index < plan.Requests.Count; index++)
+            {
+                var grant = granted.Results[index];
                 if (grant == null || !grant.Success)
                 {
                     result.Error = grant?.Error
                         ?? InventoryRewardGrantError.InsertApplyFailed;
                     return false;
                 }
-                result.Add(requests[index], grant);
+                result.Add(plan.Requests[index], grant);
             }
 
             result.Success = true;

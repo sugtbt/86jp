@@ -5,6 +5,26 @@ using System.Linq;
 
 namespace DfoServer.Game.Dungeon
 {
+    internal sealed class SeizeMoneyClearRewardPlan
+    {
+        internal SeizeMoneyClearRewardPlan(
+            int hitCount,
+            int remainingUnits,
+            int count,
+            int gauge)
+        {
+            HitCount = hitCount;
+            RemainingUnits = remainingUnits;
+            Count = count;
+            Gauge = gauge;
+        }
+
+        internal int HitCount { get; }
+        internal int RemainingUnits { get; }
+        internal int Count { get; }
+        internal int Gauge { get; }
+    }
+
     internal sealed class SpecialDungeonRuntime
     {
         private readonly HashSet<int> _sealForestBuffMonsterCodes =
@@ -17,6 +37,7 @@ namespace DfoServer.Game.Dungeon
         private readonly Dictionary<int, int> _gentInfiltrateTowerDestroyed =
             new Dictionary<int, int>();
         private bool _seizeMoneyClearRewardGenerated;
+        private int? _seizeMoneyAuthoritativeHitCount;
 
         internal SpecialDungeonRuntime(SpecialDungeonDefinition definition)
         {
@@ -68,6 +89,23 @@ namespace DfoServer.Game.Dungeon
         {
             if (Kind == SpecialDungeonKind.SeizeMoney && bossSeq != 0)
                 SeizeMoneyBossSeq = bossSeq;
+        }
+
+        internal bool ApplyAuthoritativeSeizeMoneyHits(int hitCount)
+        {
+            if (Kind != SpecialDungeonKind.SeizeMoney || hitCount <= 0)
+                return false;
+
+            var definition = Definition.SeizeMoney;
+            var unitValue = Math.Max(1, definition.GaugeSubOnDamage);
+            var maxUnits = Math.Max(1, definition.GaugeMax / unitValue);
+            var current = _seizeMoneyAuthoritativeHitCount ?? 0;
+            var next = Math.Min(maxUnits, current + hitCount);
+            _seizeMoneyAuthoritativeHitCount = next;
+            SeizeMoneyGauge = Math.Max(
+                0,
+                definition.GaugeMax - next * unitValue);
+            return true;
         }
 
         internal bool NoteSeaChaseMiniGameResult(bool succeeded)
@@ -180,17 +218,26 @@ namespace DfoServer.Game.Dungeon
             return true;
         }
 
-        internal bool TryReserveSeizeMoneyClearReward(
-            int remainingGoldUnits,
+        internal bool TryReserveAuthoritativeSeizeMoneyClearReward(
             int maxDropCount,
-            out int count,
-            out int gauge)
+            out SeizeMoneyClearRewardPlan plan,
+            out string failureReason)
         {
-            count = 0;
-            gauge = SeizeMoneyGauge;
-            if (Kind != SpecialDungeonKind.SeizeMoney
-                || _seizeMoneyClearRewardGenerated)
+            plan = null;
+            failureReason = string.Empty;
+            if (Kind != SpecialDungeonKind.SeizeMoney)
             {
+                failureReason = "not_seize_money";
+                return false;
+            }
+            if (_seizeMoneyClearRewardGenerated)
+            {
+                failureReason = "already_generated";
+                return false;
+            }
+            if (!_seizeMoneyAuthoritativeHitCount.HasValue)
+            {
+                failureReason = "no_authoritative_hit_fact";
                 return false;
             }
 
@@ -198,24 +245,29 @@ namespace DfoServer.Game.Dungeon
             var definition = Definition.SeizeMoney;
             var unitValue = Math.Max(1, definition.GaugeSubOnDamage);
             var maxUnits = Math.Max(1, definition.GaugeMax / unitValue);
-            if (remainingGoldUnits < 0)
-                remainingGoldUnits = 0;
-            if (remainingGoldUnits > maxUnits)
-                remainingGoldUnits = maxUnits;
+            var hitCount = Math.Max(
+                0,
+                Math.Min(maxUnits, _seizeMoneyAuthoritativeHitCount.Value));
+            var remainingGoldUnits = Math.Max(0, maxUnits - hitCount);
 
-            gauge = Math.Min(
+            var gauge = Math.Min(
                 definition.GaugeMax,
                 remainingGoldUnits * unitValue);
             SeizeMoneyGauge = gauge;
 
             maxDropCount = Math.Max(0, maxDropCount);
-            count = (int)Math.Floor(
+            var count = (int)Math.Floor(
                 (remainingGoldUnits * maxDropCount / (double)maxUnits)
                 + 0.5d);
             if (count > maxDropCount)
                 count = maxDropCount;
 
-            return count > 0;
+            plan = new SeizeMoneyClearRewardPlan(
+                hitCount,
+                remainingGoldUnits,
+                count,
+                gauge);
+            return true;
         }
 
         internal bool TryMarkSealForestBuffMonster(

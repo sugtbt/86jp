@@ -84,7 +84,8 @@ namespace DfoServer.SelfTests
                 var manager = new QuestManager(sender, connectionString);
                 manager.HandleFinishQuestAsync(
                         0x0022,
-                        BuildWireFinishBody(FirstQuestId))
+                        BuildWireFinishBody(FirstQuestId),
+                        sessionId)
                     .GetAwaiter()
                     .GetResult();
 
@@ -144,11 +145,12 @@ namespace DfoServer.SelfTests
 
         private static byte[] BuildWireFinishBody(ushort questId)
         {
-            var body = new byte[8];
+            var body = new byte[10];
             BitConverter.GetBytes((ushort)0x0022).CopyTo(body, 0);
             BitConverter.GetBytes(questId).CopyTo(body, 2);
             BitConverter.GetBytes(ushort.MaxValue).CopyTo(body, 4);
             BitConverter.GetBytes((ushort)1).CopyTo(body, 6);
+            BitConverter.GetBytes(ushort.MaxValue).CopyTo(body, 8);
             return body;
         }
 

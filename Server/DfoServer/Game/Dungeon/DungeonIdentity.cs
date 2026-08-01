@@ -23,6 +23,55 @@ namespace DfoServer.Game.Dungeon
         }
     }
 
+    public readonly struct DungeonInstanceIdentity : IEquatable<DungeonInstanceIdentity>
+    {
+        public DungeonInstanceIdentity(long partyDungeonInstanceId)
+        {
+            PartyDungeonInstanceId = partyDungeonInstanceId;
+        }
+
+        public long PartyDungeonInstanceId { get; }
+        public bool IsValid => PartyDungeonInstanceId > 0;
+
+        public bool Equals(DungeonInstanceIdentity other) =>
+            PartyDungeonInstanceId == other.PartyDungeonInstanceId;
+
+        public override bool Equals(object obj) =>
+            obj is DungeonInstanceIdentity other && Equals(other);
+
+        public override int GetHashCode() => PartyDungeonInstanceId.GetHashCode();
+    }
+
+    public readonly struct DungeonParticipantRunIdentity
+        : IEquatable<DungeonParticipantRunIdentity>
+    {
+        public DungeonParticipantRunIdentity(
+            DungeonInstanceIdentity instance,
+            long runId,
+            long runGeneration)
+        {
+            Instance = instance;
+            RunId = runId;
+            RunGeneration = runGeneration;
+        }
+
+        public DungeonInstanceIdentity Instance { get; }
+        public long RunId { get; }
+        public long RunGeneration { get; }
+        public bool IsValid => Instance.IsValid && RunId > 0 && RunGeneration > 0;
+
+        public bool Equals(DungeonParticipantRunIdentity other) =>
+            Instance.Equals(other.Instance)
+            && RunId == other.RunId
+            && RunGeneration == other.RunGeneration;
+
+        public override bool Equals(object obj) =>
+            obj is DungeonParticipantRunIdentity other && Equals(other);
+
+        public override int GetHashCode() =>
+            HashCode.Combine(Instance, RunId, RunGeneration);
+    }
+
     public readonly struct DungeonRunIdentity : IEquatable<DungeonRunIdentity>
     {
         public DungeonRunIdentity(
@@ -38,6 +87,13 @@ namespace DfoServer.Game.Dungeon
         public long PartyDungeonInstanceId { get; }
         public long RunId { get; }
         public long RunGeneration { get; }
+        public DungeonInstanceIdentity InstanceIdentity =>
+            new DungeonInstanceIdentity(PartyDungeonInstanceId);
+        public DungeonParticipantRunIdentity ParticipantIdentity =>
+            new DungeonParticipantRunIdentity(
+                InstanceIdentity,
+                RunId,
+                RunGeneration);
         public bool IsValid => PartyDungeonInstanceId > 0 && RunId > 0 && RunGeneration > 0;
 
         public bool Equals(DungeonRunIdentity other) =>
@@ -54,22 +110,53 @@ namespace DfoServer.Game.Dungeon
 
     public readonly struct DungeonRoomIdentity : IEquatable<DungeonRoomIdentity>
     {
-        public DungeonRoomIdentity(DungeonRunIdentity run, long roomInstanceId)
+        public DungeonRoomIdentity(
+            DungeonInstanceIdentity instance,
+            long roomInstanceId)
         {
-            Run = run;
+            Instance = instance;
             RoomInstanceId = roomInstanceId;
         }
 
-        public DungeonRunIdentity Run { get; }
+        public DungeonInstanceIdentity Instance { get; }
         public long RoomInstanceId { get; }
-        public bool IsValid => Run.IsValid && RoomInstanceId > 0;
+        public bool IsValid => Instance.IsValid && RoomInstanceId > 0;
 
         public bool Equals(DungeonRoomIdentity other) =>
-            Run.Equals(other.Run) && RoomInstanceId == other.RoomInstanceId;
+            Instance.Equals(other.Instance)
+            && RoomInstanceId == other.RoomInstanceId;
 
         public override bool Equals(object obj) =>
             obj is DungeonRoomIdentity other && Equals(other);
 
-        public override int GetHashCode() => HashCode.Combine(Run, RoomInstanceId);
+        public override int GetHashCode() =>
+            HashCode.Combine(Instance, RoomInstanceId);
+    }
+
+    public readonly struct DungeonParticipantRoomIdentity
+        : IEquatable<DungeonParticipantRoomIdentity>
+    {
+        public DungeonParticipantRoomIdentity(
+            DungeonRunIdentity run,
+            DungeonRoomIdentity room)
+        {
+            Run = run;
+            Room = room;
+        }
+
+        public DungeonRunIdentity Run { get; }
+        public DungeonRoomIdentity Room { get; }
+        public long RoomInstanceId => Room.RoomInstanceId;
+        public bool IsValid => Run.IsValid
+            && Room.IsValid
+            && Run.InstanceIdentity.Equals(Room.Instance);
+
+        public bool Equals(DungeonParticipantRoomIdentity other) =>
+            Run.Equals(other.Run) && Room.Equals(other.Room);
+
+        public override bool Equals(object obj) =>
+            obj is DungeonParticipantRoomIdentity other && Equals(other);
+
+        public override int GetHashCode() => HashCode.Combine(Run, Room);
     }
 }

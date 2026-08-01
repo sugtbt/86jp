@@ -29,6 +29,42 @@ namespace DfoServer.Game.Dungeon
         internal int CommittedCount { get; set; }
         internal int DeadLetterCount { get; set; }
         internal int FailedCount { get; set; }
+        internal int PagesScanned { get; set; }
+        internal int RecordsScanned { get; set; }
+        internal int RemainingCount { get; set; }
+        internal bool ReachedPageLimit { get; set; }
+        internal bool ReachedTimeLimit { get; set; }
+        internal DungeonPersistentEffectRecoveryCursor? Continuation { get; set; }
+        internal bool HasRemaining => RemainingCount > 0;
+    }
+
+    internal sealed class DungeonPersistentEffectRecoveryOptions
+    {
+        internal DungeonPersistentEffectRecoveryOptions(
+            int pageSize = 64,
+            int maximumPages = 4,
+            TimeSpan? maximumDuration = null)
+        {
+            if (pageSize <= 0 || pageSize > 1024)
+                throw new ArgumentOutOfRangeException(nameof(pageSize));
+            if (maximumPages <= 0 || maximumPages > 128)
+                throw new ArgumentOutOfRangeException(nameof(maximumPages));
+
+            var duration = maximumDuration ?? TimeSpan.FromSeconds(3);
+            if (duration <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(maximumDuration));
+            }
+
+            PageSize = pageSize;
+            MaximumPages = maximumPages;
+            MaximumDuration = duration;
+        }
+
+        internal int PageSize { get; }
+        internal int MaximumPages { get; }
+        internal TimeSpan MaximumDuration { get; }
     }
 
     internal sealed class SettlementExperienceEffectPayload
@@ -90,10 +126,15 @@ namespace DfoServer.Game.Dungeon
 
         private readonly string _connectionString;
         private readonly DungeonPersistentEffectOutbox _outbox;
+        private readonly DungeonPersistentEffectRecoveryOptions
+            _recoveryOptions;
+        private readonly Func<long> _monotonicMilliseconds;
 
         internal DungeonPersistentEffectApplicationService(
             string connectionString,
-            DungeonPersistentEffectOutbox outbox = null)
+            DungeonPersistentEffectOutbox outbox = null,
+            DungeonPersistentEffectRecoveryOptions recoveryOptions = null,
+            Func<long> monotonicMilliseconds = null)
         {
             _connectionString = !string.IsNullOrWhiteSpace(connectionString)
                 ? connectionString
@@ -102,6 +143,10 @@ namespace DfoServer.Game.Dungeon
                     nameof(connectionString));
             _outbox = outbox
                 ?? new DungeonPersistentEffectOutbox(connectionString);
+            _recoveryOptions = recoveryOptions
+                ?? new DungeonPersistentEffectRecoveryOptions();
+            _monotonicMilliseconds = monotonicMilliseconds
+                ?? (() => Environment.TickCount64);
         }
 
         internal DungeonPersistentEffectOutbox Outbox => _outbox;
@@ -235,57 +280,113 @@ namespace DfoServer.Game.Dungeon
             if (characterId <= 0)
                 return result;
 
-            foreach (var record in _outbox.LoadRecoverableForCharacter(characterId))
+            var startedAt = _monotonicMilliseconds();
+            DungeonPersistentEffectRecoveryCursor? cursor = null;
+            var stop = false;
+            for (var pageIndex = 0;
+                pageIndex < _recoveryOptions.MaximumPages && !stop;
+                pageIndex++)
             {
-                try
+                if (pageIndex > 0 && IsRecoveryTimeLimitReached(startedAt))
                 {
-                    switch (record.EffectId.EffectKind)
+                    result.ReachedTimeLimit = true;
+                    break;
+                }
+
+                var page = _outbox.LoadRecoverableForCharacter(
+                    characterId,
+                    cursor,
+                    _recoveryOptions.PageSize);
+                if (page.Count == 0)
+                    break;
+
+                result.PagesScanned++;
+                foreach (var record in page)
+                {
+                    RecoverRecord(record, result);
+                    result.RecordsScanned++;
+                    cursor = DungeonPersistentEffectRecoveryCursor.From(
+                        record);
+                    result.Continuation = cursor;
+
+                    if (IsRecoveryTimeLimitReached(startedAt))
                     {
-                        case DungeonPersistentEffectKinds.SettlementExperienceGrant:
-                            if (TryExecuteSettlementExperience(
-                                    record,
-                                    out var experience,
-                                    out var experienceError))
-                            {
-                                result.LatestExperienceGrant = experience;
-                                result.CommittedCount++;
-                            }
-                            else
-                            {
-                                result.FailedCount++;
-                                LogRecoveryFailure(record, experienceError);
-                            }
-                            break;
-                        case DungeonPersistentEffectKinds.SuitableDungeonLuckyStar:
-                            if (TryExecuteSuitableDungeonLuckyStar(
-                                    record,
-                                    out _,
-                                    out var luckyStarError))
-                            {
-                                result.CommittedCount++;
-                            }
-                            else
-                            {
-                                result.FailedCount++;
-                                LogRecoveryFailure(record, luckyStarError);
-                            }
-                            break;
-                        default:
-                            if (TryDeadLetterUnknown(record))
-                                result.DeadLetterCount++;
-                            else
-                                result.FailedCount++;
-                            break;
+                        result.ReachedTimeLimit = true;
+                        stop = true;
+                        break;
                     }
                 }
-                catch (Exception ex)
-                {
-                    result.FailedCount++;
-                    LogRecoveryFailure(record, ex.Message);
-                }
+
+                if (page.Count < _recoveryOptions.PageSize)
+                    break;
             }
 
+            result.RemainingCount = _outbox.CountRecoverableForCharacter(
+                characterId);
+            result.ReachedPageLimit = !result.ReachedTimeLimit
+                && result.RemainingCount > 0
+                && result.PagesScanned >= _recoveryOptions.MaximumPages;
             return result;
+        }
+
+        private void RecoverRecord(
+            DungeonPersistentEffectRecord record,
+            DungeonPersistentEffectRecoveryResult result)
+        {
+            try
+            {
+                switch (record.EffectId.EffectKind)
+                {
+                    case DungeonPersistentEffectKinds.SettlementExperienceGrant:
+                        if (TryExecuteSettlementExperience(
+                                record,
+                                out var experience,
+                                out var experienceError))
+                        {
+                            result.LatestExperienceGrant = experience;
+                            result.CommittedCount++;
+                        }
+                        else
+                        {
+                            result.FailedCount++;
+                            LogRecoveryFailure(record, experienceError);
+                        }
+                        break;
+                    case DungeonPersistentEffectKinds.SuitableDungeonLuckyStar:
+                        if (TryExecuteSuitableDungeonLuckyStar(
+                                record,
+                                out _,
+                                out var luckyStarError))
+                        {
+                            result.CommittedCount++;
+                        }
+                        else
+                        {
+                            result.FailedCount++;
+                            LogRecoveryFailure(record, luckyStarError);
+                        }
+                        break;
+                    default:
+                        if (TryDeadLetterUnknown(record))
+                            result.DeadLetterCount++;
+                        else
+                            result.FailedCount++;
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                result.FailedCount++;
+                LogRecoveryFailure(record, ex.Message);
+            }
+        }
+
+        private bool IsRecoveryTimeLimitReached(long startedAt)
+        {
+            var elapsed = _monotonicMilliseconds() - startedAt;
+            return elapsed >= 0
+                && elapsed >= (long)Math.Ceiling(
+                    _recoveryOptions.MaximumDuration.TotalMilliseconds);
         }
 
         private bool TryExecuteSettlementExperience(

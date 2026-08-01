@@ -810,8 +810,10 @@ CREATE TABLE IF NOT EXISTS character_active_quests (
     quest_id INTEGER NOT NULL,
     trigger_value INTEGER NOT NULL DEFAULT 0,
     version INTEGER NOT NULL DEFAULT 0,
+    activation_id TEXT NOT NULL,
     PRIMARY KEY (character_id, slot),
     UNIQUE (character_id, quest_id),
+    UNIQUE (character_id, activation_id),
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
 
@@ -834,10 +836,11 @@ CREATE TABLE IF NOT EXISTS character_daily_challenge_claims (
 
 CREATE TABLE IF NOT EXISTS quest_progress_event_inbox (
     character_id INTEGER NOT NULL,
+    activation_id TEXT NOT NULL,
     event_id TEXT NOT NULL,
     event_kind TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (character_id, event_id, event_kind),
+    PRIMARY KEY (character_id, activation_id, event_id, event_kind),
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
 

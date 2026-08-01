@@ -221,6 +221,8 @@ namespace DfoServer.SelfTests
             var inventory = new InventoryService(135002, 135002);
             var acquisition = new DungeonItemAcquisitionService(
                 new DropService());
+            var firstActivation = QuestActivationId.New();
+            var secondActivation = QuestActivationId.New();
             var granted = acquisition.TryGrantItems(
                 inventory,
                 new[]
@@ -228,6 +230,7 @@ namespace DfoServer.SelfTests
                     new DungeonItemGrantRequest
                     {
                         QuestId = NightmareDimensionQuestId,
+                        QuestActivationId = firstActivation,
                         ItemTemplateId = NightmareRatTailItemId,
                         Count = 1,
                         Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
@@ -235,6 +238,7 @@ namespace DfoServer.SelfTests
                     new DungeonItemGrantRequest
                     {
                         QuestId = BlackChurchIntrusionQuestId,
+                        QuestActivationId = secondActivation,
                         ItemTemplateId = BlackChurchQuestItemId,
                         Count = 1,
                         Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
@@ -259,6 +263,7 @@ namespace DfoServer.SelfTests
                     new DungeonItemGrantRequest
                     {
                         QuestId = NightmareDimensionQuestId,
+                        QuestActivationId = firstActivation,
                         ItemTemplateId = NightmareRatTailItemId,
                         Count = 1,
                         Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
@@ -266,6 +271,7 @@ namespace DfoServer.SelfTests
                     new DungeonItemGrantRequest
                     {
                         QuestId = NightmareDimensionQuestId,
+                        QuestActivationId = firstActivation,
                         ItemTemplateId = int.MaxValue,
                         Count = 1,
                         Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,

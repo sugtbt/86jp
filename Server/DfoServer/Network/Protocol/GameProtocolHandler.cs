@@ -256,7 +256,9 @@ namespace DfoServer.Network
                 _dungeonInstances,
                 _partyHandler.TryRestoreDungeonParticipantAsync,
                 _partyHandler.RollbackDungeonParticipantRestoreAsync,
-                _townHandler.NotifyLeaveAsync);
+                _townHandler.NotifyLeaveAsync,
+                recoverParticipantEffects: _dungeonHandler
+                    .RecoverDungeonParticipantEffectsAsync);
             PetCreatureRuntimeService.EnsureClockRegistered();
             _growthCapsuleHandler = new GrowthCapsuleHandler(
                 _inventoryRefreshSender, characterRepository);
@@ -562,6 +564,16 @@ namespace DfoServer.Network
             d[0x026B] = _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x026D] = _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x0270] = _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.TOURNAMENT_REWARD_SELECT_STATE] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.TOURNAMENT_REWARD_SELECT] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.BLOOD_ROUND_UI_PREPARE_FINISH_] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.DIE_BLOOD_MONSTER] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
+            d[(ushort)CmdPacketType.SELECT_ULTIMATE_DIFFICULTY] =
+                _dungeonHandler.HandleDungeonMechanismCommand;
             d[0x0312] = PremiumQueryHandler.Handle_PREMIUM_SERVICE;                //786
             d[0x03B6] = _dungeonHandler.Handle_ENUM_CMDPACKET_GORGEOUS_CHALLENGE_TOGGLE;
             d[0x03AB] = _dungeonHandler.HandleDungeonMechanismCommand;             //939
@@ -623,7 +635,10 @@ namespace DfoServer.Network
             d[0x001F] = async (s, h, b) => //31
             {
                 if (s.GameSession != null)
-                    await s.GameSession.QuestManager.HandleAcceptQuestAsync(h.type, b);
+                    await s.GameSession.QuestManager.HandleAcceptQuestAsync(
+                        h.type,
+                        b,
+                        s.SessionId);
             };
             d[0x0020] = async (s, h, b) => //32
             {
@@ -644,7 +659,8 @@ namespace DfoServer.Network
                             s.Player.CharacterId,
                             "client quest set-trigger")
                         : null;
-                    var result = await s.GameSession.QuestManager.HandleSetTriggerAsync(h.type, b);
+                    var result = await s.GameSession.QuestManager
+                        .HandleSetTriggerAsync(h.type, b, s.SessionId);
                     await _dungeonHandler.HandleQuestSetTriggerResultAsync(
                         s,
                         result,
@@ -654,7 +670,10 @@ namespace DfoServer.Network
             d[0x0022] = async (s, h, b) => //34
             {
                 if (s.GameSession != null)
-                    await s.GameSession.QuestManager.HandleFinishQuestAsync(h.type, b);
+                    await s.GameSession.QuestManager.HandleFinishQuestAsync(
+                        h.type,
+                        b,
+                        s.SessionId);
             };
             d[0x01FB] = (s, h, b) =>
             {

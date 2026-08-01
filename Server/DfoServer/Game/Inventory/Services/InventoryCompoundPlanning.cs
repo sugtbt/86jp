@@ -23,6 +23,8 @@ namespace DfoServer.Game.Inventory
                 inventory.AttachMainVirtualCount(item.SlotIndex, item.ItemId, item.Count);
 
             inventory.ClearDirtyState();
+            if (source.PendingHappyTokenCeraGrant > 0)
+                inventory.TryQueueHappyTokenCeraGrant(source.PendingHappyTokenCeraGrant);
             return inventory;
         }
 

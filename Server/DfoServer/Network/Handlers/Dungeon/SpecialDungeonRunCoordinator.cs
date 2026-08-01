@@ -148,49 +148,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             target.SelectedBossMapId = source.SelectedBossMapId;
         }
 
-        internal static IReadOnlyList<IReadOnlyList<(byte, byte)>> ResolveMinimapIconGroups(
-            DungeonRun run,
-            int dungeonId,
-            int mazeIndex)
-        {
-            if (run?.SpecialMinimapIconGroups != null
-                && run.SpecialMinimapIconGroups.Count > 0)
-            {
-                return run.SpecialMinimapIconGroups;
-            }
-
-            MazeInfo maze;
-            try
-            {
-                maze = DungeonData.GetDungeonMaze(dungeonId, mazeIndex);
-            }
-            catch
-            {
-                return null;
-            }
-
-            if (maze?.RidableScript == null
-                || maze.RidableScript.MinimapIcon <= 0
-                || run?.RidableObjects == null
-                || run.RidableObjects.Count == 0)
-            {
-                return null;
-            }
-
-            var points = new List<(byte, byte)>();
-            var seen = new HashSet<int>();
-            foreach (var obj in run.RidableObjects)
-            {
-                var key = (obj.MapX << 8) | obj.MapY;
-                if (seen.Add(key))
-                    points.Add((obj.MapX, obj.MapY));
-            }
-
-            return points.Count > 0
-                ? new List<IReadOnlyList<(byte, byte)>> { points }
-                : null;
-        }
-
         internal static int ResolveStartMapOverride(
             DungeonRun run,
             int nextX,

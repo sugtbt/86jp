@@ -194,6 +194,33 @@ namespace DfoServer.Network.Handlers.Dungeon
                 DungeonRunEndReason.ReturnToTown,
                 expectedIdentity);
 
+        internal static async Task<DungeonSelectionContext>
+            RejectSelectingRunAsync(
+                EnhancedClientSession session,
+                DungeonRunIdentity expectedIdentity,
+                DungeonInstanceRegistry instanceRegistry = null)
+        {
+            var player = session?.Player;
+            if (player == null
+                || !TryDetachSelectingRunAndRestoreSelection(
+                    player,
+                    expectedIdentity,
+                    out var run,
+                    out var selection))
+            {
+                return null;
+            }
+
+            await ExecuteDetachedRunCleanupAsync(
+                session,
+                run,
+                DungeonRunEndReason.EntryRejected,
+                instanceRegistry);
+            return player.IsCurrentDungeonSelection(selection)
+                ? selection
+                : null;
+        }
+
         internal static bool CanProjectTownState(
             EnhancedClientSession session,
             DungeonRunIdentity endedRunIdentity)
@@ -223,30 +250,84 @@ namespace DfoServer.Network.Handlers.Dungeon
                     out var run))
                 return false;
 
-            instanceRegistry?.Terminate(
-                player.CharacterId,
-                run.CaptureIdentity(),
-                reason.ToString());
+            await ExecuteDetachedRunCleanupAsync(
+                session,
+                run,
+                reason,
+                instanceRegistry);
+            return true;
+        }
 
+        private static async Task ExecuteDetachedRunCleanupAsync(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonRunEndReason reason,
+            DungeonInstanceRegistry instanceRegistry)
+        {
+            var player = session.Player;
+            var reasonText = reason.ToString();
+            var runIdentity = run.CaptureIdentity();
             var tower = run.Tower;
             var towerItemIds = tower != null
                 ? new List<int>(tower.SeenItemIds)
                 : null;
-            CancelAllTimers(run);
-            PersistSessionExp(session, run, reason.ToString());
-            run.Tower = null;
-            RecalibrateTowerQuestOverlayWithoutNotification(session, towerItemIds);
-
-            await DungeonMechanismCoordinator.ClearRunEffectsAsync(
-                session,
+            var cleanup = await DungeonRunEndCleanupExecutor.ExecuteAsync(
                 run,
-                reason.ToString());
-            await PetCreatureRuntimeService.EndDungeonToTownAsync(
-                session,
-                run.CaptureIdentity(),
-                reason.ToString());
-            run.TryMarkEnded();
-            return true;
+                reasonText,
+                new[]
+                {
+                    new DungeonRunEndCleanupOperation(
+                        "registry-terminate",
+                        () =>
+                        {
+                            instanceRegistry?.Terminate(
+                                player.CharacterId,
+                                runIdentity,
+                                reasonText);
+                            return Task.CompletedTask;
+                        }),
+                    new DungeonRunEndCleanupOperation(
+                        "cancel-timers",
+                        () =>
+                        {
+                            CancelAllTimers(run);
+                            return Task.CompletedTask;
+                        }),
+                    new DungeonRunEndCleanupOperation(
+                        "persist-experience",
+                        () =>
+                        {
+                            if (!PersistSessionExp(session, run, reasonText))
+                            {
+                                throw new InvalidOperationException(
+                                    "Session experience persistence failed.");
+                            }
+                            return Task.CompletedTask;
+                        }),
+                    new DungeonRunEndCleanupOperation(
+                        "clear-tower-state",
+                        () =>
+                        {
+                            run.Tower = null;
+                            RecalibrateTowerQuestOverlayWithoutNotification(
+                                session,
+                                towerItemIds);
+                            return Task.CompletedTask;
+                        }),
+                    new DungeonRunEndCleanupOperation(
+                        "project-mechanism-cleanup",
+                        () => DungeonMechanismCoordinator.ClearRunEffectsAsync(
+                            session,
+                            run,
+                            reasonText)),
+                    new DungeonRunEndCleanupOperation(
+                        "end-pet-runtime",
+                        () => PetCreatureRuntimeService.EndDungeonToTownAsync(
+                            session,
+                            runIdentity,
+                            reasonText)),
+                });
+            LogIncompleteCleanup(player.CharacterId, run, reasonText, cleanup);
         }
 
         // 断线/换角色: 同样丢弃本局。
@@ -305,7 +386,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             LinkedDungeonEntryAuthorizationStore.Clear(player);
-            CancelAllTimers(run);
+            var suspendedTimers = run.Timers.SuspendForNetworkDetach();
             PersistSessionExp(
                 session,
                 run,
@@ -319,7 +400,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 $"instance={attachment.RunIdentity.PartyDungeonInstanceId} " +
                 $"run={attachment.RunIdentity.RunId}/" +
                 $"{attachment.RunIdentity.RunGeneration} " +
-                $"attachmentGeneration={attachment.AttachmentGeneration}");
+                $"attachmentGeneration={attachment.AttachmentGeneration} " +
+                $"suspendedTimers={suspendedTimers}");
             return true;
         }
 
@@ -363,22 +445,88 @@ namespace DfoServer.Network.Handlers.Dungeon
             var towerItemIds = run?.Tower != null
                 ? new List<int>(run.Tower.SeenItemIds)
                 : null;
-            if (run != null)
+            var reasonText = reason.ToString();
+            if (run == null)
             {
-                instanceRegistry?.Terminate(
+                TryRunSessionCleanup(
                     player.CharacterId,
-                    run.CaptureIdentity(),
-                    reason.ToString());
+                    reasonText,
+                    "clear-linked-authorization",
+                    () => LinkedDungeonEntryAuthorizationStore.Clear(player));
+                TryRunSessionCleanup(
+                    player.CharacterId,
+                    reasonText,
+                    "end-pet-session",
+                    () => PetCreatureRuntimeService.EndCharacterSession(
+                        session,
+                        reasonText));
+                return detached;
             }
-            LinkedDungeonEntryAuthorizationStore.Clear(player);
-            CancelAllTimers(run);
-            PersistSessionExp(session, run, reason.ToString());
-            if (run != null)
-                run.Tower = null;
-            PetCreatureRuntimeService.EndCharacterSession(session, reason.ToString());
 
-            RecalibrateTowerQuestOverlayWithoutNotification(session, towerItemIds);
-            run?.TryMarkEnded();
+            var runIdentity = run.CaptureIdentity();
+            var cleanup = DungeonRunEndCleanupExecutor.ExecuteAsync(
+                    run,
+                    reasonText,
+                    new[]
+                    {
+                        new DungeonRunEndCleanupOperation(
+                            "registry-terminate",
+                            () =>
+                            {
+                                instanceRegistry?.Terminate(
+                                    player.CharacterId,
+                                    runIdentity,
+                                    reasonText);
+                                return Task.CompletedTask;
+                            }),
+                        new DungeonRunEndCleanupOperation(
+                            "clear-linked-authorization",
+                            () =>
+                            {
+                                LinkedDungeonEntryAuthorizationStore.Clear(player);
+                                return Task.CompletedTask;
+                            }),
+                        new DungeonRunEndCleanupOperation(
+                            "cancel-timers",
+                            () =>
+                            {
+                                CancelAllTimers(run);
+                                return Task.CompletedTask;
+                            }),
+                        new DungeonRunEndCleanupOperation(
+                            "persist-experience",
+                            () =>
+                            {
+                                if (!PersistSessionExp(session, run, reasonText))
+                                {
+                                    throw new InvalidOperationException(
+                                        "Session experience persistence failed.");
+                                }
+                                return Task.CompletedTask;
+                            }),
+                        new DungeonRunEndCleanupOperation(
+                            "clear-tower-state",
+                            () =>
+                            {
+                                run.Tower = null;
+                                RecalibrateTowerQuestOverlayWithoutNotification(
+                                    session,
+                                    towerItemIds);
+                                return Task.CompletedTask;
+                            }),
+                        new DungeonRunEndCleanupOperation(
+                            "end-pet-session",
+                            () =>
+                            {
+                                PetCreatureRuntimeService.EndCharacterSession(
+                                    session,
+                                    reasonText);
+                                return Task.CompletedTask;
+                            }),
+                    })
+                .GetAwaiter()
+                .GetResult();
+            LogIncompleteCleanup(player.CharacterId, run, reasonText, cleanup);
             return detached;
         }
 
@@ -407,6 +555,41 @@ namespace DfoServer.Network.Handlers.Dungeon
                 player.DungeonSceneUniqueId = 0;
                 if (clearSelection)
                     player.ClearDungeonSelection();
+                return true;
+            }
+        }
+
+        private static bool TryDetachSelectingRunAndRestoreSelection(
+            Game.Session.PlayerContext player,
+            DungeonRunIdentity expectedIdentity,
+            out DungeonRun run,
+            out DungeonSelectionContext selection)
+        {
+            run = null;
+            selection = null;
+            if (player == null || !expectedIdentity.IsValid)
+                return false;
+
+            lock (player.DungeonRunLifecycleSyncRoot)
+            {
+                var current = player.CurrentRun;
+                if (current == null
+                    || !current.Matches(expectedIdentity)
+                    || current.RunState != DungeonRunState.Selecting
+                    || !current.TryBeginEnding())
+                {
+                    return false;
+                }
+
+                player.CurrentRun = null;
+                player.DungeonSceneUniqueId = 0;
+                player.ClearDungeonSelection();
+                selection = player.BeginDungeonSelection(
+                    current.TownReturnAnchor);
+                if (selection == null)
+                    return false;
+
+                run = current;
                 return true;
             }
         }
@@ -458,16 +641,54 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         // 离开一局时把会话内存的等级/经验落库(实现收口在经验系统,
         // 这里只保留"仍在一局中才需要兜底"的副本生命周期判断)。
-        private static void PersistSessionExp(
+        private static bool PersistSessionExp(
             EnhancedClientSession session,
             DungeonRun run,
             string source)
         {
             var player = session?.Player;
             if (player == null || run == null)
+                return false;
+
+            return Game.Progression.CharacterExperienceService.PersistSessionExp(
+                player,
+                source);
+        }
+
+        private static void LogIncompleteCleanup(
+            int characterId,
+            DungeonRun run,
+            string source,
+            DungeonRunEndCleanupSummary summary)
+        {
+            if (summary == null || summary.IsComplete)
                 return;
 
-            Game.Progression.CharacterExperienceService.PersistSessionExp(player, source);
+            FileLogger.Log(
+                $"[DungeonRunLifecycle] cleanup checkpoint incomplete " +
+                $"cid={characterId} source={source} " +
+                $"instance={run?.PartyDungeonInstanceId ?? 0} " +
+                $"run={run?.RunId ?? 0}/{run?.RunGeneration ?? 0} " +
+                $"failed=[{string.Join(",", summary.FailedOperations)}]");
+        }
+
+        private static void TryRunSessionCleanup(
+            int characterId,
+            string source,
+            string operation,
+            Action execute)
+        {
+            try
+            {
+                execute?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[DungeonRunLifecycle] detached session cleanup failed " +
+                    $"cid={characterId} source={source} " +
+                    $"operation={operation}: {ex.Message}");
+            }
         }
 
         internal static void CancelAutoFlip(EnhancedClientSession session)

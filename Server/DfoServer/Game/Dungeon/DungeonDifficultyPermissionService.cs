@@ -3,7 +3,6 @@ using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -11,22 +10,20 @@ namespace DfoServer.Game.Dungeon
 {
     internal enum DungeonPermissionPersistenceScope
     {
-        None = 0,
-        AccountDifficulty = 1,
-        CharacterMechanism = 2,
+        Unknown = 0,
+        None = 1,
+        AccountDifficulty = 2,
+        CharacterMechanism = 3,
     }
 
     internal static class DungeonPermissionScopePolicy
     {
-        private static readonly ConcurrentDictionary<int, DungeonPermissionPersistenceScope>
-            Cache = new ConcurrentDictionary<int, DungeonPermissionPersistenceScope>();
-
         internal static DungeonPermissionPersistenceScope Resolve(int dungeonId)
         {
             if (dungeonId <= 0 || dungeonId > ushort.MaxValue)
-                return DungeonPermissionPersistenceScope.None;
+                return DungeonPermissionPersistenceScope.Unknown;
 
-            return Cache.GetOrAdd(dungeonId, ResolveUncached);
+            return ResolveUncached(dungeonId);
         }
 
         internal static bool IsAccountDifficulty(int dungeonId) =>
@@ -38,13 +35,35 @@ namespace DfoServer.Game.Dungeon
         {
             try
             {
-                if (!WorldMap.ShouldPersistDungeonPermission(dungeonId))
+                if (!DungeonPermissionDefinitionResolver.TryResolve(
+                        dungeonId,
+                        out var definition,
+                        out var failureReason))
+                {
+                    FileLogger.Log(
+                        $"[DungeonDifficultyPermission] scope is unknown " +
+                        $"dungeon={dungeonId}: {failureReason}");
+                    return DungeonPermissionPersistenceScope.Unknown;
+                }
+
+                if (definition.IsTaskExclusive)
                     return DungeonPermissionPersistenceScope.None;
 
                 // Anton uses the same 0x0005 rows for its character-specific
                 // conquest chain. It is not an account difficulty unlock.
                 if (AntonNormalConquest.TryGetSequence(dungeonId, out _))
                     return DungeonPermissionPersistenceScope.CharacterMechanism;
+
+                if (!definition.HasWorldMapReference
+                    || !definition.HasExplicitDifficultyConfiguration)
+                {
+                    FileLogger.Log(
+                        $"[DungeonDifficultyPermission] scope is unknown " +
+                        $"dungeon={dungeonId} path={definition.FilePath} " +
+                        $"worldMap={definition.HasWorldMapReference} " +
+                        $"difficulty={definition.HasExplicitDifficultyConfiguration}");
+                    return DungeonPermissionPersistenceScope.Unknown;
+                }
 
                 return DungeonPermissionPersistenceScope.AccountDifficulty;
             }
@@ -53,7 +72,7 @@ namespace DfoServer.Game.Dungeon
                 FileLogger.Log(
                     $"[DungeonDifficultyPermission] scope resolution failed closed " +
                     $"dungeon={dungeonId}: {ex.Message}");
-                return DungeonPermissionPersistenceScope.None;
+                return DungeonPermissionPersistenceScope.Unknown;
             }
         }
     }

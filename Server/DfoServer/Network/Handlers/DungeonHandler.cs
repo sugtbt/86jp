@@ -20,6 +20,8 @@ namespace DfoServer.Network.Handlers
         private readonly DungeonMapHandler _map;
         private readonly DungeonCombatHandler _combat;
         private readonly DungeonSettlementHandler _settlement;
+        private readonly TournamentDungeonCoordinator _tournament;
+        private readonly BloodAltarDungeonCoordinator _bloodAltar;
         private readonly DungeonTutorialHandler _tutorial;
 
         public DungeonHandler(
@@ -83,7 +85,22 @@ namespace DfoServer.Network.Handlers
             _map = new DungeonMapHandler(_services);
             _entry = new DungeonEntryHandler(_services, _map);
             _settlement = new DungeonSettlementHandler(_services, _entry);
-            _combat = new DungeonCombatHandler(_services, _settlement);
+            _tournament = new TournamentDungeonCoordinator(
+                _services,
+                _settlement);
+            _bloodAltar = new BloodAltarDungeonCoordinator(
+                _services,
+                _settlement);
+            _combat = new DungeonCombatHandler(
+                _services,
+                _settlement,
+                _tournament,
+                _bloodAltar);
+            _bloodAltar.ConfigureKillProcessor(
+                _combat.ProcessMechanismKillAsync);
+            _settlement.ConfigureBloodAltarPresentation(
+                _bloodAltar.OnParticipantClearedAsync,
+                _bloodAltar.TryHandleEplpCommandAsync);
             _tutorial = new DungeonTutorialHandler(_services, _settlement);
         }
 
@@ -182,7 +199,9 @@ namespace DfoServer.Network.Handlers
             return Dungeon.DungeonMechanismCoordinator.OnCommandReceivedAsync(
                 session,
                 command,
-                _services.Drops);
+                _services.Drops,
+                _tournament,
+                _bloodAltar);
         }
 
         internal Task HandleQuestSetTriggerResultAsync(
@@ -193,6 +212,22 @@ namespace DfoServer.Network.Handlers
                 session,
                 result,
                 sourceEvent);
+
+        internal async Task RecoverDungeonParticipantEffectsAsync(
+            EnhancedClientSession session)
+        {
+            await _combat.RecoverParticipantEffectsAsync(session);
+            await _settlement.RecoverParticipantClearEffectsAsync(session);
+            await Dungeon.SpecialDungeonNotifier
+                .RecoverPendingEffectPlansAsync(session);
+            await _services.DeathTower.RecoverSettlementAsync(session);
+            await _settlement.RecoverPendingSettlementPresentationAsync(session);
+            await _bloodAltar.RecoverAsync(session);
+            await _tournament.RecoverAsync(session);
+            _services.CardRewards.RecoverTimer(session);
+            _combat.RecoverDeathRespawnTimer(session);
+            Dungeon.DungeonMechanismTimerCoordinator.Recover(session);
+        }
 
         public Task HandleDungeonSceneUniqueIdReport(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {

@@ -305,13 +305,11 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             // 7. 塔局: 挂 Tower 载荷, 返城随局消失
-            var tower = new Game.DeathTower.DeathTowerSession(new Game.DeathTower.DeathTowerData.TowerConfig
-            {
-                DungeonId = 11000,
-                TotalStages = 3,
-                StageMapIds = new[] { 1, 2, 3 },
-                BasisLevel = 50,
-            });
+            var tower = new Game.DeathTower.DeathTowerSession(
+                DeathTowerSelfTestFactory.CreateConfig(
+                    11000,
+                    new[] { 1, 2, 3 },
+                    50));
             DungeonRunLifecycle.BeginTowerRun(session, 11000, tower);
             tower.BeginStage(123, new[]
             {
@@ -368,13 +366,11 @@ namespace DfoServer.SelfTests
 
         private static Game.DeathTower.DeathTowerSession CreateTowerWithPickedItem()
         {
-            var tower = new Game.DeathTower.DeathTowerSession(new Game.DeathTower.DeathTowerData.TowerConfig
-            {
-                DungeonId = 11000,
-                TotalStages = 1,
-                StageMapIds = new[] { 1 },
-                BasisLevel = 50,
-            });
+            var tower = new Game.DeathTower.DeathTowerSession(
+                DeathTowerSelfTestFactory.CreateConfig(
+                    11000,
+                    new[] { 1 },
+                    50));
             tower.BeginStage(456, new[]
             {
                 new Game.DeathTower.StageTowerItem

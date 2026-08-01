@@ -120,10 +120,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 DungeonRun run,
                 int dungeonId,
                 int mazeIndex)
-            => SpecialDungeonRunCoordinator.ResolveMinimapIconGroups(
-                run,
-                dungeonId,
-                mazeIndex);
+            => DungeonMinimapProjectionService.Resolve(
+                run?.SpecialMinimapIconGroups,
+                run?.RidableObjects);
 
         internal static Task SendSelectionStateAsync(
             EnhancedClientSession session,
@@ -211,7 +210,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal static async Task OnStartMapSentAsync(
             EnhancedClientSession session,
-            DungeonRoomIdentity roomIdentity)
+            DungeonParticipantRoomIdentity roomIdentity)
         {
             var run = session?.Player?.CurrentRun;
             if (run == null || !run.Matches(roomIdentity))
@@ -220,7 +219,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             // Preserve the established order: gauge state first, then the
             // scene condition that depends on client START_MAP actors.
             await SpecialDungeonNotifier.SendStartMapStateAsync(session, run);
-            if (!session.Player.IsCurrentDungeonRoom(roomIdentity))
+            if (!session.Player.IsCurrentDungeonParticipantRoom(roomIdentity))
                 return;
             await EventMonsterConditionCoordinator.AdvanceAfterStartMapAsync(
                 session,
@@ -253,6 +252,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             await SpecialDungeonNotifier.ObserveMonsterKilledAsync(
                 session,
                 run,
+                killEvent,
                 monsterCode,
                 monsterType);
 
@@ -384,19 +384,21 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static Task OnCommandReceivedAsync(
             EnhancedClientSession session,
             DungeonCommand command,
-            DropService drops)
+            DropService drops,
+            TournamentDungeonCoordinator tournaments,
+            BloodAltarDungeonCoordinator bloodAltars)
             => DungeonCommandReceivedDispatcher.DispatchAsync(
                 session,
                 command,
-                drops);
+                drops,
+                tournaments,
+                bloodAltars);
 
-        internal static Task OnResultPreparingAsync(
+        internal static Task OnDungeonClearedAsync(
             EnhancedClientSession session,
-            DungeonRun run,
-            byte[] body)
-            => SpecialDungeonSettlementCoordinator.OnResultPreparingAsync(
+            DungeonRun run)
+            => SpecialDungeonSettlementCoordinator.OnDungeonClearedAsync(
                 session,
-                run,
-                body);
+                run);
     }
 }

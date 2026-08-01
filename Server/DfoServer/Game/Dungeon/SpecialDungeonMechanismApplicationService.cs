@@ -79,6 +79,17 @@ namespace DfoServer.Game.Dungeon
             }
         }
 
+        internal SpecialDungeonEffectPlanRegistration
+            BuildClearRunBuffsPlan(
+                DungeonRun run,
+                DungeonEventEnvelope source,
+                string reason)
+            => ApplyAndPlan(
+                run,
+                source,
+                "run-end-buffs",
+                () => BuildClearRunBuffs(run, reason));
+
         internal IReadOnlyList<SpecialDungeonEffectIntent> BuildStartMapState(
             DungeonRun run)
         {
@@ -175,6 +186,21 @@ namespace DfoServer.Game.Dungeon
             return effects;
         }
 
+        internal SpecialDungeonEffectPlanRegistration
+            ApplyMonsterKilledAndPlan(
+                DungeonRun run,
+                DungeonEventEnvelope source,
+                int monsterCode,
+                byte monsterType)
+            => ApplyAndPlan(
+                run,
+                source,
+                "monster-kill/" + source?.SourceEventId.ToString("N"),
+                () => ApplyMonsterKilled(
+                    run,
+                    monsterCode,
+                    monsterType));
+
         internal IReadOnlyList<SpecialDungeonEffectIntent> ApplyBossSummon(
             DungeonRun run,
             SummonMonsterDungeonCommand request)
@@ -214,6 +240,16 @@ namespace DfoServer.Game.Dungeon
                 };
             }
         }
+
+        internal SpecialDungeonEffectPlanRegistration ApplyBossSummonAndPlan(
+            DungeonRun run,
+            DungeonEventEnvelope source,
+            SummonMonsterDungeonCommand request)
+            => ApplyAndPlan(
+                run,
+                source,
+                "conditional-boss-summon",
+                () => ApplyBossSummon(run, request));
 
         internal IReadOnlyList<SpecialDungeonEffectIntent>
             ApplySeaChaseResult(
@@ -265,6 +301,17 @@ namespace DfoServer.Game.Dungeon
                 return effects;
             }
         }
+
+        internal SpecialDungeonEffectPlanRegistration
+            ApplySeaChaseResultAndPlan(
+                DungeonRun run,
+                DungeonEventEnvelope source,
+                SeaChaseResultDungeonCommand command)
+            => ApplyAndPlan(
+                run,
+                source,
+                "sea-chase-result",
+                () => ApplySeaChaseResult(run, command));
 
         internal bool ApplyGentInfiltrateTimeout(
             DungeonRun run,
@@ -596,6 +643,44 @@ namespace DfoServer.Game.Dungeon
             for (var index = 0; index < values.Count; index++)
                 copy[index] = values[index];
             return copy;
+        }
+
+        private static SpecialDungeonEffectPlanRegistration ApplyAndPlan(
+            DungeonRun run,
+            DungeonEventEnvelope source,
+            string operation,
+            Func<IReadOnlyList<SpecialDungeonEffectIntent>> transition)
+        {
+            if (run == null
+                || source == null
+                || transition == null
+                || string.IsNullOrWhiteSpace(operation))
+            {
+                return default;
+            }
+
+            lock (run.SyncRoot)
+            {
+                if (!run.Matches(source.RunIdentity))
+                    return default;
+
+                if (run.SpecialDungeonEffectPlans.TryGet(
+                        operation,
+                        out var existing))
+                {
+                    return new SpecialDungeonEffectPlanRegistration(
+                        existing,
+                        created: false,
+                        wasComplete: existing.IsComplete(run.Effects));
+                }
+
+                var intents = transition();
+                return run.SpecialDungeonEffectPlans.Register(
+                    run,
+                    source,
+                    operation,
+                    intents);
+            }
         }
 
         private static bool Contains(

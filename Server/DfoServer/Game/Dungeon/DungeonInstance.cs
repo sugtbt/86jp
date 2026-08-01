@@ -50,6 +50,16 @@ namespace DfoServer.Game.Dungeon
             init => _clearConditionTemplate = value?.CloneFresh();
         }
 
+        internal bool TryGetFrozenRoomMapId(int x, int y, out int mapId)
+        {
+            mapId = 0;
+            if (MazeStartMapId <= 0 || x != MazeStartX || y != MazeStartY)
+                return false;
+
+            mapId = MazeStartMapId;
+            return true;
+        }
+
         internal void ApplyTo(DungeonRun run)
         {
             if (run == null)
@@ -89,12 +99,77 @@ namespace DfoServer.Game.Dungeon
         public int BossKillCount { get; }
     }
 
+    public sealed class DungeonActorDeathFact
+    {
+        internal DungeonActorDeathFact(
+            DungeonEventEnvelope source,
+            ushort sequenceId,
+            int actorCode,
+            byte actorType)
+        {
+            Source = source ?? throw new ArgumentNullException(nameof(source));
+            SequenceId = sequenceId;
+            ActorCode = actorCode;
+            ActorType = actorType;
+        }
+
+        public DungeonEventEnvelope Source { get; }
+        public Guid SourceEventId => Source.SourceEventId;
+        public ushort SequenceId { get; }
+        public int ActorCode { get; }
+        public byte ActorType { get; }
+    }
+
+    internal readonly struct DungeonRoomActorDeathApplication
+    {
+        internal DungeonRoomActorDeathApplication(
+            bool accepted,
+            bool created,
+            DungeonActorDeathFact fact)
+        {
+            Accepted = accepted;
+            Created = created;
+            Fact = fact;
+        }
+
+        internal bool Accepted { get; }
+        internal bool Created { get; }
+        internal DungeonActorDeathFact Fact { get; }
+    }
+
+    internal readonly struct DungeonRoomClearCommit
+    {
+        internal DungeonRoomClearCommit(
+            bool isCleared,
+            bool transitioned,
+            int blockingCount,
+            int killedBlockingCount,
+            DungeonEventEnvelope source)
+        {
+            IsCleared = isCleared;
+            Transitioned = transitioned;
+            BlockingCount = blockingCount;
+            KilledBlockingCount = killedBlockingCount;
+            Source = source;
+        }
+
+        internal bool IsCleared { get; }
+        internal bool Transitioned { get; }
+        internal int BlockingCount { get; }
+        internal int KilledBlockingCount { get; }
+        internal DungeonEventEnvelope Source { get; }
+    }
+
     public sealed class DungeonInstanceRoom
     {
         private readonly object _syncRoot = new object();
         private readonly Dictionary<string, DungeonEncounterRuntime> _encounters =
             new Dictionary<string, DungeonEncounterRuntime>(StringComparer.Ordinal);
+        private readonly Dictionary<ushort, DungeonActorDeathFact> _actorDeaths =
+            new Dictionary<ushort, DungeonActorDeathFact>();
         private DungeonRoomState _state = DungeonRoomState.Created;
+        private long _partyDungeonInstanceId;
+        private DungeonEventEnvelope _clearSource;
 
         internal DungeonInstanceRoom(
             long roomInstanceId,
@@ -111,6 +186,26 @@ namespace DfoServer.Game.Dungeon
         }
 
         public long RoomInstanceId { get; }
+        public long PartyDungeonInstanceId
+        {
+            get
+            {
+                lock (_syncRoot)
+                    return _partyDungeonInstanceId;
+            }
+        }
+        public DungeonRoomIdentity Identity
+        {
+            get
+            {
+                lock (_syncRoot)
+                {
+                    return new DungeonRoomIdentity(
+                        new DungeonInstanceIdentity(_partyDungeonInstanceId),
+                        RoomInstanceId);
+                }
+            }
+        }
         public RoomKey Key { get; }
         public GameWorld.Dungeon.MazeSumInfo Maze { get; }
         public uint Seed { get; }
@@ -128,6 +223,214 @@ namespace DfoServer.Game.Dungeon
                         out var runtime)
                         ? runtime.State
                         : DungeonEncounterState.NotStarted;
+                }
+            }
+        }
+
+        internal void AttachToInstance(long partyDungeonInstanceId)
+        {
+            if (partyDungeonInstanceId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(partyDungeonInstanceId));
+
+            lock (_syncRoot)
+            {
+                if (_partyDungeonInstanceId == 0)
+                {
+                    _partyDungeonInstanceId = partyDungeonInstanceId;
+                    return;
+                }
+                if (_partyDungeonInstanceId != partyDungeonInstanceId)
+                {
+                    throw new InvalidOperationException(
+                        "A dungeon room cannot be attached to multiple instances.");
+                }
+            }
+        }
+
+        internal DungeonRoomActorDeathApplication TryRecordActorDeath(
+            DungeonEventEnvelope source,
+            ushort sequenceId,
+            int actorCode,
+            byte actorType)
+        {
+            if (!MatchesSource(source) || sequenceId == 0)
+                return default;
+
+            lock (_syncRoot)
+            {
+                if (_state == DungeonRoomState.Closed)
+                    return default;
+                if (_actorDeaths.TryGetValue(sequenceId, out var existing))
+                {
+                    return new DungeonRoomActorDeathApplication(
+                        accepted: true,
+                        created: false,
+                        existing);
+                }
+
+                var fact = new DungeonActorDeathFact(
+                    source,
+                    sequenceId,
+                    actorCode,
+                    actorType);
+                _actorDeaths.Add(sequenceId, fact);
+                return new DungeonRoomActorDeathApplication(
+                    accepted: true,
+                    created: true,
+                    fact);
+            }
+        }
+
+        internal DungeonRoomActorDeathApplication
+            TryRecordNextActorDeathByCode(
+                DungeonEventEnvelope source,
+                int actorCode,
+                byte actorType,
+                out bool actorDefined)
+        {
+            actorDefined = false;
+            if (!MatchesSource(source) || actorCode <= 0)
+                return default;
+
+            lock (_syncRoot)
+            {
+                if (_state == DungeonRoomState.Closed)
+                    return default;
+
+                var actors = Maze.Monsters;
+                if (actors == null)
+                    return default;
+
+                for (var index = 0; index < actors.Count; index++)
+                {
+                    var actor = actors[index];
+                    if (actor.Code != actorCode || actor.Type != actorType)
+                        continue;
+
+                    actorDefined = true;
+                    var sequenceValue = (int)FirstActorSequenceId + index;
+                    if (sequenceValue <= 0 || sequenceValue > ushort.MaxValue)
+                        continue;
+
+                    var sequenceId = (ushort)sequenceValue;
+                    if (_actorDeaths.ContainsKey(sequenceId))
+                        continue;
+
+                    var fact = new DungeonActorDeathFact(
+                        source,
+                        sequenceId,
+                        actor.Code,
+                        actor.Type);
+                    _actorDeaths.Add(sequenceId, fact);
+                    return new DungeonRoomActorDeathApplication(
+                        accepted: true,
+                        created: true,
+                        fact);
+                }
+
+                return default;
+            }
+        }
+
+        internal DungeonRoomClearCommit TryCommitClearFromActorDeaths(
+            Func<GameWorld.Dungeon.MonsterSumInfo, bool> isBlocking,
+            DungeonEventEnvelope fallbackSource,
+            ushort completingSequenceId)
+        {
+            if (isBlocking == null)
+                throw new ArgumentNullException(nameof(isBlocking));
+            if (!MatchesSource(fallbackSource))
+                return default;
+
+            lock (_syncRoot)
+            {
+                var blockingCount = 0;
+                var killedBlockingCount = 0;
+                var monsters = Maze.Monsters;
+                if (monsters != null)
+                {
+                    for (var index = 0; index < monsters.Count; index++)
+                    {
+                        if (!isBlocking(monsters[index]))
+                            continue;
+
+                        blockingCount++;
+                        var sequenceId = unchecked((ushort)(FirstActorSequenceId + index));
+                        if (_actorDeaths.ContainsKey(sequenceId))
+                            killedBlockingCount++;
+                    }
+                }
+
+                var cleared = killedBlockingCount >= blockingCount;
+                if (!cleared || _state == DungeonRoomState.Closed)
+                {
+                    return new DungeonRoomClearCommit(
+                        isCleared: false,
+                        transitioned: false,
+                        blockingCount,
+                        killedBlockingCount,
+                        source: null);
+                }
+
+                var transitioned = false;
+                if (_state != DungeonRoomState.Cleared)
+                {
+                    if (_state != DungeonRoomState.Active)
+                    {
+                        return new DungeonRoomClearCommit(
+                            isCleared: false,
+                            transitioned: false,
+                            blockingCount,
+                            killedBlockingCount,
+                            source: null);
+                    }
+
+                    _state = DungeonRoomState.Cleared;
+                    transitioned = true;
+                    _clearSource = _actorDeaths.TryGetValue(
+                        completingSequenceId,
+                        out var completingDeath)
+                            ? completingDeath.Source
+                            : fallbackSource;
+                }
+
+                return new DungeonRoomClearCommit(
+                    isCleared: true,
+                    transitioned,
+                    blockingCount,
+                    killedBlockingCount,
+                    _clearSource ?? fallbackSource);
+            }
+        }
+
+        internal HashSet<ushort> CaptureKilledActorSequenceIds()
+        {
+            lock (_syncRoot)
+                return new HashSet<ushort>(_actorDeaths.Keys);
+        }
+
+        internal bool TryGetActorDeathFact(
+            ushort sequenceId,
+            out DungeonActorDeathFact fact)
+        {
+            lock (_syncRoot)
+                return _actorDeaths.TryGetValue(sequenceId, out fact);
+        }
+
+        internal void CopyKilledActorSequenceIdsTo(
+            ISet<ushort> destination,
+            Func<DungeonActorDeathFact, bool> include = null)
+        {
+            if (destination == null)
+                throw new ArgumentNullException(nameof(destination));
+
+            lock (_syncRoot)
+            {
+                destination.Clear();
+                foreach (var death in _actorDeaths)
+                {
+                    if (include == null || include(death.Value))
+                        destination.Add(death.Key);
                 }
             }
         }
@@ -207,6 +510,22 @@ namespace DfoServer.Game.Dungeon
             }
             return runtime;
         }
+
+        private bool MatchesSource(DungeonEventEnvelope source)
+        {
+            if (source == null
+                || !source.RoomInstanceId.HasValue
+                || source.RoomInstanceId.Value != RoomInstanceId)
+            {
+                return false;
+            }
+
+            lock (_syncRoot)
+            {
+                return _partyDungeonInstanceId > 0
+                    && source.PartyDungeonInstanceId == _partyDungeonInstanceId;
+            }
+        }
     }
 
     public sealed class DungeonInstance
@@ -221,6 +540,7 @@ namespace DfoServer.Game.Dungeon
                 new HashSet<(long, RoomKey, ushort)>();
         private DungeonSelectionSnapshot _selection;
         private DungeonClearedFact _clearedFact;
+        private DungeonInstanceState _state = DungeonInstanceState.Created;
         private int _normalKillCount;
         private int _championKillCount;
         private int _bossKillCount;
@@ -262,16 +582,23 @@ namespace DfoServer.Game.Dungeon
         }
 
         public long PartyDungeonInstanceId { get; }
+        public DungeonInstanceIdentity Identity =>
+            new DungeonInstanceIdentity(PartyDungeonInstanceId);
         public short DungeonId { get; }
         public byte Difficulty { get; }
         public DungeonRewardPolicy RewardPolicy { get; }
         public DungeonDropDefinition DropDefinition { get; }
         public DateTime CreatedUtc { get; }
         public DungeonEffectLedger Effects { get; } = new DungeonEffectLedger();
+        public DungeonParticipantEffectJournal ParticipantEffects { get; } =
+            new DungeonParticipantEffectJournal();
+        internal DungeonInstanceMechanismRuntimeSet Mechanisms { get; } =
+            new DungeonInstanceMechanismRuntimeSet();
         internal DungeonDiagnosticJournal Diagnostics { get; } =
             new DungeonDiagnosticJournal();
         public DungeonSelectionSnapshot Selection { get { lock (_syncRoot) return _selection; } }
         public DungeonClearedFact ClearedFact { get { lock (_syncRoot) return _clearedFact; } }
+        public DungeonInstanceState State { get { lock (_syncRoot) return _state; } }
         public int VisitedRoomCount { get { lock (_syncRoot) return _rooms.Count; } }
         public DungeonKillStatistics KillStatistics
         {
@@ -320,7 +647,10 @@ namespace DfoServer.Game.Dungeon
                 var room = factory(DungeonIdentityGenerator.NextRoomId());
                 if (room == null || !room.Key.Equals(key))
                     throw new InvalidOperationException("Dungeon room factory returned an invalid room.");
+                room.AttachToInstance(PartyDungeonInstanceId);
                 _rooms.Add(key, room);
+                if (_state == DungeonInstanceState.Created)
+                    _state = DungeonInstanceState.Active;
                 created = true;
                 return room;
             }
@@ -350,6 +680,16 @@ namespace DfoServer.Game.Dungeon
 
             room = null;
             return false;
+        }
+
+        internal bool TryGetActorDeathFact(
+            long roomInstanceId,
+            ushort sequenceId,
+            out DungeonActorDeathFact fact)
+        {
+            fact = null;
+            return TryGetRoom(roomInstanceId, out var room)
+                && room.TryGetActorDeathFact(sequenceId, out fact);
         }
 
         public bool IsRoomCleared(int x, int y)
@@ -416,10 +756,48 @@ namespace DfoServer.Game.Dungeon
                     created = false;
                     return _clearedFact;
                 }
+                if (_state == DungeonInstanceState.Ending
+                    || _state == DungeonInstanceState.Ended)
+                {
+                    throw new InvalidOperationException(
+                        "A terminal dungeon instance cannot accept a clear intent.");
+                }
 
                 _clearedFact = new DungeonClearedFact(intent);
+                _state = DungeonInstanceState.Cleared;
                 created = true;
                 return _clearedFact;
+            }
+        }
+
+        internal bool TryBeginEnding()
+        {
+            lock (_syncRoot)
+            {
+                if (_state == DungeonInstanceState.Ending
+                    || _state == DungeonInstanceState.Ended)
+                {
+                    return false;
+                }
+
+                _state = DungeonInstanceState.Ending;
+            }
+
+            Mechanisms.OnInstanceEnding();
+            return true;
+        }
+
+        internal bool TryMarkEnded()
+        {
+            lock (_syncRoot)
+            {
+                if (_state == DungeonInstanceState.Ended)
+                    return false;
+                if (_state != DungeonInstanceState.Ending)
+                    return false;
+
+                _state = DungeonInstanceState.Ended;
+                return true;
             }
         }
     }

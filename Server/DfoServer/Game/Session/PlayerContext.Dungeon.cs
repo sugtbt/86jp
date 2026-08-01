@@ -73,6 +73,13 @@ namespace DfoServer.Game.Session
             return run != null && run.Matches(identity);
         }
 
+        internal bool IsCurrentDungeonParticipantRoom(
+            Game.Dungeon.DungeonParticipantRoomIdentity identity)
+        {
+            var run = CurrentRun;
+            return run != null && run.Matches(identity);
+        }
+
         internal Game.Dungeon.DungeonSelectionContext BeginDungeonSelection(
             Game.Dungeon.DungeonTownReturnAnchor returnAnchor)
         {

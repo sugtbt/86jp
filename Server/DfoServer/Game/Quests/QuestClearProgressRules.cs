@@ -15,8 +15,18 @@ namespace DfoServer.Game.Quests
             using (var connection = new SqliteConnection(connectionString))
             {
                 connection.Open();
-                return Compute(connection, null, characterId, questId) == 0;
+                return CanFinish(connection, null, characterId, questId);
             }
+        }
+
+        internal static bool CanFinish(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            ushort questId)
+        {
+            return GameWorld.QuestData.IsQuestClearQuest(questId)
+                && Compute(connection, transaction, characterId, questId) == 0;
         }
 
         internal static void SynchronizeActiveParents(
@@ -40,12 +50,17 @@ namespace DfoServer.Game.Quests
                 if (nextTrigger == parent.TriggerValue)
                     continue;
 
-                QuestRepository.UpdateTriggerValue(
-                    connection,
-                    transaction,
-                    characterId,
-                    parent.Slot,
-                    nextTrigger);
+                if (!QuestRepository.UpdateTriggerValue(
+                        connection,
+                        transaction,
+                        characterId,
+                        parent.Slot,
+                        parent.ActivationId,
+                        nextTrigger))
+                {
+                    throw new System.InvalidOperationException(
+                        $"Quest activation changed while synchronizing parent {parent.QuestId}.");
+                }
                 FileLogger.Log(
                     $"[QuestClearProgressRules] sync parent={parent.QuestId} " +
                     $"trigger={parent.TriggerValue}->{nextTrigger}");

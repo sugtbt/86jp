@@ -33,32 +33,11 @@ namespace DfoServer.Game.DeathTower
         public bool LeveledUp { get; set; }
         public bool CharacterStateChanged { get; set; }
         public AccountExperienceProgressSummary AccountProgress { get; set; }
-        public IReadOnlyList<short> ChangedMainSlots { get; set; } = Array.Empty<short>();
-        public IReadOnlyList<DeathTowerRewardItem> Items { get; set; } = Array.Empty<DeathTowerRewardItem>();
+        public IReadOnlyList<short> ChangedMainSlots { get; set; }
+            = Array.Empty<short>();
+        public IReadOnlyList<DeathTowerRewardItem> Items { get; set; }
+            = Array.Empty<DeathTowerRewardItem>();
         internal ExperienceGrantResult ExperienceGrant { get; set; }
-    }
-
-    internal readonly struct DeathTowerSettlementContext
-    {
-        public DeathTowerSettlementContext(
-            int characterId,
-            int accountId,
-            byte level,
-            uint exp)
-        {
-            if (characterId <= 0)
-                throw new ArgumentOutOfRangeException(nameof(characterId));
-
-            CharacterId = characterId;
-            AccountId = accountId;
-            Level = level;
-            Exp = exp;
-        }
-
-        public int CharacterId { get; }
-        public int AccountId { get; }
-        public byte Level { get; }
-        public uint Exp { get; }
     }
 
     internal delegate ExperienceGrantResult DeathTowerExperienceGrantInTransaction(
@@ -72,9 +51,12 @@ namespace DfoServer.Game.DeathTower
 
     public sealed class DeathTowerSettlementService
     {
+        internal const uint MaximumRewardExperience = 1_100_000;
+
         private readonly string _connectionString;
         private readonly AccountExperienceProgressService _accountExperience;
-        private readonly DeathTowerExperienceGrantInTransaction _grantExperienceInTransaction;
+        private readonly DeathTowerExperienceGrantInTransaction
+            _grantExperienceInTransaction;
 
         public DeathTowerSettlementService(
             string connectionString,
@@ -90,171 +72,319 @@ namespace DfoServer.Game.DeathTower
         {
             _connectionString = !string.IsNullOrWhiteSpace(connectionString)
                 ? connectionString
-                : throw new ArgumentException("A database connection string is required.", nameof(connectionString));
+                : throw new ArgumentException(
+                    "A database connection string is required.",
+                    nameof(connectionString));
             _accountExperience = accountExperience
                 ?? throw new ArgumentNullException(nameof(accountExperience));
             _grantExperienceInTransaction = grantExperienceInTransaction
-                ?? ((connection, transaction, characterId, accountId, level, exp, rawGain) =>
+                ?? ((connection, transaction, characterId, accountId, level,
+                        exp, rawGain) =>
                     CharacterExperienceService.GrantInTransaction(
-                    connection,
-                    transaction,
-                    characterId,
-                    accountId,
-                    level,
-                    exp,
-                    rawGain,
-                    normalizeMaxLevelExp: rawGain > 0));
-        }
-
-        internal DeathTowerSettlementResult Grant(
-            DeathTowerSettlementContext context,
-            DeathTowerSession tower,
-            InventoryLease lease)
-        {
-            if (tower == null) throw new ArgumentNullException(nameof(tower));
-            if (lease == null) throw new ArgumentNullException(nameof(lease));
-            if (lease.CharacterId != context.CharacterId)
-            {
-                throw new InvalidOperationException(
-                    $"Death tower settlement inventory character mismatch: " +
-                    $"context={context.CharacterId} lease={lease.CharacterId}.");
-            }
-
-            var rewardConfig = DeathTowerRewardConfig.Load();
-            var clearedFloorCount = Math.Max(1, tower.CurrentStage + 1);
-            var previousLevel = context.Level;
-            var expGained = CalculateExp(previousLevel, rewardConfig.GetExpWeight(clearedFloorCount));
-            var goldGained = CalculateGold(previousLevel, rewardConfig.GoldWeight);
-            var lcg = tower.StageLcg ?? new DnfLcg(tower.StageSeed);
-            var rewardRollCount = Math.Min(
-                Math.Max(0, tower.Config.MaxClearItemCount),
-                rewardConfig.GetRewardCardCount(clearedFloorCount));
-
-            var items = new List<DeathTowerRewardItem>(rewardRollCount);
-            var changedMainSlots = new List<short>(rewardRollCount);
-            var changedMainSlotSet = new HashSet<short>();
-            var characterId = context.CharacterId;
-            var accountId = context.AccountId;
-            var updatedGold = 0;
-
-            ExperienceGrantResult expProgress;
-            using (var connection = new SqliteConnection(_connectionString))
-            {
-                connection.Open();
-                using (var transaction = connection.BeginTransaction())
-                {
-                    expProgress = _grantExperienceInTransaction(
                         connection,
                         transaction,
                         characterId,
                         accountId,
-                        previousLevel,
-                        context.Exp,
-                        expGained);
-                    var shouldPersistCharacter = expProgress.LeveledUp
-                        || expProgress.NormalExpGain > 0
-                        || expProgress.NormalizedMaxLevelExp;
-                    if (shouldPersistCharacter && !expProgress.Persisted)
-                    {
-                        throw new InvalidOperationException(
-                            $"Death tower settlement progress write failed for character {characterId}.");
-                    }
+                        level,
+                        exp,
+                        rawGain,
+                        normalizeMaxLevelExp: rawGain > 0));
+        }
 
-                    transaction.Commit();
-                }
+        internal DeathTowerSettlementPlan Prepare(
+            DeathTowerSettlementContext context,
+            DeathTowerSession tower,
+            int clearTimeMilliseconds)
+        {
+            if (tower == null)
+                throw new ArgumentNullException(nameof(tower));
+
+            var rewardConfig = DeathTowerRewardConfig.Load();
+            if (!rewardConfig.IsAvailable)
+            {
+                throw new InvalidOperationException(
+                    "Death tower reward configuration is unavailable.");
             }
 
-            var carryLimit = InventoryGoldCarryLimitLoader.Load(characterId);
+            var clearedFloorCount = Math.Max(
+                1,
+                Math.Min(tower.Config.TotalStages, tower.CurrentStage + 1));
+            var rewardExp = CalculateRewardExperience(
+                context.Level,
+                clearedFloorCount,
+                rewardConfig.GetExpWeight(
+                    tower.Config.RewardProfile,
+                    clearedFloorCount));
+            var candidateCount = Math.Min(
+                DeathTowerRewardConfig.MaximumRewardProgress,
+                Math.Min(
+                    Math.Max(0, tower.Config.MaxClearItemCount),
+                    rewardConfig.GetRewardCardCount(
+                        tower.Config.RewardProfile,
+                        clearedFloorCount)));
+            var lcg = tower.StageLcg ?? new DnfLcg(tower.StageSeed);
+            var candidates = new List<DeathTowerRewardCandidate>(candidateCount);
+            for (var index = 0; index < candidateCount; index++)
+            {
+                var kind = rewardConfig.ClassifyCandidate(
+                    clearedFloorCount,
+                    lcg.Next(rewardConfig.RewardRollScale));
+                candidates.Add(CreateCandidate(
+                    kind,
+                    context.Level,
+                    context.Difficulty,
+                    rewardConfig.GoldAmountWeight,
+                    lcg));
+            }
+
+            return new DeathTowerSettlementPlan(
+                context,
+                tower.Config.DungeonId,
+                clearedFloorCount,
+                clearTimeMilliseconds,
+                rewardExp,
+                candidates);
+        }
+
+        internal DeathTowerSettlementResult Commit(
+            DeathTowerSettlementPlan settlement,
+            InventoryLease lease,
+            Guid ownerSessionId)
+        {
+            if (settlement == null)
+                throw new ArgumentNullException(nameof(settlement));
+            if (lease == null)
+                throw new ArgumentNullException(nameof(lease));
+
+            var context = settlement.Context;
+            if (lease.CharacterId != context.CharacterId
+                || lease.AccountId != context.AccountId
+                || !InventoryContext.IsCurrentLease(
+                    lease,
+                    ownerSessionId,
+                    context.CharacterId))
+            {
+                throw new InvalidOperationException(
+                    "Death tower settlement requires the current owned inventory lease.");
+            }
+
             lock (lease.SyncRoot)
             {
-                if (goldGained > 0)
-                {
-                    if (!lease.Inventory.TryGrantGold(goldGained, carryLimit, out _, out updatedGold))
-                        FileLogger.Log($"[DeathTower] settlement gold skipped: cid={characterId} amount={goldGained}");
-                }
-                else
-                {
-                    updatedGold = lease.Inventory.GetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart)?.Count ?? 0;
-                }
-
-                for (var index = 0; index < rewardRollCount; index++)
-                {
-                    var rarity = rewardConfig.RollItemRarity(lcg);
-                    var itemId = MonsterDropConfig.ChooseEquipment(lcg, previousLevel, rarity);
-                    if (itemId <= 0)
-                        itemId = MonsterDropConfig.ChooseStackable(lcg, previousLevel, rarity);
-                    if (itemId <= 0)
-                        continue;
-
-                    if (!InventoryRewardGrantService.TryCreateAndInsert(
-                            lease.Inventory,
-                            itemId,
-                            ItemCreateReason.DungeonDrop,
-                            1,
-                            out var grant)
-                        || !grant.Success)
-                    {
-                        FileLogger.Log($"[DeathTower] settlement item skipped: inventory full/unsupported cid={characterId} item={itemId}");
-                        continue;
-                    }
-
-                    items.Add(new DeathTowerRewardItem(itemId, 1));
-                    AddChangedMainSlots(changedMainSlots, changedMainSlotSet, grant.Changes);
-                }
+                return CommitOwned(settlement, lease, ownerSessionId);
             }
+        }
 
-            AccountExperienceProgressSummary accountProgress = null;
-            if (expProgress.HonorExpGain > 0 && accountId > 0)
+        private DeathTowerSettlementResult CommitOwned(
+            DeathTowerSettlementPlan settlement,
+            InventoryLease lease,
+            Guid ownerSessionId)
+        {
+            var context = settlement.Context;
+            var inventory = lease.Inventory;
+            var requests = new List<InventoryRewardGrantRequest>();
+            var deliveredItems = new List<DeathTowerRewardItem>();
+            long requestedGold = 0;
+            foreach (var candidate in settlement.Candidates)
             {
-                var totals = new AccountExperienceProgressTotals(
-                    expProgress.TotalHonorExp,
-                    expProgress.TotalGrowthCapsuleExp,
-                    expProgress.GrowthCapsuleExpGain);
-                try
+                if (candidate.Kind == DeathTowerRewardCandidateKind.Gold)
                 {
-                    accountProgress = _accountExperience.BuildSummary(accountId, totals);
+                    requestedGold += Math.Max(0, candidate.AddInfo);
+                    continue;
                 }
-                catch (Exception ex)
+                if (candidate.Kind != DeathTowerRewardCandidateKind.Item
+                    || candidate.ItemId <= 0
+                    || candidate.AddInfo <= 0)
                 {
-                    FileLogger.Log($"[DeathTower] committed account progress summary failed: account={accountId} cid={characterId}: {ex.Message}");
+                    continue;
                 }
-                if (accountProgress != null)
-                {
-                    expProgress.Honor = accountProgress.Honor;
-                    expProgress.GrowthCapsule = accountProgress.GrowthCapsule;
-                }
+
+                requests.Add(InventoryRewardGrantRequest.Create(
+                    candidate.ItemId,
+                    candidate.AddInfo,
+                    ItemCreateReason.DungeonDrop));
+                deliveredItems.Add(new DeathTowerRewardItem(
+                    candidate.ItemId,
+                    candidate.AddInfo));
             }
 
-            var characterStateChanged = expProgress.NewLevel != expProgress.PreviousLevel
-                || expProgress.NewExp != expProgress.PreviousExp;
+            var currentGold = inventory.CountMainItem(0);
+            var carryLimit = Math.Max(
+                0,
+                InventoryGoldCarryLimitLoader.Load(context.CharacterId));
+            var grantedGold = (int)Math.Min(
+                Math.Max(0L, requestedGold),
+                Math.Max(0L, (long)carryLimit - currentGold));
+            if (grantedGold > 0)
+            {
+                requests.Insert(
+                    0,
+                    InventoryRewardGrantRequest.Create(
+                        0,
+                        grantedGold,
+                        ItemCreateReason.DungeonDrop));
+            }
+
+            if (!InventoryRewardGrantService.TryPlanBatch(
+                    inventory,
+                    requests,
+                    out var inventoryPlan))
+            {
+                throw new InvalidOperationException(
+                    $"Death tower reward inventory planning failed: " +
+                    $"{inventoryPlan?.Error.ToString() ?? "unknown"}.");
+            }
+
+            var snapshotPlan = new DungeonItemGrantBatchPlan
+            {
+                Success = true,
+                InventoryPlan = inventoryPlan,
+            };
+            if (!DungeonItemGrantMutationSnapshot.TryCapture(
+                    inventory,
+                    snapshotPlan,
+                    out var rollback))
+            {
+                throw new InvalidOperationException(
+                    "Death tower reward inventory snapshot failed.");
+            }
+
+            var committed = false;
+            InventoryRewardGrantBatchResult grantBatch = null;
+            ExperienceGrantResult experienceGrant = null;
+            try
+            {
+                if (!InventoryRewardGrantService.TryApplyPreparedBatch(
+                        inventory,
+                        inventoryPlan,
+                        out grantBatch)
+                    || !grantBatch.Success)
+                {
+                    throw new InvalidOperationException(
+                        $"Death tower reward inventory apply failed: " +
+                        $"{grantBatch?.Error.ToString() ?? "unknown"}.");
+                }
+
+                using (var connection = new SqliteConnection(_connectionString))
+                {
+                    connection.Open();
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        experienceGrant = _grantExperienceInTransaction(
+                            connection,
+                            transaction,
+                            context.CharacterId,
+                            context.AccountId,
+                            context.Level,
+                            context.Exp,
+                            settlement.RewardExp);
+                        if (RequiresPersistence(experienceGrant)
+                            && !experienceGrant.Persisted)
+                        {
+                            throw new InvalidOperationException(
+                                "Death tower experience persistence returned false.");
+                        }
+                        if (!InventoryPersistenceService.SaveDirtyInTransaction(
+                                connection,
+                                transaction,
+                                lease))
+                        {
+                            throw new InvalidOperationException(
+                                "Death tower inventory persistence returned false.");
+                        }
+                        if (!InventoryContext.IsCurrentLease(
+                                lease,
+                                ownerSessionId,
+                                context.CharacterId))
+                        {
+                            throw new InvalidOperationException(
+                                "Death tower inventory lease changed before commit.");
+                        }
+
+                        transaction.Commit();
+                        committed = true;
+                    }
+                }
+
+                inventory.ClearDirtyState();
+            }
+            catch
+            {
+                if (!committed)
+                    rollback.Restore(inventory, snapshotPlan);
+                throw;
+            }
+
+            var changedMainSlots = CollectChangedMainSlots(grantBatch?.Changes);
+            var updatedGold = inventory.CountMainItem(0);
+            var accountProgress = BuildAccountProgress(
+                context,
+                experienceGrant);
+            var characterStateChanged = experienceGrant.NewLevel
+                    != experienceGrant.PreviousLevel
+                || experienceGrant.NewExp != experienceGrant.PreviousExp;
 
             return new DeathTowerSettlementResult
             {
-                ClearedFloorCount = clearedFloorCount,
-                ExpGained = expGained,
-                GoldGained = goldGained,
+                ClearedFloorCount = settlement.ClearedFloorCount,
+                ExpGained = settlement.RewardExp,
+                GoldGained = grantedGold,
                 UpdatedGold = updatedGold,
-                PreviousLevel = previousLevel,
-                UpdatedLevel = expProgress.NewLevel,
-                NormalExpGained = expProgress.NormalExpGain,
-                HonorExpGained = expProgress.HonorExpGain,
-                LeveledUp = expProgress.LeveledUp,
+                PreviousLevel = context.Level,
+                UpdatedLevel = experienceGrant.NewLevel,
+                NormalExpGained = experienceGrant.NormalExpGain,
+                HonorExpGained = experienceGrant.HonorExpGain,
+                LeveledUp = experienceGrant.LeveledUp,
                 CharacterStateChanged = characterStateChanged,
                 AccountProgress = accountProgress,
                 ChangedMainSlots = changedMainSlots,
-                Items = items,
-                ExperienceGrant = expProgress,
+                Items = deliveredItems,
+                ExperienceGrant = experienceGrant,
             };
         }
 
-        private static uint CalculateExp(byte level, float weight)
+        internal static uint CalculateRewardExperience(
+            byte characterLevel,
+            int clearedFloorCount,
+            float floorWeight)
         {
-            if (weight <= 0)
+            if (clearedFloorCount <= 0 || floorWeight <= 0)
                 return 0;
-            var value = ExpTableProvider.GetExpRewardBase(level) * (double)weight;
-            if (value <= 0)
+
+            var value = MonsterRewardTable.GetBaseExp(characterLevel)
+                * (double)clearedFloorCount
+                * floorWeight;
+            if (value <= 0 || double.IsNaN(value))
                 return 0;
-            return value >= uint.MaxValue ? uint.MaxValue : (uint)value;
+            return (uint)Math.Min(MaximumRewardExperience, value);
+        }
+
+        private static DeathTowerRewardCandidate CreateCandidate(
+            DeathTowerRewardCandidateKind kind,
+            byte characterLevel,
+            byte difficulty,
+            float goldAmountWeight,
+            DnfLcg lcg)
+        {
+            if (kind == DeathTowerRewardCandidateKind.Gold)
+            {
+                var gold = CalculateGold(characterLevel, goldAmountWeight);
+                return gold > 0
+                    ? DeathTowerRewardCandidate.Gold(gold)
+                    : DeathTowerRewardCandidate.Empty();
+            }
+            if (kind == DeathTowerRewardCandidateKind.Item)
+            {
+                var card = ClearRewardGenerator.GenerateItemCard(
+                    characterLevel,
+                    difficulty,
+                    lcg);
+                return card.ItemId > 0 && card.StackCount > 0
+                    ? DeathTowerRewardCandidate.Item(
+                        card.ItemId,
+                        card.StackCount)
+                    : DeathTowerRewardCandidate.Empty();
+            }
+            return DeathTowerRewardCandidate.Empty();
         }
 
         private static int CalculateGold(byte level, float weight)
@@ -263,34 +393,71 @@ namespace DfoServer.Game.DeathTower
                 return 0;
             var baseGold = ExpTableProvider.GetMonsterGold(level, out _);
             var value = baseGold * (double)weight;
-            if (value <= 0)
+            if (value <= 0 || double.IsNaN(value))
                 return 0;
             return value >= int.MaxValue ? int.MaxValue : (int)value;
         }
 
-        private static void AddChangedMainSlots(
-            List<short> changedMainSlots,
-            HashSet<short> changedMainSlotSet,
-            InventoryMutationSet changes)
+        private AccountExperienceProgressSummary BuildAccountProgress(
+            DeathTowerSettlementContext context,
+            ExperienceGrantResult experienceGrant)
         {
-            if (changes == null)
-                return;
-
-            foreach (var change in changes.Slots)
+            if (experienceGrant == null
+                || experienceGrant.HonorExpGain == 0
+                || context.AccountId <= 0)
             {
-                if (change.ListType == InventoryListType.Main)
-                    AddChangedMainSlot(changedMainSlots, changedMainSlotSet, change.SlotIndex);
+                return null;
+            }
+
+            try
+            {
+                var totals = new AccountExperienceProgressTotals(
+                    experienceGrant.TotalHonorExp,
+                    experienceGrant.TotalGrowthCapsuleExp,
+                    experienceGrant.GrowthCapsuleExpGain);
+                var summary = _accountExperience.BuildSummary(
+                    context.AccountId,
+                    totals);
+                if (summary != null)
+                {
+                    experienceGrant.Honor = summary.Honor;
+                    experienceGrant.GrowthCapsule = summary.GrowthCapsule;
+                }
+                return summary;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[DeathTower] account progress projection failed: " +
+                    $"account={context.AccountId} cid={context.CharacterId} " +
+                    $"error={ex.Message}");
+                return null;
             }
         }
 
-        private static void AddChangedMainSlot(
-            List<short> changedMainSlots,
-            HashSet<short> changedMainSlotSet,
-            short slotIndex)
-        {
-            if (changedMainSlotSet.Add(slotIndex))
-                changedMainSlots.Add(slotIndex);
-        }
+        private static bool RequiresPersistence(ExperienceGrantResult result)
+            => result != null
+                && (result.LeveledUp
+                    || result.NormalExpGain > 0
+                    || result.NormalizedMaxLevelExp);
 
+        private static IReadOnlyList<short> CollectChangedMainSlots(
+            InventoryMutationSet changes)
+        {
+            if (changes == null || !changes.HasChanges)
+                return Array.Empty<short>();
+
+            var result = new List<short>();
+            var seen = new HashSet<short>();
+            foreach (var change in changes.Slots)
+            {
+                if (change.ListType == InventoryListType.Main
+                    && seen.Add(change.SlotIndex))
+                {
+                    result.Add(change.SlotIndex);
+                }
+            }
+            return result;
+        }
     }
 }

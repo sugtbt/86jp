@@ -35,7 +35,7 @@ namespace DfoServer.Game.Quests
             long missingHeld = 0;
             foreach (var item in seekItems)
             {
-                if (item.ItemId <= 0 || item.Count <= 0)
+                if (item.ItemId < 0 || item.Count <= 0)
                     continue;
 
                 var required = Math.Max(1, item.Count);

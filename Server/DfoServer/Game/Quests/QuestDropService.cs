@@ -4,6 +4,7 @@ using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Handlers;
+using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -16,6 +17,7 @@ namespace DfoServer.Game.Quests
     public sealed class QuestDropService
     {
         private const string ProtocolLogName = "GameProtocol";
+        private const int MaxCommitAttempts = 4;
 
         private readonly QuestDropNotificationBatcher _notificationBatcher;
         private readonly string _connectionString;
@@ -48,168 +50,540 @@ namespace DfoServer.Game.Quests
                 ?? new DungeonItemAcquisitionService(new DropService());
         }
 
-        public async Task CheckMonsterDrop(EnhancedClientSession session, int monsterCode)
+        public Task CheckMonsterDrop(
+            EnhancedClientSession session,
+            DungeonRun expectedRun,
+            DungeonEventEnvelope source,
+            int monsterCode)
         {
-            var run = session.Player.CurrentRun;
-            if (run == null || run.DungeonId <= 0 || monsterCode <= 0) return;
-
-            await CheckDrop(session, monsterCode, "monster", activeQuestIds =>
-                QuestDropProvider.CheckMonsterDrop(
-                    activeQuestIds, run.DungeonId, run.Difficulty, monsterCode));
-        }
-
-        public async Task CheckPassiveObjectDrop(EnhancedClientSession session, int objectCode)
-        {
-            var run = session.Player.CurrentRun;
-            if (run == null || run.DungeonId <= 0 || objectCode <= 0) return;
-
-            await CheckDrop(session, objectCode, "passive", activeQuestIds =>
-                QuestDropProvider.CheckEnemyDrop(
-                    activeQuestIds,
-                    run.DungeonId,
-                    run.Difficulty,
-                    objectCode,
-                    QuestDropProvider.EnemyTypePassiveObject));
-        }
-
-        public Task CheckAiCharacterDrop(EnhancedClientSession session, int aiCharacterCode)
-        {
-            var run = session?.Player?.CurrentRun;
-            if (run == null || run.DungeonId <= 0 || aiCharacterCode <= 0)
-                return Task.CompletedTask;
-
-            return CheckDrop(session, aiCharacterCode, "ai-character", activeQuestIds =>
-                QuestDropProvider.CheckEnemyDrop(
-                    activeQuestIds,
-                    run.DungeonId,
-                    run.Difficulty,
-                    aiCharacterCode,
-                    QuestDropProvider.EnemyTypeAiCharacter));
-        }
-
-        public Task CheckDungeonClearReward(EnhancedClientSession session)
-        {
-            var run = session?.Player?.CurrentRun;
-            if (run == null || run.DungeonId <= 0)
+            if (expectedRun == null || expectedRun.DungeonId <= 0 || monsterCode <= 0)
                 return Task.CompletedTask;
 
             return CheckDrop(
                 session,
-                run.DungeonId,
+                expectedRun,
+                source,
+                monsterCode,
+                "monster",
+                requireRoomIdentity: true,
+                getCandidates: activeQuestIds =>
+                    QuestDropProvider.CheckMonsterDrop(
+                        activeQuestIds,
+                        expectedRun.DungeonId,
+                        expectedRun.Difficulty,
+                        monsterCode));
+        }
+
+        public Task CheckPassiveObjectDrop(
+            EnhancedClientSession session,
+            DungeonRun expectedRun,
+            DungeonEventEnvelope source,
+            int objectCode)
+        {
+            if (expectedRun == null || expectedRun.DungeonId <= 0 || objectCode <= 0)
+                return Task.CompletedTask;
+
+            return CheckDrop(
+                session,
+                expectedRun,
+                source,
+                objectCode,
+                "passive",
+                requireRoomIdentity: true,
+                getCandidates: activeQuestIds =>
+                    QuestDropProvider.CheckEnemyDrop(
+                        activeQuestIds,
+                        expectedRun.DungeonId,
+                        expectedRun.Difficulty,
+                        objectCode,
+                        QuestDropProvider.EnemyTypePassiveObject));
+        }
+
+        public Task CheckAiCharacterDrop(
+            EnhancedClientSession session,
+            DungeonRun expectedRun,
+            DungeonEventEnvelope source,
+            int aiCharacterCode)
+        {
+            if (expectedRun == null
+                || expectedRun.DungeonId <= 0
+                || aiCharacterCode <= 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            return CheckDrop(
+                session,
+                expectedRun,
+                source,
+                aiCharacterCode,
+                "ai-character",
+                requireRoomIdentity: true,
+                getCandidates: activeQuestIds =>
+                    QuestDropProvider.CheckEnemyDrop(
+                        activeQuestIds,
+                        expectedRun.DungeonId,
+                        expectedRun.Difficulty,
+                        aiCharacterCode,
+                        QuestDropProvider.EnemyTypeAiCharacter));
+        }
+
+        public Task CheckDungeonClearReward(
+            EnhancedClientSession session,
+            DungeonRun expectedRun,
+            DungeonEventEnvelope source)
+        {
+            if (expectedRun == null || expectedRun.DungeonId <= 0)
+                return Task.CompletedTask;
+
+            return CheckDrop(
+                session,
+                expectedRun,
+                source,
+                expectedRun.DungeonId,
                 "dungeon-clear",
-                activeQuestIds => QuestDropProvider.CheckClearReward(
+                requireRoomIdentity: false,
+                getCandidates: activeQuestIds => QuestDropProvider.CheckClearReward(
                     activeQuestIds,
-                    run.DungeonId,
-                    run.Difficulty));
+                    expectedRun.DungeonId,
+                    expectedRun.Difficulty));
         }
 
         private Task CheckDrop(
             EnhancedClientSession session,
+            DungeonRun expectedRun,
+            DungeonEventEnvelope source,
             int sourceCode,
             string sourceName,
+            bool requireRoomIdentity,
             Func<ICollection<int>, List<QuestDropCandidate>> getCandidates)
         {
-            var run = session?.Player?.CurrentRun;
-            if (run == null || !run.RewardPolicy.AllowsQuestDrops)
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (!MatchesExpectedRun(
+                    session?.Player?.CurrentRun,
+                    expectedRun,
+                    characterId,
+                    source,
+                    requireRoomIdentity))
+            {
+                LogStaleEvent(session, expectedRun, source, sourceName, sourceCode);
+                return Task.CompletedTask;
+            }
+            if (!expectedRun.RewardPolicy.AllowsQuestDrops)
                 return Task.CompletedTask;
 
-            var activeQuestIds = LoadActiveQuestIds(session, $"{sourceName}={sourceCode}");
+            var activeQuestIds = LoadEligibleQuestIds(
+                session,
+                expectedRun,
+                $"{sourceName}={sourceCode}");
             if (activeQuestIds == null || activeQuestIds.Count == 0)
                 return Task.CompletedTask;
 
             var candidates = getCandidates(activeQuestIds);
             if (candidates == null) return Task.CompletedTask;
 
-            if (!InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
-                || !lease.IsOwnedBy(session.SessionId))
+            if (!MatchesExpectedRun(
+                    session.Player.CurrentRun,
+                    expectedRun,
+                    characterId,
+                    source,
+                    requireRoomIdentity))
+            {
+                LogStaleEvent(session, expectedRun, source, sourceName, sourceCode);
+                return Task.CompletedTask;
+            }
+
+            if (!InventoryContext.TryGetOwnedLease(
+                    session.SessionId,
+                    session.Player.CharacterId,
+                    out var lease))
             {
                 FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: skipped because online inventory is missing cid={session.Player.CharacterId}");
                 return Task.CompletedTask;
             }
 
-            var grantedItemIds = new HashSet<int>();
-            var grantedSlots = new HashSet<short>();
-
-            lock (lease.SyncRoot)
+            var committed = CommitAutomaticDrops(
+                lease,
+                session.SessionId,
+                characterId,
+                source.SourceEventId,
+                expectedRun.QuestSnapshot,
+                candidates,
+                () => MatchesExpectedRun(
+                    session.Player.CurrentRun,
+                    expectedRun,
+                    characterId,
+                    source,
+                    requireRoomIdentity));
+            if (!committed.Committed)
             {
-                var inventory = lease.Inventory;
-                var requests = new List<DungeonItemGrantRequest>();
-                var projectedHeldCounts = new Dictionary<int, int>();
-                foreach (var candidate in candidates)
-                {
-                    if (!projectedHeldCounts.TryGetValue(
-                            candidate.ItemId,
-                            out var currentHeld))
-                    {
-                        currentHeld = inventory.CountMainItem(candidate.ItemId);
-                    }
-
-                    int dropCount = ClampDropCount(
-                        candidate,
-                        currentHeld,
-                        _rollDrop(candidate, currentHeld));
-                    if (dropCount <= 0)
-                        continue;
-
-                    requests.Add(new DungeonItemGrantRequest
-                    {
-                        QuestId = candidate.QuestId,
-                        ItemTemplateId = candidate.ItemId,
-                        Count = dropCount,
-                        Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
-                    });
-                    projectedHeldCounts[candidate.ItemId] =
-                        currentHeld > int.MaxValue - dropCount
-                            ? int.MaxValue
-                            : currentHeld + dropCount;
-                }
-
-                if (requests.Count == 0)
-                    return Task.CompletedTask;
-
-                if (!_itemAcquisition.TryGrantItems(
-                        inventory,
-                        requests,
-                        out var grants))
+                if (!string.IsNullOrEmpty(committed.Error))
                 {
                     FileLogger.Log(
-                        $"[{ProtocolLogName}] QUEST_DROP: batch grant failed " +
-                        $"{sourceName}={sourceCode} count={requests.Count} error={grants?.Error}");
-                    return Task.CompletedTask;
+                        $"[{ProtocolLogName}] QUEST_DROP: atomic grant skipped " +
+                        $"{sourceName}={sourceCode} error={committed.Error}");
                 }
-
-                foreach (var entry in grants.Entries)
-                {
-                    var grant = entry?.Grant;
-                    if (entry?.Request == null
-                        || grant == null
-                        || grant.SlotIndex < 0)
-                    {
-                        continue;
-                    }
-
-                    grantedItemIds.Add(entry.Request.ItemTemplateId);
-                    grantedSlots.Add(grant.SlotIndex);
-                }
-            }
-
-            if (grantedItemIds.Count <= 0)
                 return Task.CompletedTask;
+            }
 
-            if (session.GameSession?.QuestManager == null)
+            var grantedSlots = new HashSet<short>();
+            foreach (var entry in committed.Grants.Entries)
             {
-                FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP: granted {grantedItemIds.Count} item kinds but quest progress sync skipped because QuestManager is missing");
+                var grant = entry?.Grant;
+                if (entry?.Request == null
+                    || grant == null
+                    || grant.SlotIndex < 0)
+                {
+                    continue;
+                }
+
+                grantedSlots.Add(grant.SlotIndex);
             }
-            else
-            {
-                session.GameSession.QuestManager
-                    .RecalibrateItemSeekingQuestProgressWithoutNotification(
-                        grantedItemIds);
-            }
+
+            if (grantedSlots.Count <= 0)
+                return Task.CompletedTask;
 
             // Coalesce only client projections after online inventory and quest state settle.
             _notificationBatcher.Queue(session, grantedSlots);
             return Task.CompletedTask;
+        }
+
+        internal QuestDropCommitResult CommitAutomaticDrops(
+            InventoryLease lease,
+            Guid sessionId,
+            int characterId,
+            Guid sourceEventId,
+            QuestRunSnapshot snapshot,
+            IReadOnlyList<QuestDropCandidate> candidates,
+            Func<bool> isStillCurrent)
+        {
+            if (lease == null
+                || sessionId == Guid.Empty
+                || characterId <= 0
+                || sourceEventId == Guid.Empty
+                || snapshot == null
+                || candidates == null
+                || isStillCurrent == null)
+            {
+                return QuestDropCommitResult.Fail("invalid atomic drop request");
+            }
+
+            var connectionString = ResolveConnectionString();
+            lock (lease.SyncRoot)
+            {
+                if (!InventoryContext.IsCurrentLease(
+                        lease,
+                        sessionId,
+                        characterId)
+                    || !isStillCurrent())
+                {
+                    return QuestDropCommitResult.Fail(
+                        "inventory owner or dungeon run changed");
+                }
+
+                var inventory = lease.Inventory;
+                var requests = BuildGrantRequests(inventory, snapshot, candidates);
+                if (requests.Count == 0)
+                    return QuestDropCommitResult.Noop;
+
+                for (var attempt = 0; attempt < MaxCommitAttempts; attempt++)
+                {
+                    DungeonItemGrantBatchPlan plan = null;
+                    DungeonItemGrantMutationSnapshot rollback = null;
+                    var committed = false;
+                    try
+                    {
+                        using (var connection = new SqliteConnection(connectionString))
+                        {
+                            connection.Open();
+                            using (var transaction = connection.BeginTransaction(
+                                       deferred: false))
+                            {
+                                var active = QuestRepository.LoadActiveQuests(
+                                    connection,
+                                    transaction,
+                                    characterId);
+                                if (!TryBuildEligibleActivations(
+                                        active,
+                                        requests,
+                                        out var eligibleActivations))
+                                {
+                                    return QuestDropCommitResult.Fail(
+                                        "quest activation changed before grant");
+                                }
+
+                                if (!_itemAcquisition.TryPlanItems(
+                                        inventory,
+                                        requests,
+                                        out plan))
+                                {
+                                    return QuestDropCommitResult.Fail(
+                                        $"inventory planning failed: {plan?.Error}");
+                                }
+                                if (!DungeonItemGrantMutationSnapshot.TryCapture(
+                                        inventory,
+                                        plan,
+                                        out rollback))
+                                {
+                                    return QuestDropCommitResult.Fail(
+                                        "inventory rollback snapshot failed");
+                                }
+                                if (!_itemAcquisition.TryApplyPlannedItems(
+                                        inventory,
+                                        plan,
+                                        out var grants))
+                                {
+                                    rollback.Restore(inventory, plan);
+                                    return QuestDropCommitResult.Fail(
+                                        $"inventory apply failed: {grants?.Error}");
+                                }
+
+                                var itemFilter = CollectGrantedItemIds(requests);
+                                var heldCounts = BuildSeekingHeldCounts(
+                                    inventory,
+                                    active,
+                                    eligibleActivations,
+                                    itemFilter);
+                                var progress = new QuestProgressApplicationService(
+                                    connectionString).ApplyInTransaction(
+                                    connection,
+                                    transaction,
+                                    new QuestProgressApplicationRequest
+                                    {
+                                        CharacterId = characterId,
+                                        Operation = QuestProgressOperation.SeekingItems,
+                                        SourceEventId = sourceEventId,
+                                        EligibleQuestActivations = eligibleActivations,
+                                        ItemFilter = itemFilter,
+                                        HeldItemCounts = heldCounts,
+                                    });
+                                if (progress.RetryRequired)
+                                {
+                                    rollback.Restore(inventory, plan);
+                                    transaction.Rollback();
+                                    if (attempt + 1 < MaxCommitAttempts)
+                                        continue;
+                                    return QuestDropCommitResult.Fail(
+                                        progress.Error ??
+                                        "quest progress CAS retry exhausted");
+                                }
+                                if (!progress.Success || progress.DuplicateEvent)
+                                {
+                                    rollback.Restore(inventory, plan);
+                                    transaction.Rollback();
+                                    return progress.DuplicateEvent
+                                        ? QuestDropCommitResult.Duplicate
+                                        : QuestDropCommitResult.Fail(
+                                            progress.Error ??
+                                            "quest progress update failed");
+                                }
+
+                                if (!InventoryPersistenceService
+                                        .SaveDirtyInTransaction(
+                                            connection,
+                                            transaction,
+                                            lease))
+                                {
+                                    throw new InvalidOperationException(
+                                        "inventory persistence returned false");
+                                }
+                                if (!InventoryContext.IsCurrentLease(
+                                        lease,
+                                        sessionId,
+                                        characterId)
+                                    || !isStillCurrent())
+                                {
+                                    throw new InvalidOperationException(
+                                        "inventory owner or dungeon run changed before commit");
+                                }
+
+                                transaction.Commit();
+                                committed = true;
+                                inventory.ClearDirtyState();
+                                return QuestDropCommitResult.Success(grants);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!committed && rollback != null)
+                            rollback.Restore(inventory, plan);
+                        return QuestDropCommitResult.Fail(ex.Message);
+                    }
+                }
+            }
+
+            return QuestDropCommitResult.Fail(
+                "quest drop commit retry exhausted");
+        }
+
+        private List<DungeonItemGrantRequest> BuildGrantRequests(
+            InventoryService inventory,
+            QuestRunSnapshot snapshot,
+            IReadOnlyList<QuestDropCandidate> candidates)
+        {
+            var requests = new List<DungeonItemGrantRequest>();
+            var projectedHeldCounts = new Dictionary<int, int>();
+            foreach (var candidate in candidates)
+            {
+                if (candidate.QuestId <= 0
+                    || candidate.QuestId > ushort.MaxValue
+                    || !snapshot.TryGet(
+                        (ushort)candidate.QuestId,
+                        out var frozen)
+                    || !frozen.ActivationId.IsValid)
+                {
+                    continue;
+                }
+
+                if (!projectedHeldCounts.TryGetValue(
+                        candidate.ItemId,
+                        out var currentHeld))
+                {
+                    currentHeld = inventory.CountMainItem(candidate.ItemId);
+                }
+
+                var dropCount = ClampDropCount(
+                    candidate,
+                    currentHeld,
+                    _rollDrop(candidate, currentHeld));
+                if (dropCount <= 0)
+                    continue;
+
+                requests.Add(new DungeonItemGrantRequest
+                {
+                    QuestId = candidate.QuestId,
+                    QuestActivationId = frozen.ActivationId,
+                    ItemTemplateId = candidate.ItemId,
+                    Count = dropCount,
+                    Source = DungeonItemAcquisitionSource.QuestAutomaticDrop,
+                });
+                projectedHeldCounts[candidate.ItemId] =
+                    currentHeld > int.MaxValue - dropCount
+                        ? int.MaxValue
+                        : currentHeld + dropCount;
+            }
+            return requests;
+        }
+
+        private static bool TryBuildEligibleActivations(
+            IReadOnlyList<ActiveQuest> active,
+            IReadOnlyList<DungeonItemGrantRequest> requests,
+            out IReadOnlyDictionary<ushort, QuestActivationId> eligible)
+        {
+            var expected = new Dictionary<ushort, QuestActivationId>();
+            foreach (var request in requests)
+            {
+                if (request == null
+                    || request.QuestId <= 0
+                    || request.QuestId > ushort.MaxValue
+                    || !request.QuestActivationId.IsValid)
+                {
+                    eligible = null;
+                    return false;
+                }
+
+                var questId = (ushort)request.QuestId;
+                if (expected.TryGetValue(questId, out var existing)
+                    && !existing.Equals(request.QuestActivationId))
+                {
+                    eligible = null;
+                    return false;
+                }
+                expected[questId] = request.QuestActivationId;
+            }
+
+            foreach (var pair in expected)
+            {
+                var matched = false;
+                if (active != null)
+                {
+                    foreach (var quest in active)
+                    {
+                        if (quest != null
+                            && quest.QuestId == pair.Key
+                            && quest.ActivationId.Equals(pair.Value))
+                        {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matched)
+                {
+                    eligible = null;
+                    return false;
+                }
+            }
+
+            eligible = expected;
+            return expected.Count > 0;
+        }
+
+        private static HashSet<int> CollectGrantedItemIds(
+            IReadOnlyList<DungeonItemGrantRequest> requests)
+        {
+            var itemIds = new HashSet<int>();
+            foreach (var request in requests)
+            {
+                if (request != null && request.ItemTemplateId > 0)
+                    itemIds.Add(request.ItemTemplateId);
+            }
+            return itemIds;
+        }
+
+        private static IReadOnlyDictionary<int, int> BuildSeekingHeldCounts(
+            InventoryService inventory,
+            IReadOnlyList<ActiveQuest> active,
+            IReadOnlyDictionary<ushort, QuestActivationId> eligible,
+            ISet<int> itemFilter)
+        {
+            var relevantItemIds = new HashSet<int>();
+            if (active != null && eligible != null)
+            {
+                foreach (var quest in active)
+                {
+                    if (quest == null
+                        || !eligible.TryGetValue(
+                            quest.QuestId,
+                            out var expectedActivation)
+                        || !expectedActivation.Equals(quest.ActivationId))
+                    {
+                        continue;
+                    }
+
+                    var seeking = QuestData.GetSeekingConsumeItems(quest.QuestId);
+                    var matchesFilter = itemFilter == null || itemFilter.Count == 0;
+                    foreach (var item in seeking)
+                    {
+                        if (item.ItemId < 0 || item.Count <= 0)
+                            continue;
+                        if (!matchesFilter && itemFilter.Contains(item.ItemId))
+                            matchesFilter = true;
+                    }
+                    if (!matchesFilter)
+                        continue;
+                    foreach (var item in seeking)
+                    {
+                        if (item.ItemId >= 0 && item.Count > 0)
+                            relevantItemIds.Add(item.ItemId);
+                    }
+                }
+            }
+
+            var heldCounts = new Dictionary<int, int>();
+            foreach (var itemId in relevantItemIds)
+                heldCounts[itemId] = inventory.CountMainItem(itemId);
+            return heldCounts;
+        }
+
+        private string ResolveConnectionString()
+        {
+            return !string.IsNullOrWhiteSpace(_connectionString)
+                ? _connectionString
+                : SqliteDatabaseBootstrap.Initialize(
+                    ServerPaths.DatabasePath,
+                    ServerPaths.SchemaFilePath);
         }
 
         internal static int ClampDropCount(
@@ -228,20 +602,79 @@ namespace DfoServer.Game.Quests
             return Math.Min(requestedCount, effectiveLimit - currentHeld);
         }
 
-        private HashSet<int> LoadActiveQuestIds(
+        internal static bool MatchesExpectedRun(
+            DungeonRun currentRun,
+            DungeonRun expectedRun,
+            int characterId,
+            DungeonEventEnvelope source,
+            bool requireRoomIdentity)
+        {
+            if (currentRun == null
+                || expectedRun == null
+                || source == null
+                || characterId <= 0
+                || !ReferenceEquals(currentRun, expectedRun)
+                || !expectedRun.Matches(source.RunIdentity)
+                || (source.AffectedPlayerId.HasValue
+                    && source.AffectedPlayerId.Value != characterId))
+            {
+                return false;
+            }
+
+            return !requireRoomIdentity
+                || (source.RoomInstanceId.HasValue
+                    && source.RoomInstanceId.Value > 0
+                    && expectedRun.CurrentRoomInstanceId
+                        == source.RoomInstanceId.Value);
+        }
+
+        internal static HashSet<int> FilterEligibleQuestActivations(
+            QuestRunSnapshot snapshot,
+            IEnumerable<ActiveQuest> activeQuests)
+        {
+            if (snapshot == null || snapshot.Count == 0 || activeQuests == null)
+                return null;
+
+            var eligible = new HashSet<int>();
+            foreach (var activeQuest in activeQuests)
+            {
+                if (activeQuest == null
+                    || !snapshot.TryGet(activeQuest.QuestId, out var frozen))
+                {
+                    continue;
+                }
+
+                if (!frozen.ActivationId.IsValid
+                    || !activeQuest.ActivationId.IsValid
+                    || !frozen.ActivationId.Equals(activeQuest.ActivationId))
+                {
+                    continue;
+                }
+
+                eligible.Add(activeQuest.QuestId);
+            }
+            return eligible.Count > 0 ? eligible : null;
+        }
+
+        private HashSet<int> LoadEligibleQuestIds(
             EnhancedClientSession session,
+            DungeonRun run,
             string source)
         {
+            var snapshot = run?.QuestSnapshot ?? QuestRunSnapshot.Empty;
+            if (snapshot.Count == 0)
+                return null;
+
             try
             {
                 var connStr = !string.IsNullOrWhiteSpace(_connectionString)
                     ? _connectionString
                     : SqliteDatabaseBootstrap.Initialize(
                         ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
-                var quests = QuestService.LoadActiveQuests(connStr, session.Player.CharacterId);
-                return quests.Count > 0
-                    ? new HashSet<int>(quests.ConvertAll(q => (int)q.QuestId))
-                    : null;
+                var quests = QuestService.LoadActiveQuests(
+                    connStr,
+                    session.Player.CharacterId);
+                return FilterEligibleQuestActivations(snapshot, quests);
             }
             catch (Exception ex)
             {
@@ -250,5 +683,51 @@ namespace DfoServer.Game.Quests
             }
         }
 
+        private static void LogStaleEvent(
+            EnhancedClientSession session,
+            DungeonRun expectedRun,
+            DungeonEventEnvelope source,
+            string sourceName,
+            int sourceCode)
+        {
+            var current = session?.Player?.CurrentRun;
+            FileLogger.Log(
+                $"[{ProtocolLogName}] QUEST_DROP stale event rejected: " +
+                $"cid={session?.Player?.CharacterId ?? 0} " +
+                $"source={sourceName}:{sourceCode} " +
+                $"expectedDungeon={expectedRun?.DungeonId ?? 0} " +
+                $"expectedRun={expectedRun?.RunId ?? 0}/{expectedRun?.RunGeneration ?? 0} " +
+                $"currentDungeon={current?.DungeonId ?? 0} " +
+                $"currentRun={current?.RunId ?? 0}/{current?.RunGeneration ?? 0} " +
+                $"event={source?.SourceEventId.ToString("N") ?? "none"}");
+        }
+
+    }
+
+    internal sealed class QuestDropCommitResult
+    {
+        internal static QuestDropCommitResult Noop { get; } =
+            new QuestDropCommitResult();
+        internal static QuestDropCommitResult Duplicate { get; } =
+            new QuestDropCommitResult { DuplicateEvent = true };
+
+        internal bool Committed { get; private set; }
+        internal bool DuplicateEvent { get; private set; }
+        internal DungeonItemGrantBatchResult Grants { get; private set; }
+        internal string Error { get; private set; } = string.Empty;
+
+        internal static QuestDropCommitResult Success(
+            DungeonItemGrantBatchResult grants)
+            => new QuestDropCommitResult
+            {
+                Committed = true,
+                Grants = grants,
+            };
+
+        internal static QuestDropCommitResult Fail(string error)
+            => new QuestDropCommitResult
+            {
+                Error = error ?? string.Empty,
+            };
     }
 }

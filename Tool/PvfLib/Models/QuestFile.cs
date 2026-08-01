@@ -55,6 +55,7 @@ namespace PvfLib
         #region 关联
 
         public System.Collections.Generic.List<string> PreRequiredQuestGroups { get; set; }
+        public System.Collections.Generic.List<string> PreRequiredQuestAnswerGroups { get; set; }
         public string PreRequiredQuestAnswer { get; set; }
         public string Dialog { get; set; }
         public string MonsterRewardItem { get; set; }
@@ -66,6 +67,9 @@ namespace PvfLib
         public string RelationQuest { get; set; }
         public string ExceptionQuest { get; set; }
         public string CollisionQuest { get; set; }
+        public System.Collections.Generic.List<string> CollisionQuestGroups { get; set; }
+        public string AccountCollisionQuest { get; set; }
+        public System.Collections.Generic.List<string> AccountCollisionQuestGroups { get; set; }
         public string ExposedByNpc { get; set; }
         public string FirstExposedByNpc { get; set; }
         public string TargetCharacter { get; set; }
@@ -136,6 +140,9 @@ namespace PvfLib
                             ? data : qst.PreRequiredQuest + " " + data;
                         break;
                     case "pre required quest answer":
+                        if (qst.PreRequiredQuestAnswerGroups == null)
+                            qst.PreRequiredQuestAnswerGroups = new System.Collections.Generic.List<string>();
+                        qst.PreRequiredQuestAnswerGroups.Add(data);
                         qst.PreRequiredQuestAnswer = string.IsNullOrEmpty(qst.PreRequiredQuestAnswer)
                             ? data : qst.PreRequiredQuestAnswer + " " + data;
                         break;
@@ -153,7 +160,20 @@ namespace PvfLib
                     case "substitutive names": qst.SubstitutiveNames = data; break;
                     case "relation quest": qst.RelationQuest = data; break;
                     case "exception quest": qst.ExceptionQuest = data; break;
-                    case "collision quest": qst.CollisionQuest = data; break;
+                    case "collision quest":
+                        if (qst.CollisionQuestGroups == null)
+                            qst.CollisionQuestGroups = new System.Collections.Generic.List<string>();
+                        qst.CollisionQuestGroups.Add(data);
+                        qst.CollisionQuest = string.IsNullOrEmpty(qst.CollisionQuest)
+                            ? data : qst.CollisionQuest + " " + data;
+                        break;
+                    case "account collision quest":
+                        if (qst.AccountCollisionQuestGroups == null)
+                            qst.AccountCollisionQuestGroups = new System.Collections.Generic.List<string>();
+                        qst.AccountCollisionQuestGroups.Add(data);
+                        qst.AccountCollisionQuest = string.IsNullOrEmpty(qst.AccountCollisionQuest)
+                            ? data : qst.AccountCollisionQuest + " " + data;
+                        break;
                     case "exposed by npc": qst.ExposedByNpc = data; break;
                     case "first exposed by npc": qst.FirstExposedByNpc = data; break;
                     case "target character": qst.TargetCharacter = data; break;

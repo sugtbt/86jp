@@ -154,6 +154,54 @@ namespace DfoServer.Game.Inventory
             }
         }
 
+        public static bool TryGetOwnedLease(
+            Guid sessionId,
+            int characterId,
+            out InventoryLease lease)
+        {
+            lease = null;
+            if (sessionId == Guid.Empty || characterId <= 0)
+                return false;
+
+            lock (SyncRoot)
+            {
+                if (!SessionOwnership.TryGetValue(sessionId, out var ownedCharacterId)
+                    || ownedCharacterId != characterId
+                    || !CharacterLeases.TryGetValue(characterId, out var current)
+                    || !current.IsOwnedBy(sessionId))
+                {
+                    return false;
+                }
+
+                lease = current;
+                return true;
+            }
+        }
+
+        public static bool IsCurrentLease(
+            InventoryLease lease,
+            Guid sessionId,
+            int characterId)
+        {
+            if (lease == null
+                || sessionId == Guid.Empty
+                || characterId <= 0
+                || lease.CharacterId != characterId
+                || !lease.IsOwnedBy(sessionId))
+            {
+                return false;
+            }
+
+            lock (SyncRoot)
+            {
+                return SessionOwnership.TryGetValue(sessionId, out var ownedCharacterId)
+                    && ownedCharacterId == characterId
+                    && CharacterLeases.TryGetValue(characterId, out var current)
+                    && ReferenceEquals(current, lease)
+                    && current.Version == lease.Version;
+            }
+        }
+
         public static IReadOnlyList<InventoryLease> GetLeasesSnapshot()
         {
             lock (SyncRoot)

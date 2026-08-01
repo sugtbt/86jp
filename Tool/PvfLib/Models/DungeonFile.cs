@@ -22,7 +22,7 @@ namespace PvfLib
     {
         public int SelectCount { get; set; }
         public bool Regenerate { get; set; }
-        public int MinimapIcon { get; set; }
+        public int MinimapIcon { get; set; } = -1;
         public List<RidableObject> Objects { get; set; } = new List<RidableObject>();
     }
 
@@ -33,6 +33,40 @@ namespace PvfLib
         public int Count { get; set; }
         public int GroupId { get; set; }
         public int GroupRequired { get; set; }
+    }
+
+    public class DungeonRequiredItem
+    {
+        public int ItemId { get; set; }
+        public int Count { get; set; }
+        public bool ConsumeOnEntry { get; set; }
+    }
+
+    public class DeathTowerStage
+    {
+        public int Stage { get; set; }
+        public int MapId { get; set; }
+    }
+
+    public class TournamentRewardExperience
+    {
+        public int CompletedRounds { get; set; }
+        public long Experience { get; set; }
+    }
+
+    public class TournamentResultCard
+    {
+        public int ResultKey { get; set; }
+        public int GoldWeight { get; set; }
+        public int ItemWeight { get; set; }
+        public int EmptyWeight { get; set; }
+    }
+
+    public class TournamentRewardItemRate
+    {
+        public int ItemId { get; set; }
+        public int Weight { get; set; }
+        public int Count { get; set; }
     }
 
     public class WarpMapConditionEntry
@@ -73,6 +107,8 @@ namespace PvfLib
         public int[] SealDoorPos { get; set; }
         public int[] QuestConnection { get; set; }          // [flag, questId, value]
         public RidableObjectScript RidableScript { get; set; }
+        public List<RidableObjectScript> RidableScripts { get; set; } =
+            new List<RidableObjectScript>();
         public List<ClearConditionEntry> ClearConditions { get; set; } = new List<ClearConditionEntry>();
         public List<MazeMinimapIconInfo> MinimapIcons { get; set; } = new List<MazeMinimapIconInfo>();
         public int EventMonsterRandomMap { get; set; } = -1;
@@ -142,6 +178,7 @@ namespace PvfLib
         public int EventDungeonDifficulty { get; set; } = -1;
         public int EventDungeonCof { get; set; } = -1;
         public int AdjustMobExpByLevel { get; set; } = -1;
+        public int BloodDungeonType { get; set; } = -1;
         public int BloodMaxRound { get; set; } = -1;
         public int MobLevelCharacLevelReplaceFlag { get; set; } = -1;
 
@@ -160,7 +197,7 @@ namespace PvfLib
         public int BattleSpawnTime { get; set; } = -1;
         public int PlayerKc { get; set; } = -1;
         public int TournamentRoundFatigue { get; set; } = -1;
-        public int TournamentClearRewardGoldRate { get; set; } = -1;
+        public float TournamentClearRewardGoldRate { get; set; } = -1f;
         public int MonsterRandomAppearOnly { get; set; } = -1;
         public int RemainMonsterCountVisible { get; set; } = -1;
 
@@ -211,6 +248,12 @@ namespace PvfLib
         public string RequiredItem { get; set; }
         public string EventRequiredItem { get; set; }
         public string AddedRequiredItem { get; set; }
+        public List<DungeonRequiredItem> RequiredItems { get; set; } =
+            new List<DungeonRequiredItem>();
+        public List<DungeonRequiredItem> EventRequiredItems { get; set; } =
+            new List<DungeonRequiredItem>();
+        public List<DungeonRequiredItem> AddedRequiredItems { get; set; } =
+            new List<DungeonRequiredItem>();
         public string CoinInfo { get; set; }
         public string Schedule { get; set; }
         public string EventMonster { get; set; }
@@ -224,9 +267,21 @@ namespace PvfLib
         public string TowerHighSkillInitialCoolTime { get; set; }
         public string TowerHighSkillInitialCoolTimeRate { get; set; }
         public string DeathTowerMapIndexes { get; set; }
+        public List<DeathTowerStage> DeathTowerStages { get; set; } =
+            new List<DeathTowerStage>();
+        public bool DeathTowerMapIndexesMalformed { get; set; }
         public string ResultCard { get; set; }
         public string RewardItemRate { get; set; }
+        public List<TournamentResultCard> TournamentResultCards { get; set; } =
+            new List<TournamentResultCard>();
+        public List<TournamentRewardItemRate> TournamentRewardItemRates { get; set; } =
+            new List<TournamentRewardItemRate>();
+        public bool TournamentResultCardMalformed { get; set; }
+        public bool TournamentRewardItemRateMalformed { get; set; }
         public string TournamentClearRewardExp { get; set; }
+        public List<TournamentRewardExperience> TournamentClearRewardExperiences { get; set; } =
+            new List<TournamentRewardExperience>();
+        public bool TournamentRewardExperienceMalformed { get; set; }
         public string ClearMap { get; set; }
         public string ClearRewardItem { get; set; }
         public string BossRoomEntranceCondition { get; set; }
@@ -498,13 +553,20 @@ namespace PvfLib
                     case "battle spawn time": dgn.BattleSpawnTime = ParseInt(data); break;
                     case "player kc": dgn.PlayerKc = ParseInt(data); break;
                     case "tournament round fatigue": dgn.TournamentRoundFatigue = ParseInt(data); break;
-                    case "tournament clear reward gold rate": dgn.TournamentClearRewardGoldRate = ParseInt(data); break;
+                    case "tournament clear reward gold rate":
+                        dgn.TournamentClearRewardGoldRate = ParseFloat(data);
+                        break;
                     case "monster random appear only": dgn.MonsterRandomAppearOnly = ParseInt(data); break;
                     case "remain monster count visible": dgn.RemainMonsterCountVisible = ParseInt(data); break;
 
                     // --- bool ---
                     case "defense dungeon": dgn.DefenseDungeon = true; break;
-                    case "blood dungeon": dgn.BloodDungeon = true; break;
+                    case "blood dungeon":
+                        dgn.BloodDungeon = true;
+                        dgn.BloodDungeonType = string.IsNullOrWhiteSpace(data)
+                            ? 1
+                            : ParseInt(data);
+                        break;
                     case "dimension dungeon": dgn.DimensionDungeon = true; break;
                     case "tournament dungeon": dgn.TournamentDungeon = true; break;
                     case "powerwar dungeon": dgn.PowerwarDungeon = true; break;
@@ -550,9 +612,24 @@ namespace PvfLib
                         break;
 
                     // --- complex raw string ---
-                    case "required item": dgn.RequiredItem = data; break;
-                    case "event required item": dgn.EventRequiredItem = data; break;
-                    case "added required item": dgn.AddedRequiredItem = data; break;
+                    case "required item":
+                        dgn.RequiredItem = AppendRequiredItems(
+                            dgn.RequiredItem,
+                            dgn.RequiredItems,
+                            data);
+                        break;
+                    case "event required item":
+                        dgn.EventRequiredItem = AppendRequiredItems(
+                            dgn.EventRequiredItem,
+                            dgn.EventRequiredItems,
+                            data);
+                        break;
+                    case "added required item":
+                        dgn.AddedRequiredItem = AppendRequiredItems(
+                            dgn.AddedRequiredItem,
+                            dgn.AddedRequiredItems,
+                            data);
+                        break;
                     case "coin info": dgn.CoinInfo = data; break;
                     case "schedule": dgn.Schedule = data; break;
                     case "event monster": dgn.EventMonster = data; break;
@@ -565,11 +642,83 @@ namespace PvfLib
                     case "tower recovery": dgn.TowerRecovery = data; break;
                     case "tower high skill initial cool time": dgn.TowerHighSkillInitialCoolTime = data; break;
                     case "tower high skill initial cool time rate": dgn.TowerHighSkillInitialCoolTimeRate = data; break;
-                    case "death tower map indexes": dgn.DeathTowerMapIndexes = data; break;
+                    case "death tower map indexes":
+                        dgn.DeathTowerMapIndexes = JoinDirectData(node, text);
+                        if (TryParseDeathTowerStages(
+                                dgn.DeathTowerMapIndexes,
+                                out var towerStages))
+                        {
+                            dgn.DeathTowerStages.AddRange(towerStages);
+                        }
+                        else
+                        {
+                            dgn.DeathTowerMapIndexesMalformed = true;
+                        }
+                        break;
                     case "tower random map indexes": dgn.TowerRandomMapIndexes = ParseInt(data); break;
-                    case "result card": dgn.ResultCard = data; break;
-                    case "reward item rate": dgn.RewardItemRate = data; break;
-                    case "tournament clear reward exp": dgn.TournamentClearRewardExp = data; break;
+                    case "result card":
+                        dgn.ResultCard = JoinDirectData(node, text);
+                        if (TryParseTournamentResultCards(
+                                node,
+                                text,
+                                out var resultCards))
+                        {
+                            dgn.TournamentResultCards.AddRange(resultCards);
+                        }
+                        else
+                        {
+                            dgn.TournamentResultCardMalformed = true;
+                        }
+
+                        foreach (var rewardItemRate in node.GetChildren(
+                            "reward item rate"))
+                        {
+                            dgn.RewardItemRate = JoinDirectData(
+                                rewardItemRate,
+                                text);
+                            if (TryParseTournamentRewardItemRates(
+                                    rewardItemRate,
+                                    text,
+                                    out var nestedRates))
+                            {
+                                dgn.TournamentRewardItemRates.AddRange(
+                                    nestedRates);
+                            }
+                            else
+                            {
+                                dgn.TournamentRewardItemRateMalformed = true;
+                            }
+                        }
+                        break;
+                    case "reward item rate":
+                        dgn.RewardItemRate = JoinDirectData(node, text);
+                        if (TryParseTournamentRewardItemRates(
+                                node,
+                                text,
+                                out var rewardItemRates))
+                        {
+                            dgn.TournamentRewardItemRates.AddRange(
+                                rewardItemRates);
+                        }
+                        else
+                        {
+                            dgn.TournamentRewardItemRateMalformed = true;
+                        }
+                        break;
+                    case "tournament clear reward exp":
+                        dgn.TournamentClearRewardExp = data;
+                        if (TryParseTournamentRewardExperience(
+                                data,
+                                out var tournamentRewards))
+                        {
+                            dgn.TournamentClearRewardExperiences.AddRange(
+                                tournamentRewards);
+                        }
+                        else
+                        {
+                            dgn.TournamentRewardExperienceMalformed = true;
+                        }
+                        break;
                     case "clear map": dgn.ClearMap = data; break;
                     case "clear reward item": dgn.ClearRewardItem = data; break;
                     case "boss room entrance condition": dgn.BossRoomEntranceCondition = ReadRawNodeData(node, text, data); break;
@@ -689,6 +838,238 @@ namespace PvfLib
             }
         }
 
+        private static string AppendRequiredItems(
+            string rawValue,
+            List<DungeonRequiredItem> target,
+            string data)
+        {
+            if (string.IsNullOrWhiteSpace(data))
+                return rawValue;
+
+            rawValue = string.IsNullOrWhiteSpace(rawValue)
+                ? data
+                : rawValue + " " + data;
+
+            var values = ParseIntArray(data);
+            for (var index = 0; index + 2 < values.Length; index += 3)
+            {
+                var itemId = values[index];
+                var count = values[index + 1];
+                var consumeOnEntry = values[index + 2] == 1;
+                if (itemId <= 0 || count <= 0)
+                    continue;
+
+                var duplicate = target.Exists(item =>
+                    item.ItemId == itemId
+                    && item.Count == count
+                    && item.ConsumeOnEntry == consumeOnEntry);
+                if (duplicate)
+                    continue;
+
+                target.Add(new DungeonRequiredItem
+                {
+                    ItemId = itemId,
+                    Count = count,
+                    ConsumeOnEntry = consumeOnEntry,
+                });
+            }
+
+            return rawValue;
+        }
+
+        private static bool TryParseDeathTowerStages(
+            string data,
+            out List<DeathTowerStage> stages)
+        {
+            stages = new List<DeathTowerStage>();
+            var values = ParseIntArray(data);
+            if (values == null || values.Length < 3)
+                return false;
+
+            var stageCount = values[0];
+            if (stageCount <= 0 || values.Length != 1 + stageCount * 2)
+                return false;
+
+            var seenStages = new HashSet<int>();
+            for (var offset = 1; offset < values.Length; offset += 2)
+            {
+                var stage = values[offset];
+                var mapId = values[offset + 1];
+                if (stage <= 0 || mapId <= 0 || !seenStages.Add(stage))
+                    return false;
+
+                stages.Add(new DeathTowerStage
+                {
+                    Stage = stage,
+                    MapId = mapId,
+                });
+            }
+
+            stages.Sort((left, right) => left.Stage.CompareTo(right.Stage));
+            for (var index = 0; index < stages.Count; index++)
+            {
+                if (stages[index].Stage != index + 1)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static float ParseFloat(string data)
+        {
+            if (string.IsNullOrWhiteSpace(data))
+                return -1f;
+
+            var tokens = data.Split(
+                new[] { ' ', '\t', '\r', '\n' },
+                StringSplitOptions.RemoveEmptyEntries);
+            return tokens.Length > 0
+                && float.TryParse(
+                    tokens[0],
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var value)
+                ? value
+                : -1f;
+        }
+
+        private static string JoinDirectData(ScriptNode node, string text)
+        {
+            if (node?.DataItems == null || node.DataItems.Count == 0)
+                return string.Empty;
+
+            var values = new List<string>(node.DataItems.Count);
+            foreach (var item in node.DataItems)
+            {
+                var value = item.GetContent(text).Trim();
+                if (!string.IsNullOrWhiteSpace(value))
+                    values.Add(value);
+            }
+            return string.Join(" ", values);
+        }
+
+        private static bool TryParseTournamentResultCards(
+            ScriptNode node,
+            string text,
+            out List<TournamentResultCard> result)
+        {
+            result = new List<TournamentResultCard>();
+            if (!TryParseTournamentIntRows(node, text, 4, out var values))
+                return false;
+
+            for (var index = 0; index < values.Count; index += 4)
+            {
+                result.Add(new TournamentResultCard
+                {
+                    ResultKey = values[index],
+                    GoldWeight = values[index + 1],
+                    ItemWeight = values[index + 2],
+                    EmptyWeight = values[index + 3],
+                });
+            }
+            return result.Count > 0;
+        }
+
+        private static bool TryParseTournamentRewardItemRates(
+            ScriptNode node,
+            string text,
+            out List<TournamentRewardItemRate> result)
+        {
+            result = new List<TournamentRewardItemRate>();
+            if (!TryParseTournamentIntRows(node, text, 3, out var values))
+                return false;
+
+            for (var index = 0; index < values.Count; index += 3)
+            {
+                result.Add(new TournamentRewardItemRate
+                {
+                    ItemId = values[index],
+                    Weight = values[index + 1],
+                    Count = values[index + 2],
+                });
+            }
+            return result.Count > 0;
+        }
+
+        private static bool TryParseTournamentIntRows(
+            ScriptNode node,
+            string text,
+            int width,
+            out List<int> values)
+        {
+            values = new List<int>();
+            if (node?.DataItems == null
+                || node.DataItems.Count == 0
+                || width <= 0)
+            {
+                return false;
+            }
+
+            foreach (var item in node.DataItems)
+            {
+                var tokens = item.GetContent(text).Split(
+                    new[] { ' ', '\t', '\r', '\n' },
+                    StringSplitOptions.RemoveEmptyEntries);
+                foreach (var token in tokens)
+                {
+                    if (!int.TryParse(
+                            token,
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture,
+                            out var value))
+                    {
+                        values.Clear();
+                        return false;
+                    }
+                    values.Add(value);
+                }
+            }
+
+            if (values.Count == 0 || values.Count % width != 0)
+            {
+                values.Clear();
+                return false;
+            }
+            return true;
+        }
+
+        private static bool TryParseTournamentRewardExperience(
+            string data,
+            out List<TournamentRewardExperience> result)
+        {
+            result = new List<TournamentRewardExperience>();
+            if (string.IsNullOrWhiteSpace(data))
+                return false;
+
+            var values = data.Split(
+                new[] { ' ', '\t', '\r', '\n' },
+                StringSplitOptions.RemoveEmptyEntries);
+            if (values.Length == 0 || values.Length % 2 != 0)
+                return false;
+
+            var rounds = new HashSet<int>();
+            for (var index = 0; index < values.Length; index += 2)
+            {
+                if (!int.TryParse(values[index], out var completedRounds)
+                    || !long.TryParse(values[index + 1], out var experience)
+                    || completedRounds < 0
+                    || experience < 0
+                    || !rounds.Add(completedRounds))
+                {
+                    result.Clear();
+                    return false;
+                }
+
+                result.Add(new TournamentRewardExperience
+                {
+                    CompletedRounds = completedRounds,
+                    Experience = experience,
+                });
+            }
+
+            return result.Count > 0;
+        }
+
         private static List<WarpMapConditionEntry> ParseWarpMapConditions(
             ScriptNode node,
             string text)
@@ -799,6 +1180,7 @@ namespace PvfLib
                         break;
                     case "randomized object creation":
                         maze.RidableScript = ParseRidableObjectScript(node, text);
+                        maze.RidableScripts.Add(maze.RidableScript);
                         break;
                     case "clear condition":
                         maze.ClearConditions = ParseClearConditions(node, text);

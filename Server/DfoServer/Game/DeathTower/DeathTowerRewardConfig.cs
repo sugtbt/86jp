@@ -1,39 +1,74 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using DfoServer.Game.Dungeon;
 using DfoServer.GameWorld;
 
 namespace DfoServer.Game.DeathTower
 {
+    public enum DeathTowerRewardProfile
+    {
+        Standard = 0,
+        Illusion = 1,
+    }
+
     public sealed class DeathTowerRewardConfig
     {
+        internal const int MaximumRewardProgress = 10;
+
         private static readonly object Sync = new object();
         private static DeathTowerRewardConfig _cached;
 
-        private readonly float[] _expWeights;
-        private readonly int[] _rewardCardCounts;
+        private readonly float[] _standardExpWeights;
+        private readonly int[] _standardRewardCardCounts;
+        private readonly float[] _illusionExpWeights;
+        private readonly int[] _illusionRewardCardCounts;
 
         private DeathTowerRewardConfig(
-            int normalItemWeight,
-            int magicItemWeight,
-            int itemWeightTotal,
-            float goldWeight,
-            float[] expWeights,
-            int[] rewardCardCounts)
+            int goldCandidateWeight,
+            int itemCandidateWeight,
+            int rewardWeightPerProgress,
+            float goldAmountWeight,
+            float[] standardExpWeights,
+            int[] standardRewardCardCounts,
+            float[] illusionExpWeights,
+            int[] illusionRewardCardCounts)
         {
-            NormalItemWeight = normalItemWeight;
-            MagicItemWeight = magicItemWeight;
-            ItemWeightTotal = itemWeightTotal;
-            GoldWeight = goldWeight;
-            _expWeights = expWeights ?? Array.Empty<float>();
-            _rewardCardCounts = rewardCardCounts ?? Array.Empty<int>();
+            GoldCandidateWeight = goldCandidateWeight;
+            ItemCandidateWeight = itemCandidateWeight;
+            RewardWeightPerProgress = rewardWeightPerProgress;
+            GoldAmountWeight = goldAmountWeight;
+            _standardExpWeights = standardExpWeights ?? Array.Empty<float>();
+            _standardRewardCardCounts = standardRewardCardCounts
+                ?? Array.Empty<int>();
+            _illusionExpWeights = illusionExpWeights ?? Array.Empty<float>();
+            _illusionRewardCardCounts = illusionRewardCardCounts
+                ?? Array.Empty<int>();
         }
 
-        public int NormalItemWeight { get; }
-        public int MagicItemWeight { get; }
-        public int ItemWeightTotal { get; }
-        public float GoldWeight { get; }
+        public int GoldCandidateWeight { get; }
+        public int ItemCandidateWeight { get; }
+        public int RewardWeightPerProgress { get; }
+        public int RewardRollScale =>
+            RewardWeightPerProgress * MaximumRewardProgress;
+        public float GoldAmountWeight { get; }
+        public bool IsAvailable =>
+            GoldCandidateWeight >= 0
+            && ItemCandidateWeight >= 0
+            && RewardWeightPerProgress > 0
+            && GoldCandidateWeight + ItemCandidateWeight
+                <= RewardWeightPerProgress
+            && GoldAmountWeight > 0
+            && _standardExpWeights.Length > 0
+            && _standardRewardCardCounts.Length > 0
+            && _illusionExpWeights.Length > 0
+            && _illusionRewardCardCounts.Length > 0;
+
+        internal int StandardExpWeightCount => _standardExpWeights.Length;
+        internal int StandardRewardCardCount =>
+            _standardRewardCardCounts.Length;
+        internal int IllusionExpWeightCount => _illusionExpWeights.Length;
+        internal int IllusionRewardCardCount =>
+            _illusionRewardCardCounts.Length;
 
         public static DeathTowerRewardConfig Load()
         {
@@ -49,7 +84,8 @@ namespace DfoServer.Game.DeathTower
                 }
                 catch (Exception ex)
                 {
-                    FileLogger.Log($"[DeathTower] reward config load failed: {ex.Message}");
+                    FileLogger.Log(
+                        $"[DeathTower] reward config load failed: {ex.Message}");
                     _cached = CreateUnavailable();
                 }
 
@@ -64,62 +100,93 @@ namespace DfoServer.Game.DeathTower
 
             var probabilities = ParseInts(ReadSection(text, "reward item prob"));
             var goldWeights = ParseFloats(ReadSection(text, "reward gold weight"));
-            var expWeights = ParseFloats(ReadSection(text, "reward exp weight"));
-            var rewardCardCounts = ParseInts(ReadSection(text, "reward card num"));
+            var standardExpWeights = ParseFloats(
+                ReadSection(text, "reward exp weight"));
+            var standardRewardCardCounts = ParseInts(
+                ReadSection(text, "reward card num"));
+            var illusionExpWeights = ParseFloats(
+                ReadSection(text, "illusion reward exp weight"));
+            var illusionRewardCardCounts = ParseInts(
+                ReadSection(text, "illusion reward card num"));
 
             if (probabilities.Count < 3
                 || goldWeights.Count == 0
-                || expWeights.Count == 0
-                || rewardCardCounts.Count == 0)
+                || standardExpWeights.Count == 0
+                || standardRewardCardCounts.Count == 0
+                || illusionExpWeights.Count == 0
+                || illusionRewardCardCounts.Count == 0)
             {
                 return CreateUnavailable();
             }
 
-            var normalWeight = probabilities[0];
-            var magicWeight = probabilities[1];
-            var totalWeight = probabilities[2];
-            if (normalWeight < 0 || magicWeight < 0 || totalWeight <= 0
-                || normalWeight + magicWeight > totalWeight)
+            var goldCandidateWeight = probabilities[0];
+            var itemCandidateWeight = probabilities[1];
+            var rewardWeightPerProgress = probabilities[2];
+            if (goldCandidateWeight < 0
+                || itemCandidateWeight < 0
+                || rewardWeightPerProgress <= 0
+                || goldCandidateWeight + itemCandidateWeight
+                    > rewardWeightPerProgress
+                || goldWeights[0] <= 0)
             {
                 return CreateUnavailable();
             }
 
             return new DeathTowerRewardConfig(
-                normalWeight,
-                magicWeight,
-                totalWeight,
-                goldWeights[0] > 0 ? goldWeights[0] : 0f,
-                expWeights.ToArray(),
-                rewardCardCounts.ToArray());
+                goldCandidateWeight,
+                itemCandidateWeight,
+                rewardWeightPerProgress,
+                goldWeights[0],
+                standardExpWeights.ToArray(),
+                standardRewardCardCounts.ToArray(),
+                illusionExpWeights.ToArray(),
+                illusionRewardCardCounts.ToArray());
         }
 
-        public float GetExpWeight(int clearedFloorCount)
+        internal float GetExpWeight(
+            DeathTowerRewardProfile profile,
+            int clearedFloorCount)
         {
-            if (_expWeights.Length == 0)
-                return 0;
-            var index = Math.Max(0, Math.Min(clearedFloorCount - 1, _expWeights.Length - 1));
-            return _expWeights[index];
+            var values = GetProfile(
+                profile,
+                _standardExpWeights,
+                _illusionExpWeights);
+            return GetFloorValue(values, clearedFloorCount, 0f);
         }
 
-        public int GetRewardCardCount(int clearedFloorCount)
+        internal int GetRewardCardCount(
+            DeathTowerRewardProfile profile,
+            int clearedFloorCount)
         {
-            if (_rewardCardCounts.Length == 0)
-                return 0;
-            var index = Math.Max(0, Math.Min(clearedFloorCount - 1, _rewardCardCounts.Length - 1));
-            return Math.Max(0, _rewardCardCounts[index]);
+            var values = GetProfile(
+                profile,
+                _standardRewardCardCounts,
+                _illusionRewardCardCounts);
+            return Math.Max(0, GetFloorValue(values, clearedFloorCount, 0));
         }
 
-        public int RollItemRarity(DnfLcg lcg)
+        internal DeathTowerRewardCandidateKind ClassifyCandidate(
+            int clearedFloorCount,
+            int roll)
         {
-            if (lcg == null || ItemWeightTotal <= 0)
-                return 0;
-            // PVF stores two explicit weights and a total; the remaining weight is rarity 2.
-            var roll = lcg.Next(ItemWeightTotal);
-            if (roll < NormalItemWeight)
-                return 0;
-            if (roll < NormalItemWeight + MagicItemWeight)
-                return 1;
-            return 2;
+            if (!IsAvailable)
+                throw new InvalidOperationException(
+                    "Death tower reward configuration is unavailable.");
+            if (roll < 0 || roll >= RewardRollScale)
+                throw new ArgumentOutOfRangeException(nameof(roll));
+
+            var progress = Math.Min(
+                MaximumRewardProgress,
+                Math.Max(0, clearedFloorCount));
+            var goldThreshold = progress * GoldCandidateWeight;
+            if (roll < goldThreshold)
+                return DeathTowerRewardCandidateKind.Gold;
+
+            var itemThreshold = progress
+                * (GoldCandidateWeight + ItemCandidateWeight);
+            return roll < itemThreshold
+                ? DeathTowerRewardCandidateKind.Item
+                : DeathTowerRewardCandidateKind.Empty;
         }
 
         private static DeathTowerRewardConfig CreateUnavailable()
@@ -130,7 +197,41 @@ namespace DfoServer.Game.DeathTower
                 0,
                 0f,
                 Array.Empty<float>(),
+                Array.Empty<int>(),
+                Array.Empty<float>(),
                 Array.Empty<int>());
+        }
+
+        private static T[] GetProfile<T>(
+            DeathTowerRewardProfile profile,
+            T[] standard,
+            T[] illusion)
+        {
+            switch (profile)
+            {
+                case DeathTowerRewardProfile.Standard:
+                    return standard ?? Array.Empty<T>();
+                case DeathTowerRewardProfile.Illusion:
+                    return illusion ?? Array.Empty<T>();
+                default:
+                    return Array.Empty<T>();
+            }
+        }
+
+        private static T GetFloorValue<T>(
+            T[] values,
+            int clearedFloorCount,
+            T unavailable)
+        {
+            if (values == null
+                || values.Length == 0
+                || clearedFloorCount <= 0)
+            {
+                return unavailable;
+            }
+
+            var index = Math.Min(clearedFloorCount - 1, values.Length - 1);
+            return values[index];
         }
 
         private static string ReadSection(string text, string tagName)
@@ -142,7 +243,10 @@ namespace DfoServer.Game.DeathTower
             start += tag.Length;
 
             var closeTag = "[/" + tagName + "]";
-            var close = text.IndexOf(closeTag, start, StringComparison.OrdinalIgnoreCase);
+            var close = text.IndexOf(
+                closeTag,
+                start,
+                StringComparison.OrdinalIgnoreCase);
             var nextTag = text.IndexOf('[', start);
             var end = close >= 0 && (nextTag < 0 || close <= nextTag)
                 ? close
@@ -157,8 +261,14 @@ namespace DfoServer.Game.DeathTower
             var values = new List<int>();
             foreach (var token in SplitTokens(section))
             {
-                if (int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+                if (int.TryParse(
+                        token,
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out var value))
+                {
                     values.Add(value);
+                }
             }
             return values;
         }
@@ -168,8 +278,14 @@ namespace DfoServer.Game.DeathTower
             var values = new List<float>();
             foreach (var token in SplitTokens(section))
             {
-                if (float.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+                if (float.TryParse(
+                        token,
+                        NumberStyles.Float,
+                        CultureInfo.InvariantCulture,
+                        out var value))
+                {
                     values.Add(value);
+                }
             }
             return values;
         }

@@ -197,14 +197,20 @@ namespace DfoServer.Network.Handlers
                         }
                         if (recovery.CommittedCount > 0
                             || recovery.DeadLetterCount > 0
-                            || recovery.FailedCount > 0)
+                            || recovery.FailedCount > 0
+                            || recovery.HasRemaining)
                         {
                             FileLogger.Log(
                                 $"[{ProtocolName}] dungeon effect recovery: " +
                                 $"cid={record.CharacterId} " +
                                 $"committed={recovery.CommittedCount} " +
                                 $"dead={recovery.DeadLetterCount} " +
-                                $"failed={recovery.FailedCount}");
+                                $"failed={recovery.FailedCount} " +
+                                $"pages={recovery.PagesScanned} " +
+                                $"scanned={recovery.RecordsScanned} " +
+                                $"remaining={recovery.RemainingCount} " +
+                                $"pageLimit={recovery.ReachedPageLimit} " +
+                                $"timeLimit={recovery.ReachedTimeLimit}");
                         }
                     }
 

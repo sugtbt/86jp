@@ -14,10 +14,44 @@ namespace DfoServer.Game.Dungeon
 
         public static readonly RunTimerKey GentInfiltrateTimeout =
             new RunTimerKey("special-dungeon", "gent-infiltrate-timeout");
+
+        public static readonly RunTimerKey TournamentRewardAutoSelect =
+            new RunTimerKey("tournament", "reward-auto-select");
+
+        public static readonly RunTimerKey DeathTowerRankingToReward =
+            new RunTimerKey("death-tower", "ranking-to-reward");
+
+        public static readonly RunTimerKey DeathTowerRewardToEplp =
+            new RunTimerKey("death-tower", "reward-to-eplp");
+
+        public static readonly RunTimerKey DeathTowerReturnToTown =
+            new RunTimerKey("death-tower", "return-to-town");
+
+        public static readonly RunTimerKey BloodAltarWaveSchedule =
+            new RunTimerKey("blood-altar", "wave-schedule");
+
+        public static readonly RunTimerKey BloodAltarDifficultySelection =
+            new RunTimerKey("blood-altar", "difficulty-selection");
+
+        public static readonly RunTimerKey BloodAltarFinalRound =
+            new RunTimerKey("blood-altar", "final-round");
+
+        public static readonly RunTimerKey BloodAltarRankingToReward =
+            new RunTimerKey("blood-altar", "ranking-to-reward");
+
+        public static readonly RunTimerKey BloodAltarRewardToExit =
+            new RunTimerKey("blood-altar", "reward-to-exit");
+
+        public static readonly RunTimerKey BloodAltarReturnToTown =
+            new RunTimerKey("blood-altar", "return-to-town");
+
+        public static readonly RunTimerKey BloodAltarSettlementRetry =
+            new RunTimerKey("blood-altar", "settlement-retry");
     }
 
     /// <summary>
-    /// Identifies one delayed action owned by a single <see cref="DungeonRun"/>.
+    /// Identifies one delayed action owned by one runtime owner, such as a
+    /// participant run or a physical dungeon instance.
     /// A mechanism may own multiple purposes, but replacing one purpose never
     /// cancels another purpose accidentally.
     /// </summary>
@@ -69,10 +103,41 @@ namespace DfoServer.Game.Dungeon
         public bool IsValid => Generation != 0;
     }
 
+    public enum RunTimerDetachPolicy
+    {
+        Cancel,
+        SuspendUntilResume,
+    }
+
+    public readonly struct RunTimerSnapshot
+    {
+        internal RunTimerSnapshot(
+            RunTimerKey key,
+            int generation,
+            DateTime deadlineUtc,
+            RunTimerDetachPolicy detachPolicy,
+            bool suspended)
+        {
+            Key = key;
+            Generation = generation;
+            DeadlineUtc = deadlineUtc;
+            DetachPolicy = detachPolicy;
+            IsSuspended = suspended;
+        }
+
+        public RunTimerKey Key { get; }
+        public int Generation { get; }
+        public DateTime DeadlineUtc { get; }
+        public RunTimerDetachPolicy DetachPolicy { get; }
+        public bool IsSuspended { get; }
+        public bool HasDeadline => DeadlineUtc != DateTime.MinValue;
+    }
+
     /// <summary>
-    /// Per-run timer ownership. Callers reserve a ticket before scheduling a
-    /// ClockService callback, attach the resulting handle afterwards, and have
-    /// the callback validate the same ticket before projecting a typed event.
+    /// Owner-scoped timer ownership. Callers reserve a ticket before scheduling
+    /// a ClockService callback, attach the resulting handle afterwards, and
+    /// have the callback validate the same ticket before projecting a typed
+    /// event.
     /// </summary>
     public sealed class RunTimerRegistry
     {
@@ -80,6 +145,9 @@ namespace DfoServer.Game.Dungeon
         {
             internal int Generation;
             internal ClockService.ClockTimerHandle Handle;
+            internal DateTime DeadlineUtc;
+            internal RunTimerDetachPolicy DetachPolicy;
+            internal bool Suspended;
         }
 
         private readonly object _syncRoot = new object();
@@ -87,7 +155,25 @@ namespace DfoServer.Game.Dungeon
             new Dictionary<RunTimerKey, Entry>();
 
         public RunTimerTicket Begin(RunTimerKey key)
+            => Begin(
+                key,
+                DateTime.MinValue,
+                RunTimerDetachPolicy.Cancel);
+
+        public RunTimerTicket Begin(
+            RunTimerKey key,
+            DateTime deadlineUtc,
+            RunTimerDetachPolicy detachPolicy)
         {
+            deadlineUtc = NormalizeUtc(deadlineUtc);
+            if (detachPolicy == RunTimerDetachPolicy.SuspendUntilResume
+                && deadlineUtc == DateTime.MinValue)
+            {
+                throw new ArgumentException(
+                    "A resumable timer requires an absolute deadline.",
+                    nameof(deadlineUtc));
+            }
+
             ClockService.ClockTimerHandle previous = null;
             RunTimerTicket ticket;
             lock (_syncRoot)
@@ -101,6 +187,9 @@ namespace DfoServer.Game.Dungeon
                 previous = entry.Handle;
                 entry.Handle = null;
                 entry.Generation = NextGeneration(entry.Generation);
+                entry.DeadlineUtc = deadlineUtc;
+                entry.DetachPolicy = detachPolicy;
+                entry.Suspended = false;
                 ticket = new RunTimerTicket(key, entry.Generation);
             }
 
@@ -121,7 +210,8 @@ namespace DfoServer.Game.Dungeon
             lock (_syncRoot)
             {
                 if (_entries.TryGetValue(ticket.Key, out var entry)
-                    && entry.Generation == ticket.Generation)
+                    && entry.Generation == ticket.Generation
+                    && !entry.Suspended)
                 {
                     previous = entry.Handle;
                     entry.Handle = handle;
@@ -147,7 +237,8 @@ namespace DfoServer.Game.Dungeon
             lock (_syncRoot)
             {
                 return _entries.TryGetValue(ticket.Key, out var entry)
-                    && entry.Generation == ticket.Generation;
+                    && entry.Generation == ticket.Generation
+                    && !entry.Suspended;
             }
         }
 
@@ -162,6 +253,9 @@ namespace DfoServer.Game.Dungeon
                 entry.Generation = NextGeneration(entry.Generation);
                 handle = entry.Handle;
                 entry.Handle = null;
+                entry.DeadlineUtc = DateTime.MinValue;
+                entry.DetachPolicy = RunTimerDetachPolicy.Cancel;
+                entry.Suspended = false;
             }
 
             handle?.Cancel();
@@ -175,6 +269,9 @@ namespace DfoServer.Game.Dungeon
                 foreach (var entry in _entries.Values)
                 {
                     entry.Generation = NextGeneration(entry.Generation);
+                    entry.DeadlineUtc = DateTime.MinValue;
+                    entry.DetachPolicy = RunTimerDetachPolicy.Cancel;
+                    entry.Suspended = false;
                     if (entry.Handle != null)
                     {
                         (handles ??= new List<ClockService.ClockTimerHandle>())
@@ -188,6 +285,121 @@ namespace DfoServer.Game.Dungeon
                 return;
             foreach (var handle in handles)
                 handle.Cancel();
+        }
+
+        public int SuspendForNetworkDetach()
+        {
+            List<ClockService.ClockTimerHandle> handles = null;
+            var suspended = 0;
+            lock (_syncRoot)
+            {
+                foreach (var entry in _entries.Values)
+                {
+                    entry.Generation = NextGeneration(entry.Generation);
+                    if (entry.Handle != null)
+                    {
+                        (handles ??= new List<ClockService.ClockTimerHandle>())
+                            .Add(entry.Handle);
+                        entry.Handle = null;
+                    }
+
+                    if (entry.DetachPolicy
+                            == RunTimerDetachPolicy.SuspendUntilResume
+                        && entry.DeadlineUtc != DateTime.MinValue)
+                    {
+                        entry.Suspended = true;
+                        suspended++;
+                    }
+                    else
+                    {
+                        entry.DeadlineUtc = DateTime.MinValue;
+                        entry.DetachPolicy = RunTimerDetachPolicy.Cancel;
+                        entry.Suspended = false;
+                    }
+                }
+            }
+
+            if (handles != null)
+            {
+                foreach (var handle in handles)
+                    handle.Cancel();
+            }
+            return suspended;
+        }
+
+        public bool TryResume(
+            RunTimerKey key,
+            out RunTimerTicket ticket,
+            out DateTime deadlineUtc)
+        {
+            lock (_syncRoot)
+            {
+                if (_entries.TryGetValue(key, out var entry)
+                    && entry.Suspended
+                    && entry.DetachPolicy
+                        == RunTimerDetachPolicy.SuspendUntilResume
+                    && entry.DeadlineUtc != DateTime.MinValue)
+                {
+                    entry.Generation = NextGeneration(entry.Generation);
+                    entry.Suspended = false;
+                    ticket = new RunTimerTicket(key, entry.Generation);
+                    deadlineUtc = entry.DeadlineUtc;
+                    return true;
+                }
+            }
+
+            ticket = default;
+            deadlineUtc = DateTime.MinValue;
+            return false;
+        }
+
+        public bool TryComplete(RunTimerTicket ticket)
+        {
+            if (!ticket.IsValid)
+                return false;
+
+            ClockService.ClockTimerHandle handle = null;
+            lock (_syncRoot)
+            {
+                if (!_entries.TryGetValue(ticket.Key, out var entry)
+                    || entry.Generation != ticket.Generation
+                    || entry.Suspended)
+                {
+                    return false;
+                }
+
+                entry.Generation = NextGeneration(entry.Generation);
+                handle = entry.Handle;
+                entry.Handle = null;
+                entry.DeadlineUtc = DateTime.MinValue;
+                entry.DetachPolicy = RunTimerDetachPolicy.Cancel;
+                entry.Suspended = false;
+            }
+
+            handle?.Cancel();
+            return true;
+        }
+
+        public bool TryGetSnapshot(
+            RunTimerKey key,
+            out RunTimerSnapshot snapshot)
+        {
+            lock (_syncRoot)
+            {
+                if (_entries.TryGetValue(key, out var entry))
+                {
+                    snapshot = new RunTimerSnapshot(
+                        key,
+                        entry.Generation,
+                        entry.DeadlineUtc,
+                        entry.DetachPolicy,
+                        entry.Suspended);
+                    return true;
+                }
+            }
+
+            snapshot = default;
+            return false;
         }
 
         public int GetGeneration(RunTimerKey key)
@@ -207,7 +419,8 @@ namespace DfoServer.Game.Dungeon
             lock (_syncRoot)
             {
                 if (_entries.TryGetValue(key, out var entry)
-                    && entry.Generation != 0)
+                    && entry.Generation != 0
+                    && !entry.Suspended)
                 {
                     ticket = new RunTimerTicket(key, entry.Generation);
                     return true;
@@ -222,6 +435,17 @@ namespace DfoServer.Game.Dungeon
         {
             var next = previous == int.MaxValue ? 1 : previous + 1;
             return next == 0 ? 1 : next;
+        }
+
+        private static DateTime NormalizeUtc(DateTime value)
+        {
+            if (value == DateTime.MinValue)
+                return DateTime.MinValue;
+            if (value.Kind == DateTimeKind.Utc)
+                return value;
+            if (value.Kind == DateTimeKind.Local)
+                return value.ToUniversalTime();
+            return DateTime.SpecifyKind(value, DateTimeKind.Utc);
         }
     }
 }

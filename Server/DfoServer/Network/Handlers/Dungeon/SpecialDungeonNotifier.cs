@@ -35,11 +35,19 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (!CanProjectEndingRun(session, run))
                 return;
 
-            var intents = Application.BuildClearRunBuffs(run, reason);
-            await Effects.RouteAsync(
+            var sourceEvent = DungeonEventEnvelope.Create(
+                run,
+                session.Player.CharacterId,
+                "special-dungeon run end: " + (reason ?? string.Empty),
+                sourceEventId: run.GetEndSourceEventId());
+            var registration = Application.BuildClearRunBuffsPlan(
+                run,
+                sourceEvent,
+                reason);
+            await Effects.RoutePlanAsync(
                 session,
                 run,
-                intents,
+                registration.Plan,
                 allowEndingRun: true);
         }
 
@@ -73,19 +81,26 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal static async Task ObserveMonsterKilledAsync(
             EnhancedClientSession session,
             DungeonRun run,
+            DungeonEventEnvelope sourceEvent,
             int monsterCode,
             byte monsterType)
         {
-            if (!IsCurrent(session, run) || monsterCode <= 0)
+            if (!IsCurrent(session, run)
+                || !IsCurrentEvent(session, sourceEvent)
+                || monsterCode <= 0)
+            {
                 return;
+            }
 
-            await Effects.RouteAsync(
+            var registration = Application.ApplyMonsterKilledAndPlan(
+                run,
+                sourceEvent,
+                monsterCode,
+                monsterType);
+            await Effects.RoutePlanAsync(
                 session,
                 run,
-                Application.ApplyMonsterKilled(
-                    run,
-                    monsterCode,
-                    monsterType));
+                registration.Plan);
         }
 
         internal static async Task HandleBossSummonRequestAsync(
@@ -101,8 +116,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var intents = Application.ApplyBossSummon(run, request);
-            if (intents.Count == 0)
+            var registration = Application.ApplyBossSummonAndPlan(
+                run,
+                sourceEvent,
+                request);
+            if (!registration.HasPlan)
             {
                 FileLogger.Log(
                     $"[SpecialDungeonModule] boss summon rejected: " +
@@ -113,7 +131,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            await Effects.RouteAsync(session, run, intents);
+            await Effects.RoutePlanAsync(
+                session,
+                run,
+                registration.Plan);
         }
 
         internal static Task HandleGentInfiltrateTimerModifyInfoAsync(
@@ -134,10 +155,25 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             SeaChaseResultDungeonCommand command,
             DungeonEventEnvelope sourceEvent)
+            => await HandleSeaChaseMiniGameResultAsync(
+                session,
+                command,
+                sourceEvent,
+                Application,
+                Effects);
+
+        internal static async Task HandleSeaChaseMiniGameResultAsync(
+            EnhancedClientSession session,
+            SeaChaseResultDungeonCommand command,
+            DungeonEventEnvelope sourceEvent,
+            SpecialDungeonMechanismApplicationService application,
+            SpecialDungeonEffectRouter effects)
         {
             var run = session?.Player?.CurrentRun;
             if (run == null
                 || command == null
+                || application == null
+                || effects == null
                 || !IsCurrentEvent(session, sourceEvent)
                 || run.Mechanisms.SpecialDungeon?.Kind
                     != SpecialDungeonKind.SeaChase)
@@ -145,14 +181,53 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            await Effects.RouteAsync(
-                session,
+            var registration = application.ApplySeaChaseResultAndPlan(
                 run,
-                Application.ApplySeaChaseResult(run, command));
+                sourceEvent,
+                command);
+            if (!registration.HasPlan)
+                return;
+
+            if (!registration.Created && registration.WasComplete)
+            {
+                await effects.RouteAsync(
+                    session,
+                    run,
+                    new[]
+                    {
+                        new SpecialDungeonEffectIntent
+                        {
+                            Kind = SpecialDungeonEffectKind.CommandSuccessAck,
+                            WireType = command.WireType,
+                            Reason = "sea_chase_result_replay",
+                        },
+                    });
+            }
+            else
+            {
+                await effects.RoutePlanAsync(
+                    session,
+                    run,
+                    registration.Plan);
+            }
             FileLogger.Log(
                 $"[SpecialDungeonModule] SEA_CHASE result: " +
                 $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
                 $"result={command.Result}");
+        }
+
+        internal static Task RecoverPendingEffectPlansAsync(
+            EnhancedClientSession session)
+            => RecoverPendingEffectPlansAsync(session, Effects);
+
+        internal static Task RecoverPendingEffectPlansAsync(
+            EnhancedClientSession session,
+            SpecialDungeonEffectRouter effects)
+        {
+            var run = session?.Player?.CurrentRun;
+            return run == null || effects == null
+                ? Task.CompletedTask
+                : effects.RecoverAsync(session, run);
         }
 
         internal static Task ObserveSeaChasePacketAsync(

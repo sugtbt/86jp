@@ -104,6 +104,23 @@ namespace PvfLib
         public ApcAIType AIType { get; set; }
     }
 
+    public class TournamentEnemyInfo
+    {
+        public int PartyCount { get; set; }
+        public bool IsApc { get; set; }
+        public int Code { get; set; }
+        public int Strength { get; set; }
+        public string Name { get; set; }
+    }
+
+    public class TournamentStartAreaInfo
+    {
+        public int PartyCount { get; set; }
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int Direction { get; set; }
+    }
+
     /// <summary>
     /// </summary>
     public class MapFile : PvfModelBase
@@ -136,6 +153,11 @@ namespace PvfLib
         public string MonsterSpecificAI { get; set; }
         public string Buff { get; set; }
         public List<AICharacterInfo> AICharacters { get; set; } = new List<AICharacterInfo>();
+        public List<TournamentEnemyInfo> TournamentEnemyCandidates { get; set; } =
+            new List<TournamentEnemyInfo>();
+        public List<TournamentStartAreaInfo> TournamentStartAreas { get; set; } =
+            new List<TournamentStartAreaInfo>();
+        public bool TournamentDefinitionMalformed { get; set; }
 
         // --- Simple int properties ---
         public int FixChampion { get; set; } = -1;
@@ -518,9 +540,17 @@ namespace PvfLib
                         break;
                     case "tournament enemies":
                         map.TournamentEnemies = data;
+                        if (TryParseTournamentEnemies(data, out var enemies))
+                            map.TournamentEnemyCandidates.AddRange(enemies);
+                        else
+                            map.TournamentDefinitionMalformed = true;
                         break;
                     case "tournament start area":
                         map.TournamentStartArea = data;
+                        if (TryParseTournamentStartAreas(data, out var startAreas))
+                            map.TournamentStartAreas.AddRange(startAreas);
+                        else
+                            map.TournamentDefinitionMalformed = true;
                         break;
                     case "before rendering info":
                         map.BeforeRenderingInfo = data;
@@ -771,6 +801,113 @@ namespace PvfLib
             }
 
             return result;
+        }
+
+        private static bool TryParseTournamentEnemies(
+            string data,
+            out List<TournamentEnemyInfo> result)
+        {
+            result = new List<TournamentEnemyInfo>();
+            if (!TryTokenize(data, out var tokens) || tokens.Count < 5)
+                return false;
+
+            if (!int.TryParse(tokens[0], out var partyCount)
+                || partyCount <= 0)
+            {
+                return false;
+            }
+
+            var kind = StripBacktick(tokens[1]).Trim();
+            var isApc = string.Equals(
+                kind,
+                "[apc]",
+                StringComparison.OrdinalIgnoreCase);
+            if (!isApc
+                && !string.Equals(
+                    kind,
+                    "[monster]",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if ((tokens.Count - 2) % 3 != 0)
+                return false;
+
+            for (var index = 2; index < tokens.Count; index += 3)
+            {
+                if (!int.TryParse(tokens[index], out var code)
+                    || !int.TryParse(tokens[index + 1], out var strength))
+                {
+                    result.Clear();
+                    return false;
+                }
+
+                var name = StripBacktick(tokens[index + 2]).Trim();
+                if (string.IsNullOrEmpty(name))
+                {
+                    result.Clear();
+                    return false;
+                }
+
+                result.Add(new TournamentEnemyInfo
+                {
+                    PartyCount = partyCount,
+                    IsApc = isApc,
+                    Code = code,
+                    Strength = strength,
+                    Name = name,
+                });
+            }
+
+            return result.Count > 0;
+        }
+
+        private static bool TryParseTournamentStartAreas(
+            string data,
+            out List<TournamentStartAreaInfo> result)
+        {
+            result = new List<TournamentStartAreaInfo>();
+            if (!TryTokenize(data, out var tokens)
+                || tokens.Count == 0
+                || tokens.Count % 4 != 0)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < tokens.Count; index += 4)
+            {
+                if (!int.TryParse(tokens[index], out var partyCount)
+                    || !int.TryParse(tokens[index + 1], out var x)
+                    || !int.TryParse(tokens[index + 2], out var y)
+                    || !int.TryParse(tokens[index + 3], out var direction)
+                    || partyCount <= 0)
+                {
+                    result.Clear();
+                    return false;
+                }
+
+                result.Add(new TournamentStartAreaInfo
+                {
+                    PartyCount = partyCount,
+                    X = x,
+                    Y = y,
+                    Direction = direction,
+                });
+            }
+
+            return result.Count > 0;
+        }
+
+        private static bool TryTokenize(string data, out List<string> tokens)
+        {
+            tokens = new List<string>();
+            if (string.IsNullOrWhiteSpace(data))
+                return false;
+
+            foreach (Match match in SpecialPassiveTokenRx.Matches(data))
+                tokens.Add(match.Value);
+            return tokens.Count > 0;
         }
 
         private static List<SpecialPassiveObjectInfo> ParseSpecialPassiveObjects(string data)

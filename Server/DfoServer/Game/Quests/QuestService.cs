@@ -23,8 +23,7 @@ namespace DfoServer.Game.Quests
             _repository = new QuestRepository(connectionString);
             _progress = new QuestProgressApplicationService(connectionString);
             _acceptance = new QuestAcceptanceApplicationService(
-                connectionString,
-                _repository);
+                connectionString);
             _giveup = new QuestGiveupApplicationService(_repository);
             _completion = new QuestCompletionApplicationService(
                 connectionString,
@@ -59,16 +58,16 @@ namespace DfoServer.Game.Quests
             if (body == null || body.Length < 2)
                 return QuestAcceptResult.Fail(23);
             return HandleAcceptQuest(
-                characterId,
+                ResolveCurrentOwnerContext(characterId, accountId),
                 new QuestAcceptCommand(BitConverter.ToUInt16(body, 0)),
                 accountId);
         }
 
         internal QuestAcceptResult HandleAcceptQuest(
-            int characterId,
+            QuestCommandOwnerContext owner,
             QuestAcceptCommand command,
             int accountId = 0)
-            => _acceptance.Apply(characterId, command, accountId);
+            => _acceptance.Apply(owner, command);
 
         public QuestGiveupResult HandleGiveupQuest(int characterId, byte[] body)
         {
@@ -76,52 +75,79 @@ namespace DfoServer.Game.Quests
                 return QuestGiveupResult.Fail(19);
             InventoryContext.TryGetLease(characterId, out var lease);
             return HandleGiveupQuest(
-                characterId,
+                ResolveCurrentOwnerContext(characterId, lease?.AccountId ?? 0),
                 new QuestGiveupCommand(BitConverter.ToUInt16(body, 0)),
                 lease);
         }
 
         internal QuestGiveupResult HandleGiveupQuest(
-            int characterId,
+            QuestCommandOwnerContext owner,
             QuestGiveupCommand command,
             InventoryLease lease = null)
-            => _giveup.Apply(characterId, command, lease);
-
-        public QuestFinishResult HandleFinishQuest(
-            int characterId,
-            byte[] body,
-            uint? currentExp = null)
-        {
-            if (body == null || body.Length < 2)
-                return QuestFinishResult.Fail(22);
-            var rewardSelection = body.Length >= 4
-                ? BitConverter.ToUInt16(body, 2)
-                : (ushort)0;
-            return HandleFinishQuest(
-                characterId,
-                new QuestFinishCommand(
-                    BitConverter.ToUInt16(body, 0),
-                    body.Length >= 4 && rewardSelection != ushort.MaxValue,
-                    rewardSelection,
-                    body.Length >= 6
-                        ? BitConverter.ToUInt16(body, 4)
-                        : (ushort)1),
-                currentExp);
-        }
+            => _giveup.Apply(owner, command);
 
         internal QuestFinishResult HandleFinishQuest(
             int characterId,
             QuestFinishCommand command,
             uint? currentExp = null)
-            => _completion.Apply(characterId, command, currentExp);
+            => HandleFinishQuest(
+                ResolveCurrentOwnerContext(characterId, 0, currentExp),
+                command);
+
+        internal QuestFinishResult HandleFinishQuest(
+            QuestCommandOwnerContext owner,
+            QuestFinishCommand command)
+            => _completion.Apply(owner, command);
+
+        private static QuestCommandOwnerContext ResolveCurrentOwnerContext(
+            int characterId,
+            int accountId,
+            uint? currentExp = null)
+        {
+            if (!InventoryContext.TryGetLease(characterId, out var lease))
+                return default;
+
+            return new QuestCommandOwnerContext(
+                characterId,
+                accountId > 0 ? accountId : lease.AccountId,
+                lease.SessionId,
+                lease,
+                currentExp);
+        }
 
         public QuestSetTriggerResult HandleSetTrigger(int characterId, byte[] body)
+            => HandleSetTrigger(
+                ResolveCurrentOwnerContext(characterId, 0),
+                body);
+
+        internal QuestSetTriggerResult HandleSetTrigger(
+            QuestCommandOwnerContext owner,
+            byte[] body)
         {
             if (body == null || body.Length < 3)
                 return QuestSetTriggerResult.Fail(22);
+            if (!owner.IsCurrentInventoryOwner())
+                return QuestSetTriggerResult.Fail(22);
+
+            var characterId = owner.CharacterId;
             var questId = BitConverter.ToUInt16(body, 0);
             var triggerType = body[2];
             var increment = body.Length >= 4 && body[3] != 0;
+            var activeQuest = QuestActiveListRules.FindByQuestId(
+                _repository.LoadActiveQuests(characterId),
+                questId);
+            if (activeQuest == null)
+            {
+                FileLogger.Log(
+                    $"[QuestService] SET_TRIGGER quest={questId} " +
+                    "not in active list, echo back");
+                return new QuestSetTriggerResult
+                {
+                    QuestId = questId,
+                    TriggerValue = 0,
+                };
+            }
+
             var applied = _progress.Apply(new QuestProgressApplicationRequest
             {
                 CharacterId = characterId,
@@ -129,6 +155,12 @@ namespace DfoServer.Game.Quests
                 QuestId = questId,
                 TriggerType = triggerType,
                 Increment = increment,
+                EligibleQuestActivations =
+                    new Dictionary<ushort, QuestActivationId>
+                    {
+                        [questId] = activeQuest.ActivationId,
+                    },
+                CommandOwner = owner,
             });
             if (!applied.Success)
             {
@@ -139,6 +171,13 @@ namespace DfoServer.Game.Quests
             }
             if (applied.QuestNotActive)
             {
+                if (applied.ActivationChanged)
+                {
+                    FileLogger.Log(
+                        $"[QuestService] SET_TRIGGER rejected stale activation " +
+                        $"quest={questId} cid={characterId}");
+                    return QuestSetTriggerResult.Fail(22);
+                }
                 FileLogger.Log(
                     $"[QuestService] SET_TRIGGER quest={questId} " +
                     "not in active list, echo back");
@@ -152,9 +191,13 @@ namespace DfoServer.Game.Quests
                 return QuestSetTriggerResult.Fail(22);
 
             var change = applied.Changes[applied.Changes.Count - 1];
+            var disposition = QuestClientTriggerAuthority.Resolve(
+                questId,
+                triggerType);
             FileLogger.Log(
                 $"[QuestService] SET_TRIGGER quest={questId} " +
                 $"type=0x{triggerType:X2} inc={increment} " +
+                $"authority={disposition} " +
                 $"trigger={change.PreviousTriggerValue}->{change.TriggerValue}");
             return change;
         }
@@ -183,7 +226,7 @@ namespace DfoServer.Game.Quests
                 var questMatchesFilter = filter == null || filter.Count == 0;
                 foreach (var item in seekItems)
                 {
-                    if (item.ItemId <= 0 || item.Count <= 0)
+                    if (item.ItemId < 0 || item.Count <= 0)
                         continue;
                     if (!questMatchesFilter && filter.Contains(item.ItemId))
                         questMatchesFilter = true;
@@ -192,7 +235,7 @@ namespace DfoServer.Game.Quests
                     continue;
                 foreach (var item in seekItems)
                 {
-                    if (item.ItemId > 0 && item.Count > 0)
+                    if (item.ItemId >= 0 && item.Count > 0)
                         relevantItemIds.Add(item.ItemId);
                 }
             }
@@ -241,7 +284,9 @@ namespace DfoServer.Game.Quests
             int dungeonId,
             int mapId,
             Guid sourceEventId = default,
-            IReadOnlyCollection<ushort> eligibleQuestIds = null)
+            IReadOnlyCollection<ushort> eligibleQuestIds = null,
+            IReadOnlyDictionary<ushort, QuestActivationId>
+                eligibleQuestActivations = null)
         {
             var changed = SyncClearMapQuestProgressCore(
                 _connectionString,
@@ -254,7 +299,8 @@ namespace DfoServer.Game.Quests
                         targetDungeonId,
                         targetMapId),
                 sourceEventId,
-                eligibleQuestIds);
+                eligibleQuestIds,
+                eligibleQuestActivations);
             if (changed > 0)
             {
                 FileLogger.Log(
@@ -271,7 +317,9 @@ namespace DfoServer.Game.Quests
                 int difficulty,
                 int monsterCode,
                 Guid sourceEventId = default,
-                IReadOnlyCollection<ushort> eligibleQuestIds = null)
+                IReadOnlyCollection<ushort> eligibleQuestIds = null,
+                IReadOnlyDictionary<ushort, QuestActivationId>
+                    eligibleQuestActivations = null)
         {
             if (characterId <= 0 || dungeonId <= 0 || monsterCode <= 0)
                 return Array.Empty<QuestSetTriggerResult>();
@@ -285,6 +333,7 @@ namespace DfoServer.Game.Quests
                 Difficulty = difficulty,
                 MonsterCode = monsterCode,
                 EligibleQuestIds = eligibleQuestIds,
+                EligibleQuestActivations = eligibleQuestActivations,
             });
             if (!applied.Success)
             {
@@ -297,6 +346,51 @@ namespace DfoServer.Game.Quests
             return applied.Changes;
         }
 
+        internal IReadOnlyList<QuestSetTriggerResult>
+            SyncHuntEnemyQuestProgress(
+                int characterId,
+                int dungeonId,
+                int difficulty,
+                int enemyCode,
+                int enemyType,
+                Guid sourceEventId = default,
+                IReadOnlyCollection<ushort> eligibleQuestIds = null,
+                IReadOnlyDictionary<ushort, QuestActivationId>
+                    eligibleQuestActivations = null)
+        {
+            if (characterId <= 0
+                || dungeonId <= 0
+                || enemyCode <= 0
+                || enemyType < GameWorld.QuestDropProvider.EnemyTypeMonster
+                || enemyType > GameWorld.QuestDropProvider.EnemyTypePassiveObject)
+            {
+                return Array.Empty<QuestSetTriggerResult>();
+            }
+
+            var applied = _progress.Apply(new QuestProgressApplicationRequest
+            {
+                CharacterId = characterId,
+                Operation = QuestProgressOperation.HuntEnemy,
+                SourceEventId = sourceEventId,
+                DungeonId = dungeonId,
+                Difficulty = difficulty,
+                MonsterCode = enemyCode,
+                EnemyType = enemyType,
+                EligibleQuestIds = eligibleQuestIds,
+                EligibleQuestActivations = eligibleQuestActivations,
+            });
+            if (!applied.Success)
+            {
+                FileLogger.Log(
+                    $"[QuestService] HUNT_ENEMY progress failed: " +
+                    $"cid={characterId} dungeon={dungeonId} " +
+                    $"enemy={enemyCode}/{enemyType} event={sourceEventId:N} " +
+                    $"error={applied.Error}");
+                return Array.Empty<QuestSetTriggerResult>();
+            }
+            return applied.Changes;
+        }
+
         internal static int SyncClearMapQuestProgressCore(
             string connectionString,
             int characterId,
@@ -304,7 +398,9 @@ namespace DfoServer.Game.Quests
             int mapId,
             Func<ushort, int, int, bool> matchesClearMapQuest,
             Guid sourceEventId = default,
-            IReadOnlyCollection<ushort> eligibleQuestIds = null)
+            IReadOnlyCollection<ushort> eligibleQuestIds = null,
+            IReadOnlyDictionary<ushort, QuestActivationId>
+                eligibleQuestActivations = null)
         {
             if (string.IsNullOrWhiteSpace(connectionString)
                 || characterId <= 0
@@ -325,6 +421,7 @@ namespace DfoServer.Game.Quests
                     DungeonId = dungeonId,
                     MapId = mapId,
                     EligibleQuestIds = eligibleQuestIds,
+                    EligibleQuestActivations = eligibleQuestActivations,
                 },
                 matchesClearMapQuest);
             if (!applied.Success)

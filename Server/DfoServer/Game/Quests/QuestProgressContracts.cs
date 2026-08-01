@@ -10,6 +10,7 @@ namespace DfoServer.Game.Quests
         ClearMap = 2,
         ClearDungeon = 3,
         SeekingItems = 4,
+        HuntEnemy = 5,
     }
 
     internal sealed class QuestProgressApplicationRequest
@@ -24,9 +25,13 @@ namespace DfoServer.Game.Quests
         internal int Difficulty { get; set; }
         internal int MapId { get; set; }
         internal int MonsterCode { get; set; }
+        internal int EnemyType { get; set; }
         internal IReadOnlyCollection<ushort> EligibleQuestIds { get; set; }
+        internal IReadOnlyDictionary<ushort, QuestActivationId>
+            EligibleQuestActivations { get; set; }
         internal IReadOnlyCollection<int> ItemFilter { get; set; }
         internal IReadOnlyDictionary<int, int> HeldItemCounts { get; set; }
+        internal QuestCommandOwnerContext? CommandOwner { get; set; }
 
         internal string EventKind
         {
@@ -36,6 +41,8 @@ namespace DfoServer.Game.Quests
                 {
                     case QuestProgressOperation.HuntMonster:
                         return "hunt-monster";
+                    case QuestProgressOperation.HuntEnemy:
+                        return "hunt-enemy";
                     case QuestProgressOperation.ClearDungeon:
                         return "clear-dungeon";
                     case QuestProgressOperation.ClearMap:
@@ -57,7 +64,9 @@ namespace DfoServer.Game.Quests
         internal bool Success { get; set; }
         internal bool DuplicateEvent { get; set; }
         internal bool QuestNotActive { get; set; }
+        internal bool ActivationChanged { get; set; }
         internal bool MatchedObjective { get; set; }
+        internal bool RetryRequired { get; set; }
         internal string Error { get; set; } = string.Empty;
         internal IReadOnlyList<QuestSetTriggerResult> Changes => _changes;
 

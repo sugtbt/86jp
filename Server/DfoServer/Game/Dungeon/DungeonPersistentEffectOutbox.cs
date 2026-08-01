@@ -51,6 +51,43 @@ namespace DfoServer.Game.Dungeon
         internal long? CommittedAt { get; set; }
     }
 
+    internal readonly struct DungeonPersistentEffectRecoveryCursor
+    {
+        internal DungeonPersistentEffectRecoveryCursor(
+            long createdAt,
+            string effectKind,
+            DungeonEffectScope effectScope,
+            long scopeTarget,
+            Guid sourceEventId)
+        {
+            CreatedAt = createdAt;
+            EffectKind = effectKind;
+            EffectScope = effectScope;
+            ScopeTarget = scopeTarget;
+            SourceEventId = sourceEventId;
+        }
+
+        internal long CreatedAt { get; }
+        internal string EffectKind { get; }
+        internal DungeonEffectScope EffectScope { get; }
+        internal long ScopeTarget { get; }
+        internal Guid SourceEventId { get; }
+        internal bool IsValid => CreatedAt >= 0
+            && !string.IsNullOrWhiteSpace(EffectKind)
+            && SourceEventId != Guid.Empty;
+
+        internal static DungeonPersistentEffectRecoveryCursor From(
+            DungeonPersistentEffectRecord record)
+            => record == null
+                ? default
+                : new DungeonPersistentEffectRecoveryCursor(
+                    record.CreatedAt,
+                    record.EffectId.EffectKind,
+                    record.EffectId.Scope,
+                    record.EffectId.ScopeTarget,
+                    record.EffectId.SourceEventId);
+    }
+
     internal readonly struct DungeonPersistentEffectReservation
     {
         internal DungeonPersistentEffectReservation(
@@ -321,6 +358,16 @@ WHERE source_event_id = @eventId
 
         internal IReadOnlyList<DungeonPersistentEffectRecord>
             LoadRecoverableForCharacter(int characterId, int maximumCount = 64)
+            => LoadRecoverableForCharacter(
+                characterId,
+                after: null,
+                maximumCount);
+
+        internal IReadOnlyList<DungeonPersistentEffectRecord>
+            LoadRecoverableForCharacter(
+                int characterId,
+                DungeonPersistentEffectRecoveryCursor? after,
+                int maximumCount)
         {
             var result = new List<DungeonPersistentEffectRecord>();
             if (characterId <= 0 || maximumCount <= 0)
@@ -339,7 +386,23 @@ FROM dungeon_persistent_effect_outbox
 WHERE character_id = @characterId
   AND (state IN (@pending, @failed)
        OR (state = @reserved AND lease_expires_at <= @now))
-ORDER BY created_at, effect_kind, scope_target
+  AND (@hasCursor = 0
+       OR created_at > @cursorCreatedAt
+       OR (created_at = @cursorCreatedAt
+           AND effect_kind > @cursorEffectKind)
+       OR (created_at = @cursorCreatedAt
+           AND effect_kind = @cursorEffectKind
+           AND effect_scope > @cursorEffectScope)
+       OR (created_at = @cursorCreatedAt
+           AND effect_kind = @cursorEffectKind
+           AND effect_scope = @cursorEffectScope
+           AND scope_target > @cursorScopeTarget)
+       OR (created_at = @cursorCreatedAt
+           AND effect_kind = @cursorEffectKind
+           AND effect_scope = @cursorEffectScope
+           AND scope_target = @cursorScopeTarget
+           AND source_event_id > @cursorSourceEventId))
+ORDER BY created_at, effect_kind, effect_scope, scope_target, source_event_id
 LIMIT @maximumCount;";
                 command.Parameters.AddWithValue("@characterId", characterId);
                 command.Parameters.AddWithValue(
@@ -352,6 +415,28 @@ LIMIT @maximumCount;";
                     "@failed",
                     (int)DungeonPersistentEffectState.Failed);
                 command.Parameters.AddWithValue("@now", now);
+                var cursor = after.GetValueOrDefault();
+                var hasCursor = after.HasValue && cursor.IsValid;
+                command.Parameters.AddWithValue(
+                    "@hasCursor",
+                    hasCursor ? 1 : 0);
+                command.Parameters.AddWithValue(
+                    "@cursorCreatedAt",
+                    hasCursor ? cursor.CreatedAt : 0);
+                command.Parameters.AddWithValue(
+                    "@cursorEffectKind",
+                    hasCursor ? cursor.EffectKind : string.Empty);
+                command.Parameters.AddWithValue(
+                    "@cursorEffectScope",
+                    hasCursor ? (int)cursor.EffectScope : 0);
+                command.Parameters.AddWithValue(
+                    "@cursorScopeTarget",
+                    hasCursor ? cursor.ScopeTarget : 0);
+                command.Parameters.AddWithValue(
+                    "@cursorSourceEventId",
+                    hasCursor
+                        ? cursor.SourceEventId.ToString("N")
+                        : string.Empty);
                 command.Parameters.AddWithValue("@maximumCount", maximumCount);
                 using (var reader = command.ExecuteReader())
                 {
@@ -360,6 +445,36 @@ LIMIT @maximumCount;";
                 }
             }
             return result;
+        }
+
+        internal int CountRecoverableForCharacter(int characterId)
+        {
+            if (characterId <= 0)
+                return 0;
+
+            var now = _utcNowMilliseconds();
+            using (var connection = Open())
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = @"
+SELECT COUNT(*)
+FROM dungeon_persistent_effect_outbox
+WHERE character_id = @characterId
+  AND (state IN (@pending, @failed)
+       OR (state = @reserved AND lease_expires_at <= @now));";
+                command.Parameters.AddWithValue("@characterId", characterId);
+                command.Parameters.AddWithValue(
+                    "@pending",
+                    (int)DungeonPersistentEffectState.Pending);
+                command.Parameters.AddWithValue(
+                    "@reserved",
+                    (int)DungeonPersistentEffectState.Reserved);
+                command.Parameters.AddWithValue(
+                    "@failed",
+                    (int)DungeonPersistentEffectState.Failed);
+                command.Parameters.AddWithValue("@now", now);
+                return Convert.ToInt32(command.ExecuteScalar());
+            }
         }
 
         private bool TryFinishReservation(

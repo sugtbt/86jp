@@ -82,14 +82,22 @@ namespace DfoServer.SelfTests
                 "01-FA-07-00-00-00-00", trigger, ref failures);
 
             // --- 完成: 触发器归零 -> 成功 ACK (经验/金币/消耗/奖励段) ---
-            var finishOk = QuestAckBuilder.BuildFinish(questService.HandleFinishQuest(CharacterId, BuildFinishBody(LetterQuestId)));
+            var finishOk = QuestAckBuilder.BuildFinish(
+                QuestSelfTestCommandAdapter.HandleFinish(
+                    questService,
+                    CharacterId,
+                    BuildFinishBody(LetterQuestId)));
             CheckBytes("finish success ack bytes",
                 "01-FA-07-00-AB-B4-00-00-A8-0C-00-00-00-00-01-00-00-00-00-00-00-A8-0C-00-00-00-00-00-00-00-00-00-00",
                 finishOk,
                 ref failures);
 
             // --- 完成: 任务已完成且不在身上, 再次请求被拒绝(不能重复领奖励) ---
-            var finishAgain = QuestAckBuilder.BuildFinish(questService.HandleFinishQuest(CharacterId, BuildFinishBody(LetterQuestId)));
+            var finishAgain = QuestAckBuilder.BuildFinish(
+                QuestSelfTestCommandAdapter.HandleFinish(
+                    questService,
+                    CharacterId,
+                    BuildFinishBody(LetterQuestId)));
             CheckBytes("finish repeated rejected",
                 "00-16", finishAgain, ref failures);
 
@@ -145,14 +153,8 @@ namespace DfoServer.SelfTests
             return body;
         }
 
-        private static byte[] BuildFinishBody(ushort questId)
-        {
-            var body = new byte[6];
-            BitConverter.GetBytes(questId).CopyTo(body, 0);
-            BitConverter.GetBytes(ushort.MaxValue).CopyTo(body, 2); // 无奖励选择
-            BitConverter.GetBytes((ushort)1).CopyTo(body, 4);       // multiplier=1
-            return body;
-        }
+        private static byte[] BuildFinishBody(ushort questId) =>
+            QuestSelfTestCommandAdapter.BuildFinishBody(questId);
 
         private static void SeedAccount(string dbPath)
         {

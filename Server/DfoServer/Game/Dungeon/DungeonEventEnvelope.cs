@@ -2,6 +2,12 @@ using System;
 
 namespace DfoServer.Game.Dungeon
 {
+    public enum DungeonClearPresentationKind
+    {
+        Standard,
+        BloodAltar,
+    }
+
     public sealed class DungeonEventEnvelope
     {
         public DungeonEventEnvelope(
@@ -31,10 +37,17 @@ namespace DfoServer.Game.Dungeon
 
         public Guid SourceEventId { get; }
         public DungeonRunIdentity RunIdentity { get; }
+        public DungeonInstanceIdentity InstanceIdentity =>
+            RunIdentity.InstanceIdentity;
+        public DungeonParticipantRunIdentity ParticipantRunIdentity =>
+            RunIdentity.ParticipantIdentity;
         public long PartyDungeonInstanceId => RunIdentity.PartyDungeonInstanceId;
         public long RunId => RunIdentity.RunId;
         public long RunGeneration => RunIdentity.RunGeneration;
         public long? RoomInstanceId { get; }
+        public DungeonRoomIdentity RoomIdentity => RoomInstanceId.HasValue
+            ? new DungeonRoomIdentity(InstanceIdentity, RoomInstanceId.Value)
+            : default;
         public int SourcePlayerId { get; }
         public int? AffectedPlayerId { get; }
         public long? SourceActorId { get; }
@@ -88,16 +101,20 @@ namespace DfoServer.Game.Dungeon
         public DungeonClearIntent(
             DungeonEventEnvelope source,
             string reason,
-            int bossCode)
+            int bossCode,
+            DungeonClearPresentationKind presentationKind =
+                DungeonClearPresentationKind.Standard)
         {
             Source = source ?? throw new ArgumentNullException(nameof(source));
             Reason = reason ?? string.Empty;
             BossCode = bossCode;
+            PresentationKind = presentationKind;
         }
 
         public DungeonEventEnvelope Source { get; }
         public string Reason { get; }
         public int BossCode { get; }
+        public DungeonClearPresentationKind PresentationKind { get; }
     }
 
     public sealed class DungeonClearedFact
@@ -107,11 +124,13 @@ namespace DfoServer.Game.Dungeon
             Source = intent.Source;
             Reason = intent.Reason;
             BossCode = intent.BossCode;
+            PresentationKind = intent.PresentationKind;
         }
 
         public Guid SourceEventId => Source.SourceEventId;
         public DungeonEventEnvelope Source { get; }
         public string Reason { get; }
         public int BossCode { get; }
+        public DungeonClearPresentationKind PresentationKind { get; }
     }
 }

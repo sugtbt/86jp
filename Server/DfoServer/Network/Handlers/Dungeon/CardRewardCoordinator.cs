@@ -27,19 +27,24 @@ namespace DfoServer.Network.Handlers.Dungeon
             var run = session.Player.CurrentRun;
             if (run == null)
                 return;
+            layoutDelayMs = Math.Max(0, layoutDelayMs);
+            autoFlipDelayMs = Math.Max(0, autoFlipDelayMs);
+            lock (run.SyncRoot)
+                run.Settlement.CardAutoFlipDelayMs = autoFlipDelayMs;
             var identity = run.CaptureIdentity();
+            var deadlineUtc = DateTime.UtcNow.AddMilliseconds(layoutDelayMs);
             var ticket = run.Timers.Begin(
-                DungeonRunTimerKeys.SettlementCardAutoFlow);
-            var handle = ClockService.Instance.ScheduleOneShotAfterAsync(
-                BuildAutoFlipTimerName(session, run, ticket),
-                TimeSpan.FromMilliseconds(layoutDelayMs),
-                async _ => await OnLayoutTimerElapsedAsync(
-                    session,
-                    run,
-                    identity,
-                    ticket,
-                    autoFlipDelayMs));
-            run.Timers.Attach(ticket, handle);
+                DungeonRunTimerKeys.SettlementCardAutoFlow,
+                deadlineUtc,
+                RunTimerDetachPolicy.SuspendUntilResume);
+            ScheduleLayoutTimer(
+                session,
+                run,
+                identity,
+                deadlineUtc,
+                ticket,
+                autoFlipDelayMs,
+                "Settlement");
         }
 
         internal void StartDelayedAutoFlip(
@@ -49,15 +54,82 @@ namespace DfoServer.Network.Handlers.Dungeon
             var run = session.Player.CurrentRun;
             if (run == null)
                 return;
+            delayMs = Math.Max(0, delayMs);
+            lock (run.SyncRoot)
+                run.Settlement.CardAutoFlipDelayMs = delayMs;
+            var deadlineUtc = DateTime.UtcNow.AddMilliseconds(delayMs);
             var ticket = run.Timers.Begin(
-                DungeonRunTimerKeys.SettlementCardAutoFlow);
+                DungeonRunTimerKeys.SettlementCardAutoFlow,
+                deadlineUtc,
+                RunTimerDetachPolicy.SuspendUntilResume);
             ScheduleAutoFlipTimer(
                 session,
                 run,
                 run.CaptureIdentity(),
-                delayMs,
+                deadlineUtc,
                 ticket,
                 "Standalone");
+        }
+
+        internal bool RecoverTimer(EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            if (run == null)
+                return false;
+
+            var phase = run.Phase;
+            if (run.CardRewards == null
+                || run.SettlementState == DungeonSettlementState.Completed
+                || (phase == DungeonRunPhase.CardsRevealed
+                    && (run.FreeCardRewardDelivered
+                        || CardRewardRules.IsCommitted(
+                            run,
+                            CardRewardSide.Free))))
+            {
+                run.Timers.Cancel(
+                    DungeonRunTimerKeys.SettlementCardAutoFlow);
+                return false;
+            }
+
+            if (!run.Timers.TryResume(
+                    DungeonRunTimerKeys.SettlementCardAutoFlow,
+                    out var ticket,
+                    out var deadlineUtc))
+            {
+                return false;
+            }
+
+            var identity = run.CaptureIdentity();
+            if (phase == DungeonRunPhase.ResultShown)
+            {
+                int autoFlipDelayMs;
+                lock (run.SyncRoot)
+                    autoFlipDelayMs = run.Settlement.CardAutoFlipDelayMs;
+                ScheduleLayoutTimer(
+                    session,
+                    run,
+                    identity,
+                    deadlineUtc,
+                    ticket,
+                    Math.Max(0, autoFlipDelayMs),
+                    "Rejoin");
+                return true;
+            }
+
+            if (phase == DungeonRunPhase.CardsRevealed)
+            {
+                ScheduleAutoFlipTimer(
+                    session,
+                    run,
+                    identity,
+                    deadlineUtc,
+                    ticket,
+                    "Rejoin");
+                return true;
+            }
+
+            run.Timers.Cancel(DungeonRunTimerKeys.SettlementCardAutoFlow);
+            return false;
         }
 
         internal async Task HandleSelectCard(
@@ -252,21 +324,50 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 await _sender.SendItemUpdatesAsync(session, result.Changes);
             }
+            else if (!result.Committed
+                && session.Player.IsCurrentDungeonRun(identity))
+            {
+                await _sender.SendCardInfoAsync(session, run);
+            }
+        }
+
+        private void ScheduleLayoutTimer(
+            EnhancedClientSession session,
+            DungeonRun run,
+            DungeonRunIdentity identity,
+            DateTime deadlineUtc,
+            RunTimerTicket ticket,
+            int autoFlipDelayMs,
+            string source)
+        {
+            if (!IsAutoFlipTimerCurrent(session, run, identity, ticket))
+                return;
+            var handle = ClockService.Instance.ScheduleOneShotAsync(
+                BuildAutoFlipTimerName(session, run, ticket),
+                deadlineUtc,
+                async _ => await OnLayoutTimerElapsedAsync(
+                    session,
+                    run,
+                    identity,
+                    ticket,
+                    autoFlipDelayMs,
+                    source));
+            run.Timers.Attach(ticket, handle);
         }
 
         private void ScheduleAutoFlipTimer(
             EnhancedClientSession session,
             DungeonRun run,
             DungeonRunIdentity identity,
-            int delayMs,
+            DateTime deadlineUtc,
             RunTimerTicket ticket,
             string source)
         {
             if (!IsAutoFlipTimerCurrent(session, run, identity, ticket))
                 return;
-            var handle = ClockService.Instance.ScheduleOneShotAfterAsync(
+            var handle = ClockService.Instance.ScheduleOneShotAsync(
                 BuildAutoFlipTimerName(session, run, ticket),
-                TimeSpan.FromMilliseconds(delayMs),
+                deadlineUtc,
                 async _ => await OnAutoFlipTimerElapsedAsync(
                     session,
                     run,
@@ -281,29 +382,41 @@ namespace DfoServer.Network.Handlers.Dungeon
             DungeonRun run,
             DungeonRunIdentity identity,
             RunTimerTicket ticket,
-            int autoFlipDelayMs)
+            int autoFlipDelayMs,
+            string source)
         {
             await run.Settlement.CardProjectionGate.WaitAsync();
             try
             {
-                if (!IsAutoFlipTimerCurrent(session, run, identity, ticket)
-                    || run.Phase != DungeonRunPhase.ResultShown)
+                if (!IsAutoFlipTimerCurrent(session, run, identity, ticket))
                 {
                     return;
                 }
-                FileLogger.Log("[CardRewardCoordinator] Auto-layout timer fired");
+                if (run.Phase != DungeonRunPhase.ResultShown)
+                {
+                    run.Timers.TryComplete(ticket);
+                    return;
+                }
+                FileLogger.Log(
+                    $"[CardRewardCoordinator] {source} auto-layout timer fired");
                 await _sender.SendLayoutAsync(session);
                 if (!IsAutoFlipTimerCurrent(session, run, identity, ticket)
                     || !run.TryMarkCardsRevealed())
                 {
                     return;
                 }
+                var deadlineUtc = DateTime.UtcNow.AddMilliseconds(
+                    Math.Max(0, autoFlipDelayMs));
+                var nextTicket = run.Timers.Begin(
+                    DungeonRunTimerKeys.SettlementCardAutoFlow,
+                    deadlineUtc,
+                    RunTimerDetachPolicy.SuspendUntilResume);
                 ScheduleAutoFlipTimer(
                     session,
                     run,
                     identity,
-                    autoFlipDelayMs,
-                    ticket,
+                    deadlineUtc,
+                    nextTicket,
                     "Auto-flow");
             }
             finally
@@ -322,9 +435,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             await run.Settlement.CardProjectionGate.WaitAsync();
             try
             {
-                if (!IsAutoFlipTimerCurrent(session, run, identity, ticket)
-                    || run.Phase != DungeonRunPhase.CardsRevealed)
+                if (!IsAutoFlipTimerCurrent(session, run, identity, ticket))
                 {
+                    return;
+                }
+                if (run.Phase != DungeonRunPhase.CardsRevealed)
+                {
+                    run.Timers.TryComplete(ticket);
                     return;
                 }
                 FileLogger.Log(
@@ -333,6 +450,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
             finally
             {
+                run.Timers.TryComplete(ticket);
                 run.Settlement.CardProjectionGate.Release();
             }
         }

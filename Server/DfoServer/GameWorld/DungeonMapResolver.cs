@@ -33,11 +33,13 @@ namespace DfoServer.GameWorld
     {
         public Dictionary<long, List<MapFileEntry>> ByCoordinate { get; } = new Dictionary<long, List<MapFileEntry>>();
         public Dictionary<MapFileType, List<MapFileEntry>> ByType { get; } = new Dictionary<MapFileType, List<MapFileEntry>>();
+        public List<MapFileEntry> Entries { get; } = new List<MapFileEntry>();
 
         public static long CoordKey(int x, int y) => ((long)x << 32) | (uint)y;
 
         public void Add(MapFileEntry entry)
         {
+            Entries.Add(entry);
             if (entry.HasCoordinate)
             {
                 var key = CoordKey(entry.CoordX, entry.CoordY);
@@ -81,6 +83,10 @@ namespace DfoServer.GameWorld
         private static readonly ConcurrentDictionary<int, string>
             MapGreedSignatureCache =
                 new ConcurrentDictionary<int, string>();
+
+        private static readonly ConcurrentDictionary<long, bool>
+            MapAiCharacterCache =
+                new ConcurrentDictionary<long, bool>();
 
         private static readonly ConcurrentDictionary<string, DungeonMapDirectoryIndex> DirIndexCache =
             new ConcurrentDictionary<string, DungeonMapDirectoryIndex>(StringComparer.OrdinalIgnoreCase);
@@ -188,6 +194,36 @@ namespace DfoServer.GameWorld
                 }
             }
 
+            if (isQuestConnected
+                && isStartRoom
+                && !HasMapSpecificationAt(maze, x, y)
+                && TryResolveQuestCompanionStartMap(
+                    index,
+                    maplst,
+                    dungeonId,
+                    maze,
+                    out var companionStartMapId,
+                    out var companionQuestId,
+                    out var companionApcId))
+            {
+                if (companionStartMapId > 0)
+                {
+                    FileLogger.Log(
+                        $"[DungeonMapResolver] QUEST_COMPANION_START: " +
+                        $"dungeon={dungeonId} maze={mazeIndex} " +
+                        $"quest={companionQuestId} apc={companionApcId} " +
+                        $"room=({x},{y}) map={companionStartMapId}");
+                    return companionStartMapId;
+                }
+
+                FileLogger.Log(
+                    $"[DungeonMapResolver] QUEST_COMPANION_START_UNRESOLVED: " +
+                    $"dungeon={dungeonId} maze={mazeIndex} " +
+                    $"quest={companionQuestId} apc={companionApcId} " +
+                    $"room=({x},{y})");
+                return -1;
+            }
+
             // For non-quest start/boss rooms without an explicit maze-local match,
             // prefer a typed directory file at the exact coordinate. Quest-connected
             // mazes use their affinity-aware fallback below when the start is omitted.
@@ -221,6 +257,26 @@ namespace DfoServer.GameWorld
                     return mapId;
             }
 
+            // Tournament MAP resources share one directory. Their explicit
+            // [dungeon] owner is stronger than directory order and must be
+            // applied before the ordinary fallback can select a sibling MAP.
+            if (loaded.File.TournamentDungeon)
+            {
+                mapId = ResolveFromDeclaredDungeonOwner(
+                    index,
+                    maplst,
+                    dungeonId,
+                    maze,
+                    mazeIndex,
+                    x,
+                    y,
+                    isStartRoom,
+                    isBossRoom,
+                    isQuestConnected);
+                if (mapId > 0)
+                    return mapId;
+            }
+
             // Step 2+3: Directory index (coordinate + type pool)
             mapId = ResolveFromDirectoryIndex(
                 index,
@@ -238,6 +294,46 @@ namespace DfoServer.GameWorld
 
             FileLogger.Log($"[DungeonMapResolver] UNRESOLVED: dungeon={dungeonId} maze={mazeIndex} room=({x},{y}) start={isStartRoom} boss={isBossRoom} quest={isQuestConnected} dirEntries={CountIndexEntries(index)}");
             return -1;
+        }
+
+        private static int ResolveFromDeclaredDungeonOwner(
+            DungeonMapDirectoryIndex index,
+            LstFile mapList,
+            int dungeonId,
+            MazeInfo maze,
+            int mazeIndex,
+            int x,
+            int y,
+            bool isStartRoom,
+            bool isBossRoom,
+            bool isQuestConnected)
+        {
+            if (index == null || mapList == null || index.Entries.Count == 0)
+                return -1;
+
+            var owned = new DungeonMapDirectoryIndex();
+            foreach (var entry in index.Entries)
+            {
+                if (entry.MapId > 0
+                    && GetMapDungeonOwner(mapList, entry.MapId) == dungeonId)
+                {
+                    owned.Add(entry);
+                }
+            }
+            if (owned.Entries.Count == 0)
+                return -1;
+
+            return ResolveFromDirectoryIndex(
+                owned,
+                mapList,
+                dungeonId,
+                maze,
+                mazeIndex,
+                x,
+                y,
+                isStartRoom,
+                isBossRoom,
+                isQuestConnected);
         }
 
         private static bool ContainsCoordinate(int[] positions, int x, int y)
@@ -669,6 +765,7 @@ namespace DfoServer.GameWorld
                     maze,
                     maplst,
                     dungeonId,
+                    expectedGreed,
                     out var hasDungeonStartAreaCandidates);
                 if (anchoredStart > 0)
                 {
@@ -733,6 +830,99 @@ namespace DfoServer.GameWorld
 
             greed = new string(values.GetRange(offset, charsPerCell).ToArray());
             return greed.Length > 0;
+        }
+
+        private static bool TryResolveQuestCompanionStartMap(
+            DungeonMapDirectoryIndex index,
+            LstFile maplst,
+            int dungeonId,
+            MazeInfo maze,
+            out int mapId,
+            out int questId,
+            out int companionApcId)
+        {
+            mapId = -1;
+            questId = 0;
+            companionApcId = 0;
+            var connection = maze?.QuestConnection;
+            if (index == null
+                || maplst == null
+                || connection == null
+                || connection.Length < 2
+                || connection[0] != 0
+                || connection[1] <= 0)
+            {
+                return false;
+            }
+
+            questId = connection[1];
+            if (!QuestTargetIndex.TryGetClearMapDefinition(
+                    questId,
+                    out var definition)
+                || !definition.HasCompanion)
+            {
+                return false;
+            }
+
+            companionApcId = definition.CompanionApcId;
+            if (GetMapDungeonOwner(maplst, definition.TargetId) != dungeonId)
+                return true;
+
+            var candidates = new List<int>();
+            var bestDirectoryPriority = int.MaxValue;
+            foreach (var entry in index.Entries)
+            {
+                if (entry.MapId <= 0
+                    || GetMapDungeonOwner(maplst, entry.MapId) != dungeonId
+                    || !MapContainsAiCharacter(
+                        entry.MapId,
+                        companionApcId))
+                {
+                    continue;
+                }
+
+                if (entry.DirectoryPriority < bestDirectoryPriority)
+                {
+                    bestDirectoryPriority = entry.DirectoryPriority;
+                    candidates.Clear();
+                }
+                if (entry.DirectoryPriority == bestDirectoryPriority
+                    && !candidates.Contains(entry.MapId))
+                {
+                    candidates.Add(entry.MapId);
+                }
+            }
+
+            if (candidates.Count == 1)
+                mapId = candidates[0];
+            return true;
+        }
+
+        private static bool MapContainsAiCharacter(int mapId, int apcCode)
+        {
+            if (mapId <= 0 || apcCode <= 0)
+                return false;
+
+            var key = ((long)mapId << 32) | (uint)apcCode;
+            return MapAiCharacterCache.GetOrAdd(
+                key,
+                _ =>
+                {
+                    try
+                    {
+                        var map = DungeonMapCatalog.GetMapFile(mapId);
+                        foreach (var apc in map.AICharacters)
+                        {
+                            if (apc.Code == apcCode)
+                                return true;
+                        }
+                    }
+                    catch
+                    {
+                    }
+
+                    return false;
+                });
         }
 
         private static int PickOwnedByGreed(
@@ -948,6 +1138,7 @@ namespace DfoServer.GameWorld
             MazeInfo maze,
             LstFile maplst,
             int dungeonId,
+            string expectedGreed,
             out bool hasCandidates)
         {
             hasCandidates = false;
@@ -986,7 +1177,12 @@ namespace DfoServer.GameWorld
                     if (entry.MapId <= 0
                         || anchors.Contains(entry.MapId)
                         || GetMapDungeonOwner(maplst, entry.MapId) != dungeonId
-                        || !HasDungeonStartArea(maplst, entry.MapId))
+                        || !HasDungeonStartArea(maplst, entry.MapId)
+                        || (!string.IsNullOrEmpty(expectedGreed)
+                            && !string.Equals(
+                                GetMapGreedSignature(maplst, entry.MapId),
+                                expectedGreed,
+                                StringComparison.OrdinalIgnoreCase)))
                     {
                         continue;
                     }
@@ -1347,14 +1543,18 @@ namespace DfoServer.GameWorld
                 int suffixStart = 0;
                 while (suffixStart < lower.Length && char.IsDigit(lower[suffixStart])) suffixStart++;
                 var suffix = suffixStart < lower.Length ? lower.Substring(suffixStart) : "";
+                var terminalToken = GetTerminalMapTypeToken(suffix);
                 // Also check prefix (before coordinate): "s407(4,0)" → prefix "s407" → starts with 's'
                 int prefixEnd = 0;
                 while (prefixEnd < lower.Length && (char.IsDigit(lower[prefixEnd]) || char.IsLetter(lower[prefixEnd]))) prefixEnd++;
                 var prefix = lower.Substring(0, Math.Min(prefixEnd, suffixStart));
 
-                if (suffix.Contains("start") || suffix == "s" || prefix.StartsWith("s")) return MapFileType.Start;
-                if (suffix.Contains("boss") || suffix == "b" || prefix.StartsWith("b")) return MapFileType.Boss;
-                if (suffix.Contains("normal") || suffix == "n" || prefix.StartsWith("n")) return MapFileType.Normal;
+                // Composite names such as "35104_quest_s" retain both their
+                // affinity and their structural room role. The terminal role
+                // token must win before the broader quest marker.
+                if (suffix.Contains("start") || terminalToken == "s" || prefix.StartsWith("s")) return MapFileType.Start;
+                if (suffix.Contains("boss") || terminalToken == "b" || prefix.StartsWith("b")) return MapFileType.Boss;
+                if (suffix.Contains("normal") || terminalToken == "n" || prefix.StartsWith("n")) return MapFileType.Normal;
                 if (suffix.Contains("quest") || suffix.StartsWith("q") || prefix.StartsWith("q")) return MapFileType.Quest;
                 if (prefix.StartsWith("h")) return MapFileType.Hidden;
                 if (prefix.StartsWith("e")) return MapFileType.End;
@@ -1424,6 +1624,23 @@ namespace DfoServer.GameWorld
 
             // Unrecognized — treat as Normal
             return MapFileType.Normal;
+        }
+
+        private static string GetTerminalMapTypeToken(string suffix)
+        {
+            if (string.IsNullOrEmpty(suffix))
+                return string.Empty;
+
+            var end = suffix.Length - 1;
+            while (end >= 0 && !char.IsLetterOrDigit(suffix[end]))
+                end--;
+            if (end < 0)
+                return string.Empty;
+
+            var start = end;
+            while (start > 0 && char.IsLetterOrDigit(suffix[start - 1]))
+                start--;
+            return suffix.Substring(start, end - start + 1);
         }
 
         internal static void TryParseMapFileCoordinate(string fileName, out bool found, out int x, out int y)

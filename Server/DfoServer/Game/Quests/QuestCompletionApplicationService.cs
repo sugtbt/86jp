@@ -20,28 +20,59 @@ namespace DfoServer.Game.Quests
             _repository = repository;
         }
 
-        // currentExp is the authoritative in-session value while a character is
-        // in a dungeon. Falling back to the database preserves headless selftests.
         internal QuestFinishResult Apply(
-            int characterId,
-            QuestFinishCommand command,
-            uint? currentExp = null)
+            QuestCommandOwnerContext owner,
+            QuestFinishCommand command)
         {
+            var characterId = owner.CharacterId;
+            var currentExp = owner.CurrentExp;
             var questId = command.QuestId;
             var rewardSelectionIndex = command.RewardSelectionIndex;
             var hasRewardSelection = command.HasRewardSelection;
-            var multiplier = command.Multiplier;
-            var active = _repository.LoadActiveQuests(characterId);
-            var activeQuest = QuestActiveListRules.FindByQuestId(active, questId);
-
-            if (activeQuest == null && _repository.IsQuestCleared(characterId, questId))
+            var completionCount = command.CompletionCount;
+            var lease = owner.InventoryLease;
+            if (!owner.IsCurrentInventoryOwner()
+                || lease.AccountId != owner.AccountId)
             {
-                FileLogger.Log(
-                    $"[QuestCompletionApplicationService] FINISH rejected: " +
-                    $"quest={questId} already cleared and not active, cid={characterId}");
                 return QuestFinishResult.Fail(22);
             }
 
+            var active = _repository.LoadActiveQuests(characterId);
+            var activeQuest = QuestActiveListRules.FindByQuestId(active, questId);
+
+            if (activeQuest == null)
+            {
+                FileLogger.Log(
+                    $"[QuestCompletionApplicationService] FINISH rejected: " +
+                    $"quest={questId} has no active activation, cid={characterId}");
+                return QuestFinishResult.Fail(22);
+            }
+
+            if (!GameWorld.QuestData.TryResolveCompletionDefinition(
+                    questId,
+                    out var completionDefinition,
+                    out var completionDefinitionError))
+            {
+                FileLogger.Log(
+                    $"[QuestCompletionApplicationService] FINISH rejected invalid " +
+                    $"completion definition: quest={questId} cid={characterId} " +
+                    $"error={completionDefinitionError}");
+                return QuestFinishResult.Fail(22);
+            }
+
+            if (completionCount == 0
+                || (completionCount != 1
+                    && !completionDefinition.SupportsBatchCompletion))
+            {
+                FileLogger.Log(
+                    $"[QuestCompletionApplicationService] FINISH rejected count: " +
+                    $"quest={questId} cid={characterId} count={completionCount} " +
+                    $"grade={completionDefinition.Grade} " +
+                    $"type={completionDefinition.Type}");
+                return QuestFinishResult.Fail(22);
+            }
+
+            var isQuestionQuest = GameWorld.QuestData.IsQuestionQuest(questId);
             var clearedFlagValue = 1;
             if (GameWorld.QuestData.IsQuestClearQuest(questId))
             {
@@ -53,10 +84,8 @@ namespace DfoServer.Game.Quests
                     return QuestFinishResult.Fail(22);
                 }
 
-                if (activeQuest != null)
-                    activeQuest.TriggerValue = 0;
             }
-            else if (GameWorld.QuestData.IsQuestionQuest(questId))
+            else if (isQuestionQuest)
             {
                 if (!TryResolveQuestionQuestClearFlagValue(
                         questId,
@@ -76,9 +105,12 @@ namespace DfoServer.Game.Quests
             var playerLevel = GetCharacterScalar(characterId, "level", 1);
             var playerJob = GetCharacterScalar(characterId, "job", -1);
             var playerGrowType = GetCharacterScalar(characterId, "grow_type", 0);
-            var rewardResolution = GameWorld.QuestData.ResolveReward(
-                questId,
-                hasRewardSelection ? rewardSelectionIndex : -1,
+            var rewardResolution = GameWorld.QuestRewardProjector.Resolve(
+                completionDefinition.RewardDefinition,
+                hasRewardSelection && !isQuestionQuest,
+                hasRewardSelection && !isQuestionQuest
+                    ? rewardSelectionIndex
+                    : -1,
                 playerLevel,
                 playerJob,
                 playerGrowType);
@@ -96,236 +128,333 @@ namespace DfoServer.Game.Quests
             var consumedEntries = new List<ConsumedItemEntry>();
             var insertedEntries = new List<InsertedItemEntry>();
             uint goldReward = 0;
-            var expReward = reward.Exp * multiplier;
+            uint expReward = 0;
             uint honorExpReward = 0;
             ulong totalHonorExp = 0;
             uint growthCapsuleExpReward = 0;
             uint totalGrowthCapsuleExp = 0;
-            byte newLevel;
-            uint newExp;
+            var newLevel = (byte)Math.Max(1, Math.Min(byte.MaxValue, playerLevel));
+            uint newExp = currentExp ?? 0;
             var petEvolution = PetCreatureEvolutionResult.Noop;
-            var accountId = GetCharacterScalar(characterId, "account_id", 1);
-            var seekItems = GameWorld.QuestData.GetSeekingConsumeItems(questId);
+            var accountId = owner.AccountId;
+            IReadOnlyCollection<GameWorld.QuestRewardItem> seekItems =
+                string.Equals(
+                    completionDefinition.Type,
+                    "seeking",
+                    StringComparison.Ordinal)
+                    ? completionDefinition.SeekingItems
+                    : GameWorld.QuestData.GetSeekingConsumeItems(questId);
             var eventItems = GameWorld.QuestData.GetEventItems(questId);
             var carryForwardEventItems = GameWorld.QuestData
                 .GetCarryForwardEventItems(questId);
 
-            if (!InventoryContext.TryGetLease(characterId, out var lease))
-                return QuestFinishResult.Fail(22);
-
             lock (lease.SyncRoot)
             {
+                if (!owner.IsCurrentInventoryOwner())
+                    return QuestFinishResult.Fail(22);
+
                 var inventory = lease.Inventory;
-                if (!HasQuestItems(inventory, reward.ConsumeItems)
-                    || !HasQuestItems(inventory, seekItems))
+                if (completionCount > 1)
                 {
-                    return QuestFinishResult.Fail(22);
-                }
-
-                var carryForwardRequests = new List<InventoryRewardGrantRequest>();
-                var rewardRequests = new List<InventoryRewardGrantRequest>();
-                AddMissingCarryForwardEventItemRequests(
-                    inventory,
-                    carryForwardEventItems,
-                    carryForwardRequests);
-                if (reward.ChainType == 0)
-                {
-                    AddQuestRewardRequests(
-                        rewardRequests,
-                        reward.Items,
-                        multiplier,
-                        isTitleRewardQuest,
-                        questId);
-                }
-
-                var allGrantRequests = new List<InventoryRewardGrantRequest>();
-                allGrantRequests.AddRange(carryForwardRequests);
-                allGrantRequests.AddRange(rewardRequests);
-                if (allGrantRequests.Count > 0
-                    && !InventoryRewardGrantService.TryPlanBatch(
+                    var maximumCompletionCount = GetMaximumCompletionCount(
                         inventory,
-                        allGrantRequests,
-                        out _))
+                        completionDefinition.SeekingItems);
+                    if (completionCount > maximumCompletionCount)
+                    {
+                        FileLogger.Log(
+                            $"[QuestCompletionApplicationService] FINISH rejected " +
+                            $"batch upper bound: quest={questId} cid={characterId} " +
+                            $"requested={completionCount} max={maximumCompletionCount}");
+                        return QuestFinishResult.Fail(22);
+                    }
+                }
+
+                if (!TryBuildInventoryPlan(
+                    inventory,
+                    reward,
+                    seekItems,
+                    eventItems,
+                    carryForwardEventItems,
+                    completionCount,
+                    isTitleRewardQuest,
+                    questId,
+                    out var inventoryPlan,
+                    out var planError))
                 {
+                    FileLogger.Log(
+                        $"[QuestCompletionApplicationService] FINISH planning rejected: " +
+                        $"quest={questId} cid={characterId} count={completionCount} " +
+                        $"error={planError}");
                     return QuestFinishResult.Fail(22);
                 }
 
-                if (reward.ChainType == 10 || reward.ChainType == 25)
+                expReward = inventoryPlan.ExpReward;
+                var rollback = QuestCompletionInventoryRollback.Capture(
+                    inventory,
+                    inventoryPlan);
+                var inventoryMutated = false;
+                try
                 {
-                    petEvolution = PetCreatureEvolutionRuntimeService
-                        .TryCompletePetCreatureEvolutionQuest(
-                            inventory,
-                            reward.CreatureKind,
-                            reward.CreatureLevel,
-                            reward.GrowNumber);
-                    if (!petEvolution.Changed)
-                        return QuestFinishResult.Fail(22);
-                }
-
-                var goldCarryLimit = int.MaxValue;
-                using (var connection = new SqliteConnection(_connectionString))
-                {
-                    connection.Open();
-                    using (var transaction = connection.BeginTransaction())
+                    using (var connection = new SqliteConnection(_connectionString))
                     {
-                        if (activeQuest != null)
+                        connection.Open();
+                        using (var transaction = connection.BeginTransaction(deferred: false))
                         {
-                            QuestRepository.DeleteActiveQuest(
-                                connection,
-                                transaction,
-                                characterId,
-                                activeQuest.Slot);
-                        }
+                            if (!owner.IsCurrentInventoryOwner())
+                                return QuestFinishResult.Fail(22);
 
-                        goldCarryLimit = CharacterGoldLimitRepository
-                            .LoadEffectiveGoldCarryLimit(
+                            var transactionActive = QuestRepository.LoadActiveQuests(
                                 connection,
                                 transaction,
                                 characterId);
+                            var transactionQuest = QuestActiveListRules.FindByQuestId(
+                                transactionActive,
+                                questId);
+                            if (transactionQuest == null
+                                || !transactionQuest.ActivationId.Equals(
+                                    activeQuest.ActivationId))
+                            {
+                                return QuestFinishResult.Fail(22);
+                            }
 
-                        if (reward.ChainType == 1 || reward.ChainType == 2)
-                        {
-                            UpdateGrowType(
-                                connection,
-                                transaction,
-                                characterId,
-                                reward.ChainType,
-                                reward.GrowNumber);
-                        }
-                        else if (reward.ChainType == 20)
-                        {
-                            UpdateExpertJob(
-                                connection,
-                                transaction,
-                                characterId,
-                                reward.GrowNumber);
-                        }
-                        else if (reward.ChainType
-                                 == GameWorld.QuestData.ChainTypeSlotExpansion)
-                        {
-                            UpdateSlotExpansion(
-                                connection,
-                                transaction,
-                                characterId,
-                                reward.GrowNumber);
-                        }
+                            var transactionClearedFlagValue = 1;
+                            if (GameWorld.QuestData.IsQuestClearQuest(questId))
+                            {
+                                if (!QuestClearProgressRules.CanFinish(
+                                        connection,
+                                        transaction,
+                                        characterId,
+                                        questId))
+                                {
+                                    return QuestFinishResult.Fail(22);
+                                }
+                            }
+                            else if (isQuestionQuest)
+                            {
+                                if (!TryResolveQuestionQuestClearFlagValue(
+                                        questId,
+                                        transactionQuest,
+                                        hasRewardSelection,
+                                        rewardSelectionIndex,
+                                        out transactionClearedFlagValue))
+                                {
+                                    return QuestFinishResult.Fail(22);
+                                }
+                            }
+                            else if (transactionQuest.TriggerValue != 0)
+                            {
+                                return QuestFinishResult.Fail(22);
+                            }
+                            clearedFlagValue = transactionClearedFlagValue;
 
-                        if (!GameWorld.QuestData.IsRepeatableQuest(questId))
-                        {
-                            QuestRepository.MarkQuestCleared(
+                            if (!QuestRepository.TryDeleteActiveQuestCas(
                                 connection,
                                 transaction,
                                 characterId,
                                 questId,
-                                clearedFlagValue);
-                        }
-                        QuestClearProgressRules.SynchronizeActiveParents(
-                            connection,
-                            transaction,
-                            characterId);
+                                transactionQuest.ActivationId,
+                                transactionQuest.Version,
+                                transactionQuest.TriggerValue))
+                            {
+                                return QuestFinishResult.Fail(22);
+                            }
 
-                        newLevel = (byte)playerLevel;
-                        newExp = currentExp
-                            ?? GetCharacterExp(
-                                connection,
-                                transaction,
-                                characterId);
-                        if (expReward > 0)
-                        {
-                            var grant = Progression.CharacterExperienceService
-                                .GrantInTransaction(
+                            var goldCarryLimit = CharacterGoldLimitRepository
+                                .LoadEffectiveGoldCarryLimit(
+                                    connection,
+                                    transaction,
+                                    characterId);
+
+                            inventoryMutated = true;
+                            if (!TryApplyConsumptionPlan(
+                                    inventory,
+                                    inventoryPlan.RequiredConsumptions,
+                                    consumedEntries)
+                                || !TryApplyConsumptionPlan(
+                                    inventory,
+                                    inventoryPlan.OptionalConsumptions,
+                                    consumedEntries))
+                            {
+                                throw new InvalidOperationException(
+                                    "quest completion consumption plan diverged");
+                            }
+
+                            if (inventoryPlan.RequiresPetEvolution)
+                            {
+                                petEvolution = PetCreatureEvolutionRuntimeService
+                                    .TryCompletePetCreatureEvolutionQuest(
+                                        inventory,
+                                        reward.CreatureKind,
+                                        reward.CreatureLevel,
+                                        reward.GrowNumber);
+                                if (!petEvolution.Changed)
+                                {
+                                    throw new InvalidOperationException(
+                                        "quest pet evolution precondition failed");
+                                }
+                            }
+
+                            if (!InventoryRewardGrantService.TryApplyPreparedBatch(
+                                    inventory,
+                                    inventoryPlan.RewardPlan,
+                                    out var rewardGrant)
+                                || !rewardGrant.Success)
+                            {
+                                throw new InvalidOperationException(
+                                    $"quest reward apply failed: {rewardGrant?.Error}");
+                            }
+                            if (rewardGrant.ActivatedPremiums.Count > 0)
+                            {
+                                throw new InvalidOperationException(
+                                    "quest premium reward bypassed completion policy");
+                            }
+
+                            AppendInsertedEntries(
+                                rewardGrant,
+                                0,
+                                inventoryPlan.CarryForwardGrantCount,
+                                insertedEntries);
+
+                            if (inventoryPlan.RequestedGoldReward > 0)
+                            {
+                                if (!inventory.TryGrantGold(
+                                        (int)inventoryPlan.RequestedGoldReward,
+                                        goldCarryLimit,
+                                        out var grantedGold,
+                                        out _))
+                                {
+                                    throw new InvalidOperationException(
+                                        "quest gold grant failed");
+                                }
+
+                                goldReward = (uint)Math.Max(0, grantedGold);
+                                if (goldReward > 0)
+                                {
+                                    insertedEntries.Add(new InsertedItemEntry
+                                    {
+                                        SlotIndex = 0,
+                                        ItemId = 0,
+                                        CountOrSeed = goldReward,
+                                    });
+                                }
+                            }
+
+                            AppendInsertedEntries(
+                                rewardGrant,
+                                inventoryPlan.CarryForwardGrantCount,
+                                rewardGrant.Results.Count,
+                                insertedEntries);
+
+                            if (reward.ChainType == 1 || reward.ChainType == 2)
+                            {
+                                UpdateGrowType(
                                     connection,
                                     transaction,
                                     characterId,
-                                    accountId,
-                                    newLevel,
-                                    newExp,
-                                    expReward);
-                            newLevel = grant.NewLevel;
-                            newExp = grant.NewExp;
-                            honorExpReward = grant.HonorExpGain;
-                            totalHonorExp = grant.TotalHonorExp;
-                            growthCapsuleExpReward = grant.GrowthCapsuleExpGain;
-                            totalGrowthCapsuleExp = grant.TotalGrowthCapsuleExp;
+                                    reward.ChainType,
+                                    reward.GrowNumber);
+                            }
+                            else if (reward.ChainType == 20)
+                            {
+                                UpdateExpertJob(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    reward.GrowNumber);
+                            }
+                            else if (reward.ChainType
+                                     == GameWorld.QuestData.ChainTypeSlotExpansion)
+                            {
+                                UpdateSlotExpansion(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    reward.GrowNumber);
+                            }
+
+                            if (!completionDefinition.IsRepeatable)
+                            {
+                                QuestRepository.MarkQuestCleared(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    questId,
+                                    clearedFlagValue);
+                            }
+                            QuestClearProgressRules.SynchronizeActiveParents(
+                                connection,
+                                transaction,
+                                characterId);
+
+                            newExp = currentExp
+                                ?? GetCharacterExp(
+                                    connection,
+                                    transaction,
+                                    characterId);
+                            if (expReward > 0)
+                            {
+                                var experienceGrant = Progression
+                                    .CharacterExperienceService
+                                    .GrantInTransaction(
+                                        connection,
+                                        transaction,
+                                        characterId,
+                                        accountId,
+                                        newLevel,
+                                        newExp,
+                                        expReward);
+                                newLevel = experienceGrant.NewLevel;
+                                newExp = experienceGrant.NewExp;
+                                honorExpReward = experienceGrant.HonorExpGain;
+                                totalHonorExp = experienceGrant.TotalHonorExp;
+                                growthCapsuleExpReward =
+                                    experienceGrant.GrowthCapsuleExpGain;
+                                totalGrowthCapsuleExp =
+                                    experienceGrant.TotalGrowthCapsuleExp;
+                            }
+
+                            if (!InventoryPersistenceService.SaveDirtyInTransaction(
+                                    connection,
+                                    transaction,
+                                    lease))
+                            {
+                                throw new InvalidOperationException(
+                                    "quest inventory persistence returned false");
+                            }
+                            if (!owner.IsCurrentInventoryOwner())
+                            {
+                                throw new InvalidOperationException(
+                                    "quest finish inventory lease was replaced");
+                            }
+
+                            transaction.Commit();
                         }
-                        transaction.Commit();
                     }
-                }
 
-                if (!TryConsumeQuestItems(
-                        inventory,
-                        reward.ConsumeItems,
-                        consumedEntries)
-                    || !TryConsumeQuestItems(
-                        inventory,
-                        seekItems,
-                        consumedEntries))
-                {
-                    FileLogger.Log(
-                        $"[QuestCompletionApplicationService] FINISH inventory consume " +
-                        $"failed after quest commit: quest={questId} cid={characterId}");
-                    return QuestFinishResult.Fail(22);
+                    inventory.ClearDirtyState();
+                    inventoryMutated = false;
                 }
-
-                ConsumeNonCarryForwardEventItems(
-                    inventory,
-                    eventItems,
-                    seekItems,
-                    carryForwardEventItems,
-                    consumedEntries);
-                if (!TryGrantRewardsAndAppendEntries(
-                        inventory,
-                        carryForwardRequests,
-                        insertedEntries))
+                catch (Exception ex)
                 {
-                    FileLogger.Log(
-                        $"[QuestCompletionApplicationService] FINISH carry-forward grant " +
-                        $"failed after quest commit: quest={questId} cid={characterId}");
-                    return QuestFinishResult.Fail(22);
-                }
-
-                var requestedGoldReward = reward.Gold * multiplier;
-                if (requestedGoldReward > 0)
-                {
-                    if (!inventory.TryGrantGold(
-                            (int)Math.Min(int.MaxValue, requestedGoldReward),
-                            goldCarryLimit,
-                            out var grantedGold,
-                            out _))
+                    if (inventoryMutated)
                     {
-                        FileLogger.Log(
-                            $"[QuestCompletionApplicationService] FINISH gold grant failed " +
-                            $"after quest commit: quest={questId} cid={characterId}");
-                        return QuestFinishResult.Fail(22);
+                        QuestCompletionInventoryRollback.Restore(
+                            inventory,
+                            rollback,
+                            inventoryPlan.RewardPlan);
                     }
 
-                    goldReward = (uint)Math.Max(0, grantedGold);
-                    if (goldReward > 0)
-                    {
-                        insertedEntries.Add(new InsertedItemEntry
-                        {
-                            SlotIndex = 0,
-                            ItemId = 0,
-                            CountOrSeed = goldReward,
-                        });
-                    }
-                }
-
-                if (!TryGrantRewardsAndAppendEntries(
-                        inventory,
-                        rewardRequests,
-                        insertedEntries))
-                {
                     FileLogger.Log(
-                        $"[QuestCompletionApplicationService] FINISH reward grant failed " +
-                        $"after quest commit: quest={questId} cid={characterId}");
+                        $"[QuestCompletionApplicationService] FINISH failed before " +
+                        $"atomic commit: quest={questId} cid={characterId} " +
+                        $"count={completionCount} error={ex.Message}");
                     return QuestFinishResult.Fail(22);
                 }
             }
 
             FileLogger.Log(
                 $"[QuestCompletionApplicationService] FINISH quest={questId} " +
-                $"rewardIdx={rewardSelectionIndex} mult={multiplier} " +
+                $"rewardIdx={rewardSelectionIndex} count={completionCount} " +
                 $"flag={clearedFlagValue} gold={goldReward} " +
                 $"consumed={consumedEntries.Count} rewarded={insertedEntries.Count}");
             return new QuestFinishResult
@@ -370,15 +499,264 @@ namespace DfoServer.Game.Quests
             }
         }
 
-        private static void ConsumeNonCarryForwardEventItems(
+        private static bool TryBuildInventoryPlan(
             InventoryService inventory,
+            GameWorld.QuestReward reward,
+            IReadOnlyCollection<GameWorld.QuestRewardItem> seekItems,
+            IReadOnlyCollection<GameWorld.QuestRewardItem> eventItems,
+            IReadOnlyCollection<GameWorld.QuestRewardItem> carryForwardEventItems,
+            ushort completionCount,
+            bool isTitleRewardQuest,
+            ushort questId,
+            out QuestCompletionInventoryPlan plan,
+            out string error)
+        {
+            plan = null;
+            error = string.Empty;
+            if (inventory == null || completionCount == 0)
+            {
+                error = "invalid inventory or completion count";
+                return false;
+            }
+
+            if (!TryMultiplyUInt32(reward.Exp, completionCount, out var expReward)
+                || !TryMultiplyUInt32(
+                    reward.Gold,
+                    completionCount,
+                    out var requestedGoldReward)
+                || requestedGoldReward > int.MaxValue)
+            {
+                error = "scaled exp/gold reward exceeds protocol range";
+                return false;
+            }
+
+            if (!TryScaleQuestItems(
+                    reward.ConsumeItems,
+                    completionCount,
+                    out var scaledRewardConsumptions,
+                    out error)
+                || !TryScaleQuestItems(
+                    seekItems,
+                    completionCount,
+                    out var scaledSeekingConsumptions,
+                    out error))
+            {
+                return false;
+            }
+
+            var planningInventory = InventoryCompoundPlanning.CloneInventory(inventory);
+            var requiredConsumptions = new List<QuestInventoryConsumePlanEntry>();
+            if (!TryPlanConsumptions(
+                    planningInventory,
+                    scaledRewardConsumptions,
+                    requiredConsumptions)
+                || !TryPlanConsumptions(
+                    planningInventory,
+                    scaledSeekingConsumptions,
+                    requiredConsumptions))
+            {
+                error = "required quest items are insufficient";
+                return false;
+            }
+
+            var optionalConsumptions = new List<QuestInventoryConsumePlanEntry>();
+            if (!TryPlanOptionalEventConsumptions(
+                    planningInventory,
+                    eventItems,
+                    seekItems,
+                    carryForwardEventItems,
+                    optionalConsumptions))
+            {
+                error = "event-item cleanup plan diverged";
+                return false;
+            }
+
+            var carryForwardRequests = new List<InventoryRewardGrantRequest>();
+            AddMissingCarryForwardEventItemRequests(
+                inventory,
+                carryForwardEventItems,
+                carryForwardRequests);
+
+            var rewardRequests = new List<InventoryRewardGrantRequest>();
+            if (reward.ChainType == 0
+                && !TryAddQuestRewardRequests(
+                    rewardRequests,
+                    reward.Items,
+                    completionCount,
+                    isTitleRewardQuest,
+                    questId,
+                    out error))
+            {
+                return false;
+            }
+
+            var allGrantRequests = new List<InventoryRewardGrantRequest>(
+                carryForwardRequests.Count + rewardRequests.Count);
+            allGrantRequests.AddRange(carryForwardRequests);
+            allGrantRequests.AddRange(rewardRequests);
+            if (!InventoryRewardGrantService.TryPlanBatch(
+                    planningInventory,
+                    allGrantRequests,
+                    out var rewardPlan))
+            {
+                error = $"reward plan failed: {rewardPlan?.Error}";
+                return false;
+            }
+            if (!TryValidateCompletionRewardPlan(rewardPlan, out error))
+                return false;
+
+            if (requiredConsumptions.Count + optionalConsumptions.Count
+                    > byte.MaxValue
+                || CountProjectedInsertedEntries(rewardPlan, requestedGoldReward)
+                    > byte.MaxValue)
+            {
+                error = "completion projection exceeds ACK entry capacity";
+                return false;
+            }
+
+            plan = new QuestCompletionInventoryPlan(
+                requiredConsumptions,
+                optionalConsumptions,
+                rewardPlan,
+                carryForwardRequests.Count,
+                expReward,
+                requestedGoldReward,
+                reward.ChainType == 10 || reward.ChainType == 25);
+            return true;
+        }
+
+        internal static bool TryValidateCompletionRewardPlan(
+            InventoryRewardGrantBatchPlan rewardPlan,
+            out string error)
+        {
+            error = string.Empty;
+            if (rewardPlan == null)
+            {
+                error = "reward plan is missing";
+                return false;
+            }
+
+            foreach (var entry in rewardPlan.Entries)
+            {
+                if (entry.Kind != InventoryRewardGrantKind.Premium)
+                    continue;
+                error = "premium quest rewards require transactional activation";
+                return false;
+            }
+            return true;
+        }
+
+        private static int GetMaximumCompletionCount(
+            InventoryService inventory,
+            IReadOnlyCollection<GameWorld.QuestRewardItem> items)
+        {
+            if (inventory == null || items == null || items.Count == 0)
+                return 0;
+
+            var maximum = int.MaxValue;
+            foreach (var item in items)
+            {
+                if (item.ItemId < 0 || item.Count <= 0)
+                    return 0;
+                maximum = Math.Min(
+                    maximum,
+                    inventory.CountMainItem(item.ItemId) / item.Count);
+            }
+            return Math.Max(0, maximum);
+        }
+
+        private static bool TryScaleQuestItems(
+            IReadOnlyCollection<GameWorld.QuestRewardItem> items,
+            ushort completionCount,
+            out List<GameWorld.QuestRewardItem> scaled,
+            out string error)
+        {
+            scaled = new List<GameWorld.QuestRewardItem>();
+            error = string.Empty;
+            if (items == null || items.Count == 0)
+                return true;
+
+            var order = new List<int>();
+            var itemIds = new Dictionary<int, int>();
+            var totals = new Dictionary<int, int>();
+            foreach (var item in items)
+            {
+                if (item.ItemId < 0 || item.Count <= 0)
+                {
+                    error = "quest item requirement contains a negative item or non-positive count";
+                    return false;
+                }
+
+                var scaledCount = (long)item.Count * completionCount;
+                if (scaledCount <= 0 || scaledCount > int.MaxValue)
+                {
+                    error = "scaled quest item requirement exceeds int32";
+                    return false;
+                }
+
+                var identity = GetMainItemIdentityKey(item.ItemId);
+                if (!totals.TryGetValue(identity, out var current))
+                {
+                    order.Add(identity);
+                    itemIds[identity] = item.ItemId;
+                    current = 0;
+                }
+
+                var combined = (long)current + scaledCount;
+                if (combined > int.MaxValue)
+                {
+                    error = "combined quest item requirement exceeds int32";
+                    return false;
+                }
+                totals[identity] = (int)combined;
+            }
+
+            foreach (var identity in order)
+            {
+                scaled.Add(new GameWorld.QuestRewardItem
+                {
+                    ItemId = itemIds[identity],
+                    Count = totals[identity],
+                });
+            }
+            return true;
+        }
+
+        private static bool TryPlanConsumptions(
+            InventoryService planningInventory,
+            IReadOnlyCollection<GameWorld.QuestRewardItem> items,
+            ICollection<QuestInventoryConsumePlanEntry> entries)
+        {
+            if (planningInventory == null || entries == null)
+                return false;
+            if (items == null || items.Count == 0)
+                return true;
+
+            foreach (var item in items)
+            {
+                if (!TryPlanMainItemConsumption(
+                        planningInventory,
+                        item.ItemId,
+                        item.Count,
+                        entries))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool TryPlanOptionalEventConsumptions(
+            InventoryService planningInventory,
             IReadOnlyCollection<GameWorld.QuestRewardItem> eventItems,
             IReadOnlyCollection<GameWorld.QuestRewardItem> seekItems,
             IReadOnlyCollection<GameWorld.QuestRewardItem> carryForwardEventItems,
-            ICollection<ConsumedItemEntry> consumedEntries)
+            ICollection<QuestInventoryConsumePlanEntry> entries)
         {
-            if (inventory == null || eventItems == null)
-                return;
+            if (planningInventory == null || entries == null)
+                return false;
+            if (eventItems == null || eventItems.Count == 0)
+                return true;
 
             var seekItemIds = ToItemIdentitySet(seekItems);
             var carryForwardItemIds = ToItemIdentitySet(carryForwardEventItems);
@@ -386,27 +764,223 @@ namespace DfoServer.Game.Quests
             {
                 if (eventItem.ItemId <= 0 || eventItem.Count <= 0)
                     continue;
-                var identityKey = GetMainItemIdentityKey(eventItem.ItemId);
-                if (seekItemIds.Contains(identityKey)
-                    || carryForwardItemIds.Contains(identityKey))
+                var identity = GetMainItemIdentityKey(eventItem.ItemId);
+                if (seekItemIds.Contains(identity)
+                    || carryForwardItemIds.Contains(identity))
                 {
                     continue;
                 }
 
-                if (inventory.TryConsumeMainItem(
+                var available = planningInventory.CountMainItem(eventItem.ItemId);
+                var consumeCount = Math.Min(eventItem.Count, available);
+                if (consumeCount > 0
+                    && !TryPlanMainItemConsumption(
+                        planningInventory,
                         eventItem.ItemId,
-                        eventItem.Count,
-                        out var consumeResult)
-                    && consumeResult.Success)
+                        consumeCount,
+                        entries))
                 {
-                    consumedEntries.Add(new ConsumedItemEntry
-                    {
-                        UpdateType = 0,
-                        SlotIndex = (ushort)consumeResult.SlotIndex,
-                        ConsumedCount = (uint)consumeResult.ConsumedCount,
-                    });
+                    return false;
                 }
             }
+            return true;
+        }
+
+        private static bool TryPlanMainItemConsumption(
+            InventoryService planningInventory,
+            int itemId,
+            int count,
+            ICollection<QuestInventoryConsumePlanEntry> entries)
+        {
+            if (planningInventory == null
+                || entries == null
+                || itemId < 0
+                || count <= 0)
+            {
+                return false;
+            }
+
+            if (InventoryService.TryResolveMainVirtualSlotByItemId(
+                    itemId,
+                    out var virtualSlot,
+                    out var virtualItemId))
+            {
+                var current = planningInventory.GetMainVirtualCount(virtualSlot);
+                if (current == null || current.Count < count)
+                    return false;
+                if (!planningInventory.SetMainVirtualCount(
+                        virtualSlot,
+                        virtualItemId,
+                        current.Count - count))
+                {
+                    return false;
+                }
+                entries.Add(new QuestInventoryConsumePlanEntry(
+                    InventoryListType.Main,
+                    virtualSlot,
+                    virtualItemId,
+                    count,
+                    isVirtual: true));
+                return true;
+            }
+
+            var remaining = count;
+            foreach (var pair in planningInventory.GetItems(InventoryListType.Main))
+            {
+                var source = pair.Value;
+                if (source == null || source.ItemId != itemId)
+                    continue;
+
+                var available = InventoryStackRuleService.IsStackable(source)
+                    ? Math.Max(0, source.Count)
+                    : 1;
+                var consumeCount = Math.Min(remaining, available);
+                if (consumeCount <= 0)
+                    continue;
+                if (!InventoryDeleteService.TryConsumeFromSlot(
+                        planningInventory,
+                        InventoryListType.Main,
+                        pair.Key,
+                        itemId,
+                        consumeCount,
+                        out var consumed)
+                    || !consumed.Success)
+                {
+                    return false;
+                }
+
+                entries.Add(new QuestInventoryConsumePlanEntry(
+                    InventoryListType.Main,
+                    pair.Key,
+                    itemId,
+                    consumed.DeletedCount,
+                    isVirtual: false));
+                remaining -= consumed.DeletedCount;
+                if (remaining == 0)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool TryApplyConsumptionPlan(
+            InventoryService inventory,
+            IReadOnlyList<QuestInventoryConsumePlanEntry> plan,
+            ICollection<ConsumedItemEntry> consumedEntries)
+        {
+            if (inventory == null || plan == null || consumedEntries == null)
+                return false;
+
+            foreach (var entry in plan)
+            {
+                if (entry.IsVirtual)
+                {
+                    var current = inventory.GetMainVirtualCount(entry.SlotIndex);
+                    if (current == null
+                        || current.ItemId != entry.ItemId
+                        || current.Count < entry.Count
+                        || !inventory.SetMainVirtualCount(
+                            entry.SlotIndex,
+                            entry.ItemId,
+                            current.Count - entry.Count))
+                    {
+                        return false;
+                    }
+                }
+                else if (!InventoryDeleteService.TryConsumeFromSlot(
+                        inventory,
+                        entry.ListType,
+                        entry.SlotIndex,
+                        entry.ItemId,
+                        entry.Count,
+                        out var consumed)
+                    || !consumed.Success
+                    || consumed.DeletedCount != entry.Count)
+                {
+                    return false;
+                }
+
+                consumedEntries.Add(new ConsumedItemEntry
+                {
+                    UpdateType = 0,
+                    SlotIndex = (ushort)entry.SlotIndex,
+                    ConsumedCount = (uint)entry.Count,
+                });
+            }
+            return true;
+        }
+
+        private static bool TryAddQuestRewardRequests(
+            ICollection<InventoryRewardGrantRequest> requests,
+            IReadOnlyCollection<GameWorld.QuestRewardItem> items,
+            ushort completionCount,
+            bool isTitleRewardQuest,
+            ushort questId,
+            out string error)
+        {
+            error = string.Empty;
+            if (requests == null)
+            {
+                error = "missing reward request collection";
+                return false;
+            }
+            if (items == null || items.Count == 0)
+                return true;
+
+            foreach (var item in items)
+            {
+                if (item.ItemId <= 0 || item.Count <= 0)
+                {
+                    error = "quest reward contains a non-positive item/count";
+                    return false;
+                }
+                if (isTitleRewardQuest)
+                {
+                    FileLogger.Log(
+                        $"[QuestCompletionApplicationService] FINISH title reward " +
+                        $"skipped from inventory: quest={questId} item={item.ItemId}");
+                    continue;
+                }
+
+                var scaledCount = (long)item.Count * completionCount;
+                if (scaledCount <= 0 || scaledCount > int.MaxValue)
+                {
+                    error = "scaled quest reward count exceeds int32";
+                    return false;
+                }
+                requests.Add(InventoryRewardGrantRequest.Create(
+                    item.ItemId,
+                    (int)scaledCount,
+                    ItemCreateReason.QuestReward));
+            }
+            return true;
+        }
+
+        private static bool TryMultiplyUInt32(
+            uint value,
+            ushort multiplier,
+            out uint result)
+        {
+            var scaled = (ulong)value * multiplier;
+            result = scaled <= uint.MaxValue ? (uint)scaled : 0;
+            return scaled <= uint.MaxValue;
+        }
+
+        private static int CountProjectedInsertedEntries(
+            InventoryRewardGrantBatchPlan rewardPlan,
+            uint requestedGoldReward)
+        {
+            var count = requestedGoldReward > 0 ? 1 : 0;
+            if (rewardPlan == null)
+                return count;
+            foreach (var entry in rewardPlan.Entries)
+            {
+                if (entry.Kind == InventoryRewardGrantKind.InventoryItem
+                    || entry.Kind == InventoryRewardGrantKind.MainVirtualCount)
+                {
+                    count++;
+                }
+            }
+            return count;
         }
 
         private static HashSet<int> ToItemIdentitySet(
@@ -417,130 +991,28 @@ namespace DfoServer.Game.Quests
                 return identities;
             foreach (var item in items)
             {
-                if (item.ItemId > 0 && item.Count > 0)
+                if (item.ItemId >= 0 && item.Count > 0)
                     identities.Add(GetMainItemIdentityKey(item.ItemId));
             }
             return identities;
         }
 
-        private static bool HasQuestItems(
-            InventoryService inventory,
-            IReadOnlyCollection<GameWorld.QuestRewardItem> items)
-        {
-            if (inventory == null)
-                return false;
-            if (items == null || items.Count == 0)
-                return true;
-
-            var required = new Dictionary<int, int>();
-            var representativeItemIds = new Dictionary<int, int>();
-            foreach (var item in items)
-            {
-                if (item.ItemId <= 0 || item.Count <= 0)
-                    continue;
-                var key = GetMainItemIdentityKey(item.ItemId);
-                if (!required.ContainsKey(key))
-                {
-                    required[key] = 0;
-                    representativeItemIds[key] = item.ItemId;
-                }
-                required[key] = SafeAdd(required[key], item.Count);
-            }
-
-            foreach (var requirement in required)
-            {
-                if (inventory.CountMainItem(
-                        representativeItemIds[requirement.Key])
-                    < requirement.Value)
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private static bool TryConsumeQuestItems(
-            InventoryService inventory,
-            IReadOnlyCollection<GameWorld.QuestRewardItem> items,
-            ICollection<ConsumedItemEntry> consumedEntries)
-        {
-            if (items == null || items.Count == 0)
-                return true;
-            foreach (var item in items)
-            {
-                if (item.ItemId <= 0 || item.Count <= 0)
-                    continue;
-                if (!inventory.TryConsumeMainItem(
-                        item.ItemId,
-                        item.Count,
-                        out var consumeResult)
-                    || !consumeResult.Success)
-                {
-                    return false;
-                }
-                consumedEntries.Add(new ConsumedItemEntry
-                {
-                    UpdateType = 0,
-                    SlotIndex = (ushort)consumeResult.SlotIndex,
-                    ConsumedCount = (uint)consumeResult.ConsumedCount,
-                });
-            }
-            return true;
-        }
-
-        private static void AddQuestRewardRequests(
-            ICollection<InventoryRewardGrantRequest> requests,
-            IReadOnlyCollection<GameWorld.QuestRewardItem> items,
-            ushort multiplier,
-            bool isTitleRewardQuest,
-            ushort questId)
-        {
-            if (requests == null || items == null)
-                return;
-            foreach (var item in items)
-            {
-                if (item.ItemId <= 0)
-                    continue;
-                if (isTitleRewardQuest)
-                {
-                    FileLogger.Log(
-                        $"[QuestCompletionApplicationService] FINISH title reward " +
-                        $"skipped from inventory: quest={questId} item={item.ItemId}");
-                    continue;
-                }
-                var count = NormalizeQuestItemCount(item.Count, multiplier);
-                if (count > 0)
-                {
-                    requests.Add(InventoryRewardGrantRequest.Create(
-                        item.ItemId,
-                        count,
-                        ItemCreateReason.QuestReward));
-                }
-            }
-        }
-
-        private static bool TryGrantRewardsAndAppendEntries(
-            InventoryService inventory,
-            List<InventoryRewardGrantRequest> requests,
+        private static void AppendInsertedEntries(
+            InventoryRewardGrantBatchResult rewardGrant,
+            int startIndex,
+            int endIndexExclusive,
             ICollection<InsertedItemEntry> insertedEntries)
         {
-            if (requests == null || requests.Count == 0)
-                return true;
-            if (!InventoryRewardGrantService.TryGrantBatch(
-                    inventory,
-                    requests,
-                    out var result)
-                || !result.Success)
+            if (rewardGrant == null || insertedEntries == null)
+                return;
+            var start = Math.Max(0, startIndex);
+            var end = Math.Min(rewardGrant.Results.Count, endIndexExclusive);
+            for (var index = start; index < end; index++)
             {
-                return false;
-            }
-            foreach (var grant in result.Results)
-            {
-                var entry = ToInsertedItemEntry(grant);
+                var entry = ToInsertedItemEntry(rewardGrant.Results[index]);
                 if (entry != null)
                     insertedEntries.Add(entry);
             }
-            return true;
         }
 
         private static InsertedItemEntry ToInsertedItemEntry(
@@ -565,6 +1037,237 @@ namespace DfoServer.Game.Quests
                     : (uint)Math.Max(0, grant.GrantedCount),
                 EquipDurability = isEquipment ? core.Durability : (ushort)0,
             };
+        }
+
+        private readonly struct QuestInventoryConsumePlanEntry
+        {
+            internal QuestInventoryConsumePlanEntry(
+                InventoryListType listType,
+                short slotIndex,
+                int itemId,
+                int count,
+                bool isVirtual)
+            {
+                ListType = listType;
+                SlotIndex = slotIndex;
+                ItemId = itemId;
+                Count = count;
+                IsVirtual = isVirtual;
+            }
+
+            internal InventoryListType ListType { get; }
+            internal short SlotIndex { get; }
+            internal int ItemId { get; }
+            internal int Count { get; }
+            internal bool IsVirtual { get; }
+        }
+
+        private sealed class QuestCompletionInventoryPlan
+        {
+            internal QuestCompletionInventoryPlan(
+                IReadOnlyList<QuestInventoryConsumePlanEntry> requiredConsumptions,
+                IReadOnlyList<QuestInventoryConsumePlanEntry> optionalConsumptions,
+                InventoryRewardGrantBatchPlan rewardPlan,
+                int carryForwardGrantCount,
+                uint expReward,
+                uint requestedGoldReward,
+                bool requiresPetEvolution)
+            {
+                RequiredConsumptions = new List<QuestInventoryConsumePlanEntry>(
+                    requiredConsumptions ?? Array.Empty<QuestInventoryConsumePlanEntry>())
+                    .AsReadOnly();
+                OptionalConsumptions = new List<QuestInventoryConsumePlanEntry>(
+                    optionalConsumptions ?? Array.Empty<QuestInventoryConsumePlanEntry>())
+                    .AsReadOnly();
+                RewardPlan = rewardPlan
+                    ?? throw new ArgumentNullException(nameof(rewardPlan));
+                CarryForwardGrantCount = carryForwardGrantCount;
+                ExpReward = expReward;
+                RequestedGoldReward = requestedGoldReward;
+                RequiresPetEvolution = requiresPetEvolution;
+            }
+
+            internal IReadOnlyList<QuestInventoryConsumePlanEntry>
+                RequiredConsumptions { get; }
+
+            internal IReadOnlyList<QuestInventoryConsumePlanEntry>
+                OptionalConsumptions { get; }
+
+            internal InventoryRewardGrantBatchPlan RewardPlan { get; }
+            internal int CarryForwardGrantCount { get; }
+            internal uint ExpReward { get; }
+            internal uint RequestedGoldReward { get; }
+            internal bool RequiresPetEvolution { get; }
+        }
+
+        private sealed class QuestCompletionInventoryRollback
+        {
+            private readonly Dictionary<InventorySlotKey, ItemCore> _items =
+                new Dictionary<InventorySlotKey, ItemCore>();
+            private readonly Dictionary<short, VirtualCountItem> _virtualCounts =
+                new Dictionary<short, VirtualCountItem>();
+            private int _pendingHappyTokenCeraGrant;
+
+            internal static QuestCompletionInventoryRollback Capture(
+                InventoryService inventory,
+                QuestCompletionInventoryPlan plan)
+            {
+                if (inventory == null)
+                    throw new ArgumentNullException(nameof(inventory));
+                if (plan == null)
+                    throw new ArgumentNullException(nameof(plan));
+
+                var snapshot = new QuestCompletionInventoryRollback
+                {
+                    _pendingHappyTokenCeraGrant =
+                        inventory.PendingHappyTokenCeraGrant,
+                };
+                foreach (var entry in plan.RequiredConsumptions)
+                    snapshot.CaptureConsumption(inventory, entry);
+                foreach (var entry in plan.OptionalConsumptions)
+                    snapshot.CaptureConsumption(inventory, entry);
+
+                foreach (var entry in plan.RewardPlan.Entries)
+                {
+                    if (entry.Kind == InventoryRewardGrantKind.InventoryItem)
+                    {
+                        snapshot.CaptureItem(
+                            inventory,
+                            entry.ListType,
+                            entry.SlotIndex);
+                    }
+                    else if (entry.Kind
+                             == InventoryRewardGrantKind.MainVirtualCount)
+                    {
+                        snapshot.CaptureVirtual(inventory, entry.SlotIndex);
+                    }
+                }
+
+                if (plan.RequestedGoldReward > 0)
+                {
+                    snapshot.CaptureVirtual(
+                        inventory,
+                        InventoryService.MainVirtualCurrencySlotStart);
+                }
+                if (plan.RequiresPetEvolution)
+                {
+                    snapshot.CaptureItem(
+                        inventory,
+                        InventoryListType.Equipment,
+                        PetInventoryLayout.CreatureEquipSlot);
+                }
+                return snapshot;
+            }
+
+            internal static void Restore(
+                InventoryService inventory,
+                QuestCompletionInventoryRollback snapshot,
+                InventoryRewardGrantBatchPlan rewardPlan)
+            {
+                if (inventory == null || snapshot == null)
+                    return;
+
+                if (rewardPlan != null)
+                {
+                    foreach (var entry in rewardPlan.Entries)
+                    {
+                        InventoryCreateService.DetachCreatedDetails(
+                            inventory,
+                            entry.CreateResult);
+                    }
+                }
+
+                foreach (var pair in snapshot._items)
+                {
+                    if (pair.Value == null)
+                    {
+                        if (inventory.GetItem(
+                                pair.Key.ListType,
+                                pair.Key.SlotIndex) != null)
+                        {
+                            inventory.RemoveItem(
+                                pair.Key.ListType,
+                                pair.Key.SlotIndex);
+                        }
+                    }
+                    else
+                    {
+                        inventory.SetItem(
+                            pair.Key.ListType,
+                            pair.Key.SlotIndex,
+                            pair.Value.Copy());
+                    }
+                }
+
+                foreach (var pair in snapshot._virtualCounts)
+                {
+                    if (pair.Value == null)
+                        inventory.SetMainVirtualCount(pair.Key, 0);
+                    else
+                        inventory.SetMainVirtualCount(
+                            pair.Key,
+                            pair.Value.ItemId,
+                            pair.Value.Count);
+                }
+                inventory.RestorePendingHappyTokenCeraGrant(
+                    snapshot._pendingHappyTokenCeraGrant);
+            }
+
+            private void CaptureConsumption(
+                InventoryService inventory,
+                QuestInventoryConsumePlanEntry entry)
+            {
+                if (entry.IsVirtual)
+                    CaptureVirtual(inventory, entry.SlotIndex);
+                else
+                    CaptureItem(inventory, entry.ListType, entry.SlotIndex);
+            }
+
+            private void CaptureItem(
+                InventoryService inventory,
+                InventoryListType listType,
+                short slotIndex)
+            {
+                if (slotIndex < 0)
+                    return;
+                var key = new InventorySlotKey(listType, slotIndex);
+                if (_items.ContainsKey(key))
+                    return;
+                _items[key] = inventory.GetItem(listType, slotIndex)?.Copy();
+            }
+
+            private void CaptureVirtual(
+                InventoryService inventory,
+                short slotIndex)
+            {
+                if (slotIndex < 0 || _virtualCounts.ContainsKey(slotIndex))
+                    return;
+                _virtualCounts[slotIndex] =
+                    inventory.GetMainVirtualCount(slotIndex);
+            }
+        }
+
+        private readonly struct InventorySlotKey : IEquatable<InventorySlotKey>
+        {
+            internal InventorySlotKey(
+                InventoryListType listType,
+                short slotIndex)
+            {
+                ListType = listType;
+                SlotIndex = slotIndex;
+            }
+
+            internal InventoryListType ListType { get; }
+            internal short SlotIndex { get; }
+
+            public bool Equals(InventorySlotKey other) =>
+                ListType == other.ListType && SlotIndex == other.SlotIndex;
+
+            public override bool Equals(object obj) =>
+                obj is InventorySlotKey other && Equals(other);
+
+            public override int GetHashCode() =>
+                ((int)ListType * 397) ^ SlotIndex;
         }
 
         private static bool TryResolveQuestionQuestClearFlagValue(
@@ -833,18 +1536,5 @@ namespace DfoServer.Game.Quests
                 : itemId;
         }
 
-        private static int NormalizeQuestItemCount(int count, ushort multiplier)
-        {
-            if (count <= 0)
-                return 0;
-            var value = (long)count * Math.Max(1, (int)multiplier);
-            return value > int.MaxValue ? int.MaxValue : (int)value;
-        }
-
-        private static int SafeAdd(int left, int right)
-        {
-            var value = (long)Math.Max(0, left) + Math.Max(0, right);
-            return value > int.MaxValue ? int.MaxValue : (int)value;
-        }
     }
 }

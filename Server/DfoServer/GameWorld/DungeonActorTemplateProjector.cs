@@ -99,6 +99,8 @@ namespace DfoServer.GameWorld
                     Type = apcType,
                     Level = apcLevel,
                     Faction = apc.Faction,
+                    X = apc.X,
+                    Y = apc.Y,
                     IsBlocking = hasScriptedBossWaves
                         && apc.Faction == ApcFaction.Monster
                         && apc.AIType == ApcAIType.Boss,

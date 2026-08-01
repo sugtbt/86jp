@@ -16,7 +16,6 @@ namespace DfoServer.Game.DeathTower
         private readonly HashSet<short> _persistentMainSlots = new HashSet<short>();
         private readonly HashSet<int> _seenItemIds = new HashSet<int>();
         private DnfLcg _stageLcg;
-        private bool _settlementStarted;
 
         public DeathTowerData.TowerConfig Config { get; }
         public int CurrentStage { get; private set; }
@@ -41,7 +40,7 @@ namespace DfoServer.Game.DeathTower
 
         public int GetCurrentMapId()
         {
-            if (CurrentStage < 0 || CurrentStage >= Config.StageMapIds.Length)
+            if (CurrentStage < 0 || CurrentStage >= Config.StageMapIds.Count)
                 return -1;
             return Config.StageMapIds[CurrentStage];
         }
@@ -278,19 +277,6 @@ namespace DfoServer.Game.DeathTower
         public void SetFighting() { State = 1; }
 
         public void SetCleared() { State = 2; }
-
-        public bool TryBeginSettlement()
-        {
-            if (_settlementStarted)
-                return false;
-            _settlementStarted = true;
-            return true;
-        }
-
-        public void AbortSettlement()
-        {
-            _settlementStarted = false;
-        }
 
         // 允许从 state>=1 推进(state==1: 86JP可能不发0x009F(2)直接MOVE_MAP; state==2: 正常流程)
         // state==0(init, 未开始战斗)不允许推进。

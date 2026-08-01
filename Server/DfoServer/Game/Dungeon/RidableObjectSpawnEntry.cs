@@ -9,5 +9,7 @@ namespace DfoServer.Game.Dungeon
         public int Faction;
         public byte MapX;
         public byte MapY;
+        public bool HasMinimapIcon;
+        public int MinimapGroupIndex;
     }
 }

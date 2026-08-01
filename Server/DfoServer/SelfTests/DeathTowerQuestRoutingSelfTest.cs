@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Threading.Tasks;
 using DfoServer.Game.Accounts;
 using DfoServer.Game.DeathTower;
+using DfoServer.Game.Inventory;
 using DfoServer.Game.Quests;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -45,10 +46,10 @@ namespace DfoServer.SelfTests
             Check("PVF death tower config maps floor 30 to 30030",
                 config != null
                 && config.StageMapIds != null
-                && config.StageMapIds.Length >= 30
+                && config.StageMapIds.Count >= 30
                 && config.StageMapIds[29] == Floor30MapId,
                 ref failures);
-            if (config == null || config.StageMapIds == null || config.StageMapIds.Length < 30)
+            if (config == null || config.StageMapIds == null || config.StageMapIds.Count < 30)
             {
                 Console.WriteLine($"FAIL: {failures}");
                 return 1;
@@ -124,15 +125,34 @@ namespace DfoServer.SelfTests
                     },
                 });
             var manager = new QuestManager(sender, connStr);
-            manager
-                .HandleSetTriggerAsync(0x0021, BuildWireSetTriggerBody(AwakeningQuestId, triggerType: 0, increment: false))
-                .GetAwaiter()
-                .GetResult();
+            var questSessionId = Guid.NewGuid();
+            InventoryContext.Register(
+                questSessionId,
+                new InventoryService(CharacterId, AccountId));
+            try
+            {
+                manager
+                    .HandleSetTriggerAsync(
+                        0x0021,
+                        BuildWireSetTriggerBody(
+                            AwakeningQuestId,
+                            triggerType: 0,
+                            increment: false),
+                        questSessionId)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            finally
+            {
+                InventoryContext.Unregister(
+                    questSessionId,
+                    CharacterId);
+            }
 
-            Check("client SET_TRIGGER still reaches QuestManager during tower run",
-                LoadTrigger(connStr, AwakeningQuestId) == 0,
+            Check("client SET_TRIGGER cannot complete a server-owned tower target",
+                LoadTrigger(connStr, AwakeningQuestId) == 1,
                 ref failures);
-            Check("client SET_TRIGGER gets success ACK",
+            Check("server-owned tower trigger gets a success echo ACK",
                 sender.LastAckBody != null && sender.LastAckBody.Length >= 1 && sender.LastAckBody[0] == 1,
                 ref failures);
 

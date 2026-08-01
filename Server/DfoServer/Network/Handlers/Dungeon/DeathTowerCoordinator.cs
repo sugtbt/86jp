@@ -5,10 +5,14 @@ using System.Threading.Tasks;
 using DfoServer.Game.Accounts;
 using DfoServer.Game.DeathTower;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Session;
 using DfoServer.Network;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers;
+using DfoServer.Network.Parsers.Dungeon;
+using DfoServer.Infrastructure;
 using GameDungeon = DfoServer.Game.Dungeon;
+using DungeonData = DfoServer.GameWorld.Dungeon;
 
 namespace DfoServer.Network.Handlers.Dungeon
 {
@@ -18,9 +22,21 @@ namespace DfoServer.Network.Handlers.Dungeon
         private readonly Func<EnhancedClientSession, DeathTowerSettlementResult, Task> _sendExpGrantNotification;
         private readonly Func<EnhancedClientSession, Task> _sendInDungeonLevelUpFollowups;
         private readonly InventoryRefreshSender _inventoryRefresh;
+        private readonly GameDungeon.DungeonInstanceRegistry _instanceRegistry;
+        private readonly DungeonTownReturnCoordinator _townReturn;
+        private readonly ISessionDirectory _sessionDirectory;
+
+        private static readonly TimeSpan RankingToRewardDelay =
+            TimeSpan.FromSeconds(1);
+        private static readonly TimeSpan RewardToEplpDelay =
+            TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan DefaultReturnDelay =
+            TimeSpan.FromSeconds(60);
+        private static readonly TimeSpan RetryDelay =
+            TimeSpan.FromSeconds(1);
 
         public DeathTowerCoordinator()
-            : this(null, null, null, null, null, null)
+            : this(null, null, null, null, null, null, null, null, null)
         {
         }
 
@@ -30,11 +46,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             Func<EnhancedClientSession, DeathTowerSettlementResult, Task> sendExpGrantNotification = null,
             AccountExperienceProgressService accountExperience = null,
             Func<EnhancedClientSession, Task> sendInDungeonLevelUpFollowups = null,
-            InventoryRefreshSender inventoryRefresh = null)
+            InventoryRefreshSender inventoryRefresh = null,
+            GameDungeon.DungeonInstanceRegistry instanceRegistry = null,
+            DungeonTownReturnCoordinator townReturn = null,
+            ISessionDirectory sessionDirectory = null)
         {
             _sendExpGrantNotification = sendExpGrantNotification;
             _sendInDungeonLevelUpFollowups = sendInDungeonLevelUpFollowups;
             _inventoryRefresh = inventoryRefresh;
+            _instanceRegistry = instanceRegistry;
+            _townReturn = townReturn;
+            _sessionDirectory = sessionDirectory;
             if (!string.IsNullOrWhiteSpace(connectionString))
                 _settlementService = new DeathTowerSettlementService(
                     connectionString,
@@ -176,102 +198,1329 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private async Task SendSettlement(EnhancedClientSession session, DeathTowerSession tower)
         {
-            var cid = session.Player.CharacterId;
-            if (!tower.TryBeginSettlement())
+            var run = session?.Player?.CurrentRun;
+            if (run == null
+                || !ReferenceEquals(run.Tower, tower)
+                || _settlementService == null)
             {
-                FileLogger.Log($"[DeathTower] SETTLEMENT duplicate ignored: cid={cid} dungeon={tower.Config.DungeonId}");
+                FileLogger.Log(
+                    $"[DeathTower] SETTLEMENT rejected: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    "reason=missing_run_or_service");
                 return;
             }
-            FileLogger.Log($"[DeathTower] SETTLEMENT begin: cid={cid} dungeon={tower.Config.DungeonId} stages={tower.Config.TotalStages}");
 
-            DeathTowerSettlementResult settlement = null;
-            if (_settlementService != null)
+            var identity = run.CaptureIdentity();
+            await run.Settlement.DeathTowerProjectionGate.WaitAsync();
+            try
             {
+                if (!IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        run.Settlement.DeathTower))
+                {
+                    return;
+                }
+
+                var runtime = run.Settlement.DeathTower;
+                if (runtime == null)
+                {
+                    var accountId = session.Account?.AccountId ?? 0;
+                    if (accountId <= 0)
+                    {
+                        FileLogger.Log(
+                            $"[DeathTower] SETTLEMENT rejected: " +
+                            $"cid={session.Player.CharacterId} " +
+                            "reason=missing_account");
+                        return;
+                    }
+
+                    try
+                    {
+                        var context = new DeathTowerSettlementContext(
+                            run.GetSettlementSourceEventId(),
+                            session.Player.CharacterId,
+                            accountId,
+                            session.Player.Level,
+                            session.Player.Exp,
+                            run.Difficulty);
+                        runtime = new DeathTowerSettlementRuntime(
+                            _settlementService.Prepare(
+                                context,
+                                tower,
+                                run.CalculateElapsedMilliseconds(
+                                    DateTime.UtcNow)));
+                        run.Settlement.DeathTower = runtime;
+                    }
+                    catch (Exception ex)
+                    {
+                        FileLogger.Log(
+                            $"[DeathTower] SETTLEMENT prepare failed: " +
+                            $"cid={session.Player.CharacterId} error={ex}");
+                        return;
+                    }
+                }
+
+                if (runtime.Phase != DeathTowerSettlementPhase.Prepared)
+                {
+                    FileLogger.Log(
+                        $"[DeathTower] SETTLEMENT duplicate ignored: " +
+                        $"cid={session.Player.CharacterId} " +
+                        $"dungeon={tower.Config.DungeonId} " +
+                        $"phase={runtime.Phase}");
+                    return;
+                }
+
+                try
+                {
+                    await ProjectRankingAndScheduleRewardAsync(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        "final-stage");
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        $"[DeathTower] ranking projection failed: " +
+                        $"cid={session.Player.CharacterId} error={ex}");
+                    ScheduleRankingRetry(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        "ranking-projection-failed");
+                }
+            }
+            finally
+            {
+                run.Settlement.DeathTowerProjectionGate.Release();
+            }
+        }
+
+        private bool IsCurrentSettlement(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime)
+        {
+            if (session?.Player == null
+                || run == null
+                || tower == null
+                || !identity.IsValid
+                || !ReferenceEquals(session.Player.CurrentRun, run)
+                || !session.Player.IsCurrentDungeonRun(identity)
+                || !run.Matches(identity)
+                || !ReferenceEquals(run.Tower, tower))
+            {
+                return false;
+            }
+
+            if (runtime != null
+                && (!ReferenceEquals(run.Settlement.DeathTower, runtime)
+                    || runtime.Plan.Context.CharacterId
+                        != session.Player.CharacterId))
+            {
+                return false;
+            }
+
+            if (_sessionDirectory != null
+                && (!_sessionDirectory.TryGet(
+                        session.Player.CharacterId,
+                        out var currentSession)
+                    || !ReferenceEquals(currentSession, session)))
+            {
+                return false;
+            }
+
+            if (_instanceRegistry != null)
+            {
+                if (!_instanceRegistry.TryGetForRun(
+                        session.Player.CharacterId,
+                        identity,
+                        out var attachment)
+                    || attachment.State
+                        != GameDungeon.DungeonParticipantAttachmentState.Active
+                    || !ReferenceEquals(attachment.Run, run))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private async Task ProjectRankingAndScheduleRewardAsync(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            string source)
+        {
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime)
+                || runtime.Phase != DeathTowerSettlementPhase.Prepared)
+            {
+                return;
+            }
+
+            var rankingBody = DeathTowerPacketBuilder.BuildRanking(
+                runtime.Plan.DungeonId,
+                runtime.Plan.ClearedFloorCount,
+                runtime.Plan.ClearTimeMilliseconds);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x0090,
+                rankingBody));
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime))
+            {
+                return;
+            }
+
+            var deadlineUtc = DateTime.UtcNow.Add(RankingToRewardDelay);
+            if (!runtime.TryMarkRankingShown(deadlineUtc))
+                return;
+
+            var ticket = run.Timers.Begin(
+                GameDungeon.DungeonRunTimerKeys.DeathTowerRankingToReward,
+                deadlineUtc,
+                GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+            ScheduleRankingTimer(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                ticket);
+            FileLogger.Log(
+                $"[DeathTower] SENT 0x0090 ranking: " +
+                $"cid={session.Player.CharacterId} dungeon={runtime.Plan.DungeonId} " +
+                $"source={source} rewardDeadline={deadlineUtc:O}");
+        }
+
+        private void ScheduleRankingTimer(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            DateTime deadlineUtc,
+            GameDungeon.RunTimerTicket ticket)
+        {
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime)
+                || !run.Timers.IsCurrent(ticket))
+            {
+                return;
+            }
+
+            var handle = ClockService.Instance.ScheduleOneShotAsync(
+                BuildTimerName("reward", session, run, ticket),
+                deadlineUtc,
+                async _ => await OnRankingTimerElapsedAsync(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime,
+                    ticket));
+            run.Timers.Attach(ticket, handle);
+        }
+
+        private async Task OnRankingTimerElapsedAsync(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            GameDungeon.RunTimerTicket ticket)
+        {
+            await run.Settlement.DeathTowerProjectionGate.WaitAsync();
+            try
+            {
+                if (!IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime)
+                    || !run.Timers.IsCurrent(ticket))
+                {
+                    return;
+                }
+
+                if (runtime.Phase == DeathTowerSettlementPhase.Prepared)
+                {
+                    await ProjectRankingAndScheduleRewardAsync(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        "ranking-retry");
+                    return;
+                }
+                if (runtime.Phase != DeathTowerSettlementPhase.RankingShown)
+                {
+                    run.Timers.TryComplete(ticket);
+                    return;
+                }
+
+                var rewardBody = DeathTowerPacketBuilder.BuildReward(
+                    (int)Math.Min(runtime.Plan.RewardExp, (uint)int.MaxValue),
+                    runtime.Plan.Candidates);
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    0x0091,
+                    rewardBody));
+                if (!IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime))
+                {
+                    return;
+                }
+
+                var deadlineUtc = DateTime.UtcNow.Add(RewardToEplpDelay);
+                if (!runtime.TryMarkRewardShown(deadlineUtc))
+                    return;
+
+                run.Timers.TryComplete(ticket);
+                var nextTicket = run.Timers.Begin(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerRewardToEplp,
+                    deadlineUtc,
+                    GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+                ScheduleEplpTimer(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime,
+                    deadlineUtc,
+                    nextTicket);
+                FileLogger.Log(
+                    $"[DeathTower] SENT 0x0091 reward: " +
+                    $"cid={session.Player.CharacterId} exp={runtime.Plan.RewardExp} " +
+                    $"candidates={runtime.Plan.Candidates.Count} " +
+                    $"eplpDeadline={deadlineUtc:O}");
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[DeathTower] reward phase failed: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} error={ex}");
+                if (IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime))
+                {
+                    if (runtime.Phase
+                        == DeathTowerSettlementPhase.RewardShown)
+                    {
+                        ScheduleEplpRetry(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime,
+                            "reward-timer-failed");
+                    }
+                    else
+                    {
+                        ScheduleRankingRetry(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime,
+                            "reward-phase-failed");
+                    }
+                }
+            }
+            finally
+            {
+                run.Settlement.DeathTowerProjectionGate.Release();
+            }
+        }
+
+        private void ScheduleRankingRetry(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            string source)
+        {
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime)
+                || (runtime.Phase != DeathTowerSettlementPhase.Prepared
+                    && runtime.Phase
+                        != DeathTowerSettlementPhase.RankingShown))
+            {
+                return;
+            }
+
+            var deadlineUtc = DateTime.UtcNow.Add(RetryDelay);
+            var ticket = run.Timers.Begin(
+                GameDungeon.DungeonRunTimerKeys.DeathTowerRankingToReward,
+                deadlineUtc,
+                GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+            ScheduleRankingTimer(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                ticket);
+            FileLogger.Log(
+                $"[DeathTower] ranking/reward retry scheduled: " +
+                $"cid={session.Player.CharacterId} source={source} " +
+                $"deadline={deadlineUtc:O}");
+        }
+
+        private void ScheduleEplpTimer(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            DateTime deadlineUtc,
+            GameDungeon.RunTimerTicket ticket)
+        {
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime)
+                || !run.Timers.IsCurrent(ticket))
+            {
+                return;
+            }
+
+            var handle = ClockService.Instance.ScheduleOneShotAsync(
+                BuildTimerName("eplp", session, run, ticket),
+                deadlineUtc,
+                async _ => await OnEplpTimerElapsedAsync(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime,
+                    ticket));
+            run.Timers.Attach(ticket, handle);
+        }
+
+        private async Task OnEplpTimerElapsedAsync(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            GameDungeon.RunTimerTicket ticket)
+        {
+            await run.Settlement.DeathTowerProjectionGate.WaitAsync();
+            try
+            {
+                if (!IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime)
+                    || !run.Timers.IsCurrent(ticket))
+                {
+                    return;
+                }
+
+                if (runtime.Phase == DeathTowerSettlementPhase.RewardShown)
+                {
+                    var frozenState = runtime.AllMembersHaveEplpItem;
+                    if (!frozenState.HasValue)
+                    {
+                        var allMembersHaveRequiredItem =
+                            ResolveAllActiveMembersHaveEplpItem(session, run);
+                        if (!runtime.TryFreezeEplpState(
+                                allMembersHaveRequiredItem))
+                        {
+                            return;
+                        }
+                        frozenState = runtime.AllMembersHaveEplpItem;
+                    }
+
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        0x0092,
+                        DeathTowerPacketBuilder.BuildEplp(
+                            frozenState ?? false)));
+                    if (!IsCurrentSettlement(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime)
+                        || !runtime.TryMarkEplpShown())
+                    {
+                        return;
+                    }
+
+                    FileLogger.Log(
+                        $"[DeathTower] SENT 0x0092 EPLP: " +
+                        $"cid={session.Player.CharacterId} " +
+                        $"allActiveMembersHave4183={frozenState ?? false}");
+                }
+
+                run.Timers.TryComplete(ticket);
+                await CommitAndProjectAsync(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[DeathTower] EPLP/commit phase failed: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} error={ex}");
+                if (IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime))
+                {
+                    ScheduleEplpRetry(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        "eplp-or-commit-failed");
+                }
+            }
+            finally
+            {
+                run.Settlement.DeathTowerProjectionGate.Release();
+            }
+        }
+
+        private void ScheduleEplpRetry(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            string source)
+        {
+            var phase = runtime?.Phase
+                ?? DeathTowerSettlementPhase.Prepared;
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime)
+                || (phase != DeathTowerSettlementPhase.RewardShown
+                    && phase != DeathTowerSettlementPhase.EplpShown
+                    && phase != DeathTowerSettlementPhase.Committed
+                    && phase != DeathTowerSettlementPhase.Ending))
+            {
+                return;
+            }
+
+            var deadlineUtc = DateTime.UtcNow.Add(RetryDelay);
+            var ticket = run.Timers.Begin(
+                GameDungeon.DungeonRunTimerKeys.DeathTowerRewardToEplp,
+                deadlineUtc,
+                GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+            ScheduleEplpTimer(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                ticket);
+            FileLogger.Log(
+                $"[DeathTower] EPLP/commit retry scheduled: " +
+                $"cid={session.Player.CharacterId} source={source} " +
+                $"phase={phase} deadline={deadlineUtc:O}");
+        }
+
+        private async Task CommitAndProjectAsync(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime)
+        {
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime))
+            {
+                return;
+            }
+
+            if (runtime.Phase == DeathTowerSettlementPhase.Committing)
+                runtime.TryAbortCommit();
+
+            if (runtime.Phase == DeathTowerSettlementPhase.EplpShown)
+            {
+                if (!runtime.TryBeginCommit())
+                    return;
+
+                DeathTowerSettlementResult result;
                 try
                 {
                     if (!TryGetOwnedInventory(session, out var lease))
                     {
                         throw new InvalidOperationException(
-                            $"Death tower settlement requires owned online inventory for character {cid}.");
+                            "Death tower settlement has no current owned inventory lease.");
                     }
-
-                    var context = new DeathTowerSettlementContext(
-                        cid,
-                        session.Account?.AccountId ?? 1,
-                        session.Player.Level,
-                        session.Player.Exp);
-                    settlement = _settlementService.Grant(context, tower, lease);
-                    session.Player.Exp = settlement.ExperienceGrant.NewExp;
-                    session.Player.Level = settlement.ExperienceGrant.NewLevel;
+                    result = _settlementService.Commit(
+                        runtime.Plan,
+                        lease,
+                        session.SessionId);
                 }
-                catch (Exception ex)
+                catch
                 {
-                    FileLogger.Log($"[DeathTower] SETTLEMENT reward grant failed: cid={cid}: {ex}");
-                    tower.AbortSettlement();
-                    return;
+                    runtime.TryAbortCommit();
+                    throw;
                 }
+
+                if (!runtime.TryCompleteCommit(result))
+                {
+                    throw new InvalidOperationException(
+                        "Death tower settlement commit checkpoint was lost.");
+                }
+                FileLogger.Log(
+                    $"[DeathTower] reward committed: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"floors={result.ClearedFloorCount} exp={result.ExpGained} " +
+                    $"gold={result.GoldGained} items={result.Items.Count}");
             }
 
-            // NOTI 144 排行(空安全版)
-            try
+            if (!runtime.IsCommitted)
+                return;
+
+            await ProjectCommittedEffectsAsync(
+                session,
+                run,
+                identity,
+                tower,
+                runtime);
+            ScheduleDefaultReturn(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                "reward-committed");
+        }
+
+        private async Task ProjectCommittedEffectsAsync(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime)
+        {
+            var result = runtime.CommitResult;
+            if (result == null
+                || !IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime))
             {
-                var rankingBody = DeathTowerPacketBuilder.BuildEmptyRanking(tower.Config.DungeonId);
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0090, rankingBody));
-                FileLogger.Log($"[DeathTower] SENT 0x0090 RANKING: bodyLen={rankingBody.Length}");
+                return;
+            }
 
-                // NOTI 145: Death Tower reward groups.
-                var rewardGroups = new IReadOnlyList<DeathTowerRewardItem>[]
+            var grant = result.ExperienceGrant;
+            if (grant != null)
+            {
+                session.Player.Level = grant.NewLevel;
+                session.Player.Exp = grant.NewExp;
+            }
+
+            if (!runtime.ExperienceProjectionSent)
+            {
+                if (_sendExpGrantNotification != null)
+                    await _sendExpGrantNotification(session, result);
+                runtime.TryMarkExperienceProjectionSent();
+            }
+
+            if (grant?.LeveledUp == true
+                && !runtime.LevelUpFollowupsSent)
+            {
+                if (_sendInDungeonLevelUpFollowups != null)
+                    await _sendInDungeonLevelUpFollowups(session);
+                runtime.TryMarkLevelUpFollowupsSent();
+            }
+
+            if (!runtime.InventoryProjectionSent)
+            {
+                if (_inventoryRefresh != null
+                    && result.ChangedMainSlots != null
+                    && result.ChangedMainSlots.Count > 0)
                 {
-                    settlement?.Items ?? Array.Empty<DeathTowerRewardItem>(),
-                    Array.Empty<DeathTowerRewardItem>(),
-                    Array.Empty<DeathTowerRewardItem>(),
-                    Array.Empty<DeathTowerRewardItem>(),
-                };
-                // The first u32 is a separate client field whose semantic name is not proven
-                // in this build. Keep it zero; EXP and gold use their authoritative updates.
-                var rewardBody = DeathTowerPacketBuilder.BuildReward(0, rewardGroups);
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0091, rewardBody));
-                FileLogger.Log($"[DeathTower] SENT 0x0091 REWARD: bodyLen={rewardBody.Length} items={settlement?.Items.Count ?? 0}");
+                    await _inventoryRefresh.SendUpdateItemList(
+                        session,
+                        InventoryListType.Main,
+                        result.ChangedMainSlots);
+                }
+                runtime.TryMarkInventoryProjectionSent();
+            }
+        }
 
-                // NOTI 146 EPLP(通关=1)
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0092, DeathTowerPacketBuilder.BuildEplp(true)));
-                FileLogger.Log($"[DeathTower] SENT 0x0092 EPLP: cleared=true");
+        private bool ResolveAllActiveMembersHaveEplpItem(
+            EnhancedClientSession currentSession,
+            GameDungeon.DungeonRun currentRun)
+        {
+            if (_instanceRegistry == null || _sessionDirectory == null)
+                return SessionHasEplpItem(currentSession);
 
-                if (settlement != null)
+            var roster = _instanceRegistry.CaptureInstanceParticipantRoster(
+                currentRun.Instance.Identity);
+            var validMemberCount = 0;
+            foreach (var member in roster)
+            {
+                if (!_instanceRegistry.TryGetForRun(
+                        member.CharacterId,
+                        member.RunIdentity,
+                        out var attachment)
+                    || attachment.State
+                        != GameDungeon.DungeonParticipantAttachmentState.Active
+                    || !_sessionDirectory.TryGet(
+                        member.CharacterId,
+                        out var memberSession)
+                    || memberSession?.Player == null
+                    || !ReferenceEquals(
+                        memberSession.Player.CurrentRun,
+                        member.Run)
+                    || !memberSession.Player.IsCurrentDungeonRun(
+                        member.RunIdentity)
+                    || !member.Run.Instance.Identity.Equals(
+                        currentRun.Instance.Identity))
                 {
-                    if (settlement.ExpGained > 0 || settlement.CharacterStateChanged)
-                    {
-                        if (_sendExpGrantNotification != null)
-                            await _sendExpGrantNotification(session, settlement);
-                        else
-                        {
-                            FileLogger.Log($"[DeathTower] SETTLEMENT 0x0025 skipped: cid={cid} experience notification service unavailable");
-                        }
-                    }
-                    if (settlement.LeveledUp && _sendInDungeonLevelUpFollowups != null)
-                        await _sendInDungeonLevelUpFollowups(session);
-                    if (settlement.GoldGained > 0)
-                    {
-                        if (_inventoryRefresh != null)
-                            await _inventoryRefresh.SendGoldUpdate(session, settlement.UpdatedGold);
-                    }
-                    if (_inventoryRefresh != null && settlement.ChangedMainSlots.Count > 0)
-                    {
-                        await _inventoryRefresh.SendUpdateItemList(
-                            session,
-                            InventoryListType.Main,
-                            settlement.ChangedMainSlots);
-                    }
-                    FileLogger.Log($"[DeathTower] SETTLEMENT rewards: cid={cid} floors={settlement.ClearedFloorCount} exp={settlement.ExpGained} normalExp={settlement.NormalExpGained} honorExp={settlement.HonorExpGained} gold={settlement.GoldGained} items={settlement.Items.Count} level={settlement.PreviousLevel}->{settlement.UpdatedLevel}");
+                    continue;
                 }
 
-                FileLogger.Log($"[DeathTower] SETTLEMENT complete: cid={cid}");
+                validMemberCount++;
+                if (!SessionHasEplpItem(memberSession))
+                    return false;
+            }
+
+            return validMemberCount > 0;
+        }
+
+        private static bool SessionHasEplpItem(
+            EnhancedClientSession session)
+        {
+            if (!TryGetOwnedInventory(session, out var lease))
+                return false;
+            lock (lease.SyncRoot)
+                return lease.Inventory.CountMainItem(4183) > 0;
+        }
+
+        private void ScheduleDefaultReturn(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            string source)
+        {
+            if (!runtime.IsCommitted
+                || !IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime))
+            {
+                return;
+            }
+            if (run.Timers.TryGetCurrentTicket(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerReturnToTown,
+                    out _))
+            {
+                return;
+            }
+            if (run.Timers.TryGetSnapshot(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerReturnToTown,
+                    out var snapshot)
+                && snapshot.IsSuspended
+                && snapshot.HasDeadline)
+            {
+                return;
+            }
+
+            var deadlineUtc = runtime.ReturnDeadlineUtc != DateTime.MinValue
+                ? runtime.ReturnDeadlineUtc
+                : DateTime.UtcNow.Add(DefaultReturnDelay);
+            ScheduleReturn(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                source);
+        }
+
+        private void ScheduleReturn(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            DateTime deadlineUtc,
+            string source)
+        {
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime)
+                || !runtime.TryScheduleReturn(deadlineUtc))
+            {
+                return;
+            }
+
+            var ticket = run.Timers.Begin(
+                GameDungeon.DungeonRunTimerKeys.DeathTowerReturnToTown,
+                deadlineUtc,
+                GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+            ScheduleReturnTimer(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                ticket);
+            FileLogger.Log(
+                $"[DeathTower] return scheduled: " +
+                $"cid={session.Player.CharacterId} source={source} " +
+                $"deadline={deadlineUtc:O}");
+        }
+
+        private void ScheduleReturnTimer(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            DateTime deadlineUtc,
+            GameDungeon.RunTimerTicket ticket)
+        {
+            if (!IsCurrentSettlement(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime)
+                || !run.Timers.IsCurrent(ticket))
+            {
+                return;
+            }
+
+            var handle = ClockService.Instance.ScheduleOneShotAsync(
+                BuildTimerName("return", session, run, ticket),
+                deadlineUtc,
+                async _ => await OnReturnTimerElapsedAsync(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime,
+                    ticket));
+            run.Timers.Attach(ticket, handle);
+        }
+
+        private async Task OnReturnTimerElapsedAsync(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime,
+            GameDungeon.RunTimerTicket ticket)
+        {
+            await run.Settlement.DeathTowerProjectionGate.WaitAsync();
+            try
+            {
+                if (!IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime)
+                    || !run.Timers.IsCurrent(ticket))
+                {
+                    return;
+                }
+
+                if (!runtime.IsCommitted)
+                {
+                    ScheduleReturn(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        DateTime.UtcNow.Add(RetryDelay),
+                        "awaiting-commit");
+                    return;
+                }
+
+                await ProjectCommittedEffectsAsync(
+                    session,
+                    run,
+                    identity,
+                    tower,
+                    runtime);
+                runtime.TryScheduleReturn(DateTime.UtcNow);
+                run.Timers.TryComplete(ticket);
+                if (_townReturn == null)
+                {
+                    FileLogger.Log(
+                        $"[DeathTower] return skipped: " +
+                        $"cid={session.Player.CharacterId} reason=no_coordinator");
+                    return;
+                }
+
+                var returned = await _townReturn.ReturnAsync(
+                    session,
+                    identity,
+                    GameDungeon.DungeonRunEndReason.ReturnToTown);
+                if (!returned
+                    && IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime))
+                {
+                    ScheduleReturn(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        DateTime.UtcNow.Add(RetryDelay),
+                        "return-rejected");
+                }
             }
             catch (Exception ex)
             {
-                FileLogger.Log($"[DeathTower] SETTLEMENT notification failed after commit: cid={cid}: {ex}");
+                FileLogger.Log(
+                    $"[DeathTower] return failed: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} error={ex}");
+                if (IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime))
+                {
+                    ScheduleReturn(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        DateTime.UtcNow.Add(RetryDelay),
+                        "return-failed");
+                }
+            }
+            finally
+            {
+                run.Settlement.DeathTowerProjectionGate.Release();
             }
         }
+
+        internal async Task<bool> TryHandleEplpCommandAsync(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            var run = session?.Player?.CurrentRun;
+            var tower = run?.Tower;
+            if (run == null || tower == null)
+                return false;
+
+            if (!DeathTowerEplpCommandParser.TryParse(
+                    body,
+                    out var command,
+                    out var error))
+            {
+                FileLogger.Log(
+                    $"[DeathTower] CMD 0x0048 rejected: " +
+                    $"cid={session.Player.CharacterId} reason={error} " +
+                    $"body={BitConverter.ToString(body ?? Array.Empty<byte>())}");
+                return true;
+            }
+
+            var identity = run.CaptureIdentity();
+            await run.Settlement.DeathTowerProjectionGate.WaitAsync();
+            try
+            {
+                var runtime = run.Settlement.DeathTower;
+                if (!IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime)
+                    || runtime == null
+                    || runtime.Phase < DeathTowerSettlementPhase.EplpShown)
+                {
+                    FileLogger.Log(
+                        $"[DeathTower] CMD 0x0048 ignored before EPLP: " +
+                        $"cid={session.Player.CharacterId} " +
+                        $"phase={runtime?.Phase.ToString() ?? "none"}");
+                    return true;
+                }
+
+                DeathTowerEplpCommandRules.TryResolveReturnDelay(
+                    command,
+                    out var delay,
+                    out var keepSelection);
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    header.type,
+                    DeathTowerPacketBuilder.BuildEplpCommandAck(
+                        command.State,
+                        command.Option)));
+                if (!keepSelection)
+                {
+                    ScheduleReturn(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        DateTime.UtcNow.Add(delay),
+                        "client-option-" + command.Option);
+                }
+
+                FileLogger.Log(
+                    $"[DeathTower] CMD 0x0048 handled: " +
+                    $"cid={session.Player.CharacterId} state={command.State} " +
+                    $"option={command.Option} keep={keepSelection} " +
+                    $"delayMs={delay.TotalMilliseconds:0}");
+                return true;
+            }
+            finally
+            {
+                run.Settlement.DeathTowerProjectionGate.Release();
+            }
+        }
+
+        internal async Task<bool> RecoverSettlementAsync(
+            EnhancedClientSession session)
+        {
+            var run = session?.Player?.CurrentRun;
+            var tower = run?.Tower;
+            var runtime = run?.Settlement?.DeathTower;
+            if (run == null || tower == null || runtime == null)
+                return false;
+
+            var identity = run.CaptureIdentity();
+            await run.Settlement.DeathTowerProjectionGate.WaitAsync();
+            try
+            {
+                if (!IsCurrentSettlement(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime))
+                {
+                    return false;
+                }
+
+                switch (runtime.Phase)
+                {
+                    case DeathTowerSettlementPhase.Prepared:
+                        await ProjectRankingAndScheduleRewardAsync(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime,
+                            "rejoin-prepared");
+                        break;
+
+                    case DeathTowerSettlementPhase.RankingShown:
+                        await ReplayRankingAsync(session, runtime);
+                        ResumeRankingTimer(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime);
+                        break;
+
+                    case DeathTowerSettlementPhase.RewardShown:
+                        await ReplayRankingAndRewardAsync(session, runtime);
+                        ResumeEplpTimer(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime);
+                        break;
+
+                    case DeathTowerSettlementPhase.EplpShown:
+                    case DeathTowerSettlementPhase.Committing:
+                        await ReplayFullSettlementAsync(session, runtime);
+                        await CommitAndProjectAsync(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime);
+                        ResumeReturnTimer(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime);
+                        break;
+
+                    case DeathTowerSettlementPhase.Committed:
+                    case DeathTowerSettlementPhase.Ending:
+                        await ReplayFullSettlementAsync(session, runtime);
+                        await ProjectCommittedEffectsAsync(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime);
+                        ResumeReturnTimer(
+                            session,
+                            run,
+                            identity,
+                            tower,
+                            runtime);
+                        break;
+                }
+
+                FileLogger.Log(
+                    $"[DeathTower] settlement recovered: " +
+                    $"cid={session.Player.CharacterId} phase={runtime.Phase} " +
+                    $"run={run.RunId}/{run.RunGeneration}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[DeathTower] settlement recovery failed: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} error={ex}");
+                return true;
+            }
+            finally
+            {
+                run.Settlement.DeathTowerProjectionGate.Release();
+            }
+        }
+
+        private static Task ReplayRankingAsync(
+            EnhancedClientSession session,
+            DeathTowerSettlementRuntime runtime)
+            => session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x0090,
+                DeathTowerPacketBuilder.BuildRanking(
+                    runtime.Plan.DungeonId,
+                    runtime.Plan.ClearedFloorCount,
+                    runtime.Plan.ClearTimeMilliseconds)));
+
+        private static async Task ReplayRankingAndRewardAsync(
+            EnhancedClientSession session,
+            DeathTowerSettlementRuntime runtime)
+        {
+            await ReplayRankingAsync(session, runtime);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x0091,
+                DeathTowerPacketBuilder.BuildReward(
+                    (int)Math.Min(
+                        runtime.Plan.RewardExp,
+                        (uint)int.MaxValue),
+                    runtime.Plan.Candidates)));
+        }
+
+        private static async Task ReplayFullSettlementAsync(
+            EnhancedClientSession session,
+            DeathTowerSettlementRuntime runtime)
+        {
+            await ReplayRankingAndRewardAsync(session, runtime);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x0092,
+                DeathTowerPacketBuilder.BuildEplp(
+                    runtime.AllMembersHaveEplpItem ?? false)));
+        }
+
+        private void ResumeRankingTimer(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime)
+        {
+            if (!run.Timers.TryResume(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerRankingToReward,
+                    out var ticket,
+                    out var deadlineUtc))
+            {
+                deadlineUtc = runtime.RewardDeadlineUtc == DateTime.MinValue
+                    ? DateTime.UtcNow
+                    : runtime.RewardDeadlineUtc;
+                ticket = run.Timers.Begin(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerRankingToReward,
+                    deadlineUtc,
+                    GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+            }
+
+            ScheduleRankingTimer(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                ticket);
+        }
+
+        private void ResumeEplpTimer(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime)
+        {
+            if (!run.Timers.TryResume(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerRewardToEplp,
+                    out var ticket,
+                    out var deadlineUtc))
+            {
+                deadlineUtc = runtime.EplpDeadlineUtc == DateTime.MinValue
+                    ? DateTime.UtcNow
+                    : runtime.EplpDeadlineUtc;
+                ticket = run.Timers.Begin(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerRewardToEplp,
+                    deadlineUtc,
+                    GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+            }
+
+            ScheduleEplpTimer(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                ticket);
+        }
+
+        private void ResumeReturnTimer(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.DungeonRunIdentity identity,
+            DeathTowerSession tower,
+            DeathTowerSettlementRuntime runtime)
+        {
+            if (run.Timers.TryGetCurrentTicket(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerReturnToTown,
+                    out _))
+            {
+                return;
+            }
+
+            if (!run.Timers.TryResume(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerReturnToTown,
+                    out var ticket,
+                    out var deadlineUtc))
+            {
+                if (runtime.ReturnDeadlineUtc == DateTime.MinValue)
+                {
+                    ScheduleDefaultReturn(
+                        session,
+                        run,
+                        identity,
+                        tower,
+                        runtime,
+                        "rejoin-default");
+                    return;
+                }
+
+                deadlineUtc = runtime.ReturnDeadlineUtc;
+                ticket = run.Timers.Begin(
+                    GameDungeon.DungeonRunTimerKeys.DeathTowerReturnToTown,
+                    deadlineUtc,
+                    GameDungeon.RunTimerDetachPolicy.SuspendUntilResume);
+            }
+
+            runtime.TryScheduleReturn(deadlineUtc);
+            ScheduleReturnTimer(
+                session,
+                run,
+                identity,
+                tower,
+                runtime,
+                deadlineUtc,
+                ticket);
+        }
+
+        private static string BuildTimerName(
+            string phase,
+            EnhancedClientSession session,
+            GameDungeon.DungeonRun run,
+            GameDungeon.RunTimerTicket ticket)
+            => "death-tower-" + phase
+                + ":" + session.SessionId.ToString("N")
+                + ":" + run.RunId
+                + ":" + ticket.Generation;
 
         private async Task SendStageMap(EnhancedClientSession session, DeathTowerSession tower)
         {
@@ -305,7 +1554,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 && lease.IsOwnedBy(session.SessionId);
         }
 
-        private static void SyncCombatStage(
+        internal static void SyncCombatStage(
             EnhancedClientSession session,
             DeathTowerSession tower,
             IReadOnlyList<StageMonster> monsters)
@@ -328,18 +1577,69 @@ namespace DfoServer.Network.Handlers.Dungeon
                 });
             }
 
+            var stageNumber = tower.CurrentStage + 1;
+            var mapId = tower.GetCurrentMapId();
+            var roomKey = new GameDungeon.RoomKey(
+                stageNumber,
+                0,
+                mapId);
+            var stageMaze = new DungeonData.MazeSumInfo
+            {
+                Index = mapId,
+                X = stageNumber,
+                Y = 0,
+                Monsters = combatMonsters,
+            };
+            var firstSequence = monsters.Count > 0
+                ? monsters[0].MonsterUniqueId
+                : (ushort)0;
+            var instanceRoom = run.Instance.GetOrCreateRoom(
+                roomKey,
+                roomInstanceId => new GameDungeon.DungeonInstanceRoom(
+                    roomInstanceId,
+                    roomKey,
+                    stageMaze,
+                    tower.StageSeed,
+                    firstSequence),
+                out var roomCreated);
+
             lock (run.SyncRoot)
             {
                 if (!ReferenceEquals(run.Tower, tower))
                     return;
 
-                run.RoomKilledSeqIds.Clear();
+                var killedSequenceIds = new HashSet<ushort>();
+                var roomState = new GameDungeon.RoomState
+                {
+                    InstanceRoom = instanceRoom,
+                    Maze = stageMaze,
+                    FirstSeqId = firstSequence,
+                    MonsterCount = (ushort)Math.Min(
+                        ushort.MaxValue,
+                        combatMonsters.Count),
+                    KilledSeqIds = killedSequenceIds,
+                    Seed = tower.StageSeed,
+                    Lcg = tower.StageLcg,
+                };
+                roomState.TryActivate();
+
+                run.RoomKilledSeqIds = killedSequenceIds;
                 run.Drops.Clear();
                 run.RoomMonsters = combatMonsters;
-                run.RoomStartSequence = monsters.Count > 0 ? monsters[0].MonsterUniqueId : (ushort)0;
+                run.MonsterCount = roomState.MonsterCount;
+                run.RoomStartSequence = firstSequence;
                 run.Seed = tower.StageSeed;
                 run.RoomLcg = tower.StageLcg;
+                run.RoomKey = roomKey;
+                run.RoomStates[roomKey] = roomState;
+                run.SetCurrentRoom(instanceRoom);
             }
+
+            FileLogger.Log(
+                $"[DeathTower] STAGE_ROOM: dungeon={tower.Config.DungeonId} " +
+                $"stage={stageNumber} map={mapId} instance={run.PartyDungeonInstanceId} " +
+                $"room={instanceRoom.RoomInstanceId} created={roomCreated} " +
+                $"firstSeq={firstSequence} actors={combatMonsters.Count}");
         }
 
         public bool TryGenerateDropsForMonster(

@@ -640,6 +640,8 @@ CREATE TABLE IF NOT EXISTS account_dungeon_permissions (
 
             (48, "character expert job domain state", MigrateExpertJobState),
             (49, "附魔师设备耐久", MigrateEnchanterEndurance),
+            (50, "quest activation identity and per-activation event inbox",
+                MigrateQuestActivationIdentity),
         };
 
         private static void MigrateEnchanterEndurance(SqliteConnection connection)
@@ -1048,6 +1050,96 @@ CREATE TABLE IF NOT EXISTS quest_progress_event_inbox (
     PRIMARY KEY (character_id, event_id, event_kind),
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );");
+        }
+
+        private static void MigrateQuestActivationIdentity(
+            SqliteConnection connection)
+        {
+            SqliteSchemaMigrator.EnsureColumns(
+                connection,
+                "character_active_quests",
+                new[]
+                {
+                    ("activation_id", "TEXT NOT NULL DEFAULT ''"),
+                });
+
+            var inboxHasActivation = HasColumn(
+                connection,
+                "quest_progress_event_inbox",
+                "activation_id");
+            using (var transaction = connection.BeginTransaction())
+            {
+                ExecuteBatch(connection, transaction, @"
+UPDATE character_active_quests
+SET activation_id = lower(hex(randomblob(16)))
+WHERE activation_id IS NULL OR activation_id = '';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_character_active_quests_activation
+    ON character_active_quests(character_id, activation_id);
+DROP TABLE IF EXISTS quest_progress_event_inbox_v50;
+CREATE TABLE quest_progress_event_inbox_v50 (
+    character_id INTEGER NOT NULL,
+    activation_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_kind TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, activation_id, event_id, event_kind),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);");
+
+                ExecuteBatch(
+                    connection,
+                    transaction,
+                    inboxHasActivation
+                        ? @"
+INSERT OR IGNORE INTO quest_progress_event_inbox_v50
+    (character_id, activation_id, event_id, event_kind, created_at)
+SELECT character_id, activation_id, event_id, event_kind, created_at
+FROM quest_progress_event_inbox
+WHERE activation_id IS NOT NULL AND activation_id <> '';"
+                        : @"
+INSERT OR IGNORE INTO quest_progress_event_inbox_v50
+    (character_id, activation_id, event_id, event_kind, created_at)
+SELECT inbox.character_id,
+       active.activation_id,
+       inbox.event_id,
+       inbox.event_kind,
+       inbox.created_at
+FROM quest_progress_event_inbox AS inbox
+JOIN character_active_quests AS active
+  ON active.character_id = inbox.character_id;");
+
+                ExecuteBatch(connection, transaction, @"
+DROP TABLE quest_progress_event_inbox;
+ALTER TABLE quest_progress_event_inbox_v50
+    RENAME TO quest_progress_event_inbox;");
+                transaction.Commit();
+            }
+        }
+
+        private static bool HasColumn(
+            SqliteConnection connection,
+            string tableName,
+            string columnName)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = $"PRAGMA table_info({tableName});";
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        if (string.Equals(
+                                reader.GetString(1),
+                                columnName,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
         }
 
         private static void MigrateKnightShieldDeck(SqliteConnection connection)
