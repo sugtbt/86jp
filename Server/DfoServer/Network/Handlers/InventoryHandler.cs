@@ -26,6 +26,7 @@ namespace DfoServer.Network.Handlers
         private readonly ExpertJobPersistenceService _expertJobPersistence;
         private readonly ExpertJobOperationCoordinator _expertJobOperations;
         private readonly MonsterCardBindService _monsterCardBindService;
+        private readonly MonsterCardUpgradeService _monsterCardUpgradeService;
 
         public string ProtocolName => "GameProtocol";
 
@@ -57,6 +58,7 @@ namespace DfoServer.Network.Handlers
             _expertJobOperations = expertJobOperations
                 ?? throw new ArgumentNullException(nameof(expertJobOperations));
             _monsterCardBindService = new MonsterCardBindService();
+            _monsterCardUpgradeService = new MonsterCardUpgradeService();
         }
 
         public static (int characterId, int accountId) ResolveOwner(EnhancedClientSession session)
