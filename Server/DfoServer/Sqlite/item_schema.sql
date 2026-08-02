@@ -1062,6 +1062,14 @@ CREATE TABLE IF NOT EXISTS account_settings (
     FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS account_increase_chance_lottery_progress (
+    account_id INTEGER NOT NULL,
+    item_template_id INTEGER NOT NULL,
+    reward_index INTEGER NOT NULL CHECK(reward_index >= 0 AND reward_index < 20),
+    PRIMARY KEY (account_id, item_template_id, reward_index),
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+);
+
 INSERT OR IGNORE INTO accounts (account_id, m_id, password_hash) VALUES
     (1, '10038', '');
 

@@ -64,11 +64,26 @@ namespace DfoServer.Network.Handlers
                 displayItem,
                 displayValue);
 
+            if (result.Progress != null)
+            {
+                if (result.Progress.AutoReset)
+                    await SendClearedProgress(
+                        session,
+                        result.Progress.ItemTemplateId);
+                else
+                    await SendProgress(session, result.Progress);
+            }
+
             var refreshRewards = ResolveMainRewardUpdatesAfterNativeResult(
                 displayReward,
                 mainRewards,
                 useDoubleResultFlow);
-            await SendRewardUpdates(session, refreshRewards);
+            if (result.Progress != null
+                && mainRewards.Count > 0
+                && !result.DeliveredToMailbox)
+                await _refresh.SendItemListRefresh(session, InventoryListType.Main);
+            else
+                await SendRewardUpdates(session, refreshRewards);
 
             var firstNoticeItem = LotteryPresentationPolicy.ResolveResultCore(
                 inventory,
@@ -78,7 +93,8 @@ namespace DfoServer.Network.Handlers
                 inventory,
                 mainRewards,
                 firstNoticeItem,
-                suppressDuplicateNotices: !useDoubleResultFlow);
+                suppressDuplicateNotices: !useDoubleResultFlow,
+                forceNotice: result.Progress != null);
             await SendAvatarOrPetUpdates(session, result.Rewards);
             if (result.RequiredItemChangedSlots.Count > 0)
             {
@@ -89,6 +105,43 @@ namespace DfoServer.Network.Handlers
             }
             if (LotteryPresentationPolicy.ShouldSendGoldRefresh(result))
                 await _refresh.SendUpdateItemList(session, InventoryListType.Main, 0);
+            if (result.DeliveredToMailbox)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    0x0063,
+                    MailboxHandler.BuildMailboxAlarmNotification(1)));
+            }
+        }
+
+        internal static Task SendProgress(
+            EnhancedClientSession session,
+            LotteryProgressSnapshot progress)
+        {
+            return session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x03D8,
+                IncreaseChanceLotteryPacketBuilder.BuildAllState(progress)));
+        }
+
+        internal static Task SendEmptyProgress(EnhancedClientSession session)
+        {
+            return session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x03D8,
+                IncreaseChanceLotteryPacketBuilder.BuildAllState(
+                    (LotteryProgressSnapshot)null)));
+        }
+
+        internal static Task SendClearedProgress(
+            EnhancedClientSession session,
+            int itemTemplateId)
+        {
+            return SendProgress(session, new LotteryProgressSnapshot
+            {
+                ItemTemplateId = itemTemplateId,
+                NewRewardIndex = -1,
+            });
         }
 
         public async Task SendPremiumServiceRefresh(
@@ -115,6 +168,11 @@ namespace DfoServer.Network.Handlers
             {
                 FileLogger.Log($"[{ProtocolName}] USE_LOTTERY_ITEM: premium service refresh failed: {exception.Message}");
             }
+        }
+
+        internal Task SendGoldRefresh(EnhancedClientSession session)
+        {
+            return _refresh.SendUpdateItemList(session, InventoryListType.Main, 0);
         }
 
         private static async Task SendNativeResult(
@@ -184,11 +242,12 @@ namespace DfoServer.Network.Handlers
             InventoryService inventory,
             IReadOnlyList<LotteryRewardGrant> mainRewards,
             ItemCore firstDisplayItem,
-            bool suppressDuplicateNotices)
+            bool suppressDuplicateNotices,
+            bool forceNotice)
         {
             if (mainRewards == null || mainRewards.Count == 0)
             {
-                await BroadcastNotice(session, firstDisplayItem);
+                await BroadcastNotice(session, firstDisplayItem, forceNotice);
                 return;
             }
 
@@ -207,13 +266,14 @@ namespace DfoServer.Network.Handlers
                     : LotteryPresentationPolicy.ResolveResultCore(
                         inventory,
                         mainRewards[index]);
-                await BroadcastNotice(session, item);
+                await BroadcastNotice(session, item, forceNotice);
             }
         }
 
         private async Task BroadcastNotice(
             EnhancedClientSession session,
-            ItemCore displayItem)
+            ItemCore displayItem,
+            bool forceNotice)
         {
             if (_broadcastGamePacket == null
                 || displayItem == null
@@ -223,7 +283,7 @@ namespace DfoServer.Network.Handlers
             }
 
             var metadata = ItemMetadataResolver.Resolve(displayItem.ItemId);
-            if (!LotteryPresentationPolicy.IsNoticeEligible(metadata))
+            if (!forceNotice && !LotteryPresentationPolicy.IsNoticeEligible(metadata))
                 return;
 
             try

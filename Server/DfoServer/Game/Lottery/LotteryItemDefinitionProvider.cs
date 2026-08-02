@@ -79,8 +79,27 @@ namespace DfoServer.Game.Lottery
                 RequiredItemTemplateId = Math.Max(0, stackable.LotteryUseNeedItemId),
                 RequiredItemCount = Math.Max(0, stackable.LotteryUseNeedItemCount),
                 RewardPool = validRewards,
+                UsesIncreaseChanceProgress = IsIncreaseChanceLottery(stackable.ActionTypeName),
+                ProgressResetCount = GetActionParameter(stackable, 1),
+                ProgressResetGoldCost = GetActionParameter(stackable, 2),
             };
             return true;
+        }
+
+        private static bool IsIncreaseChanceLottery(string actionTypeName)
+        {
+            var normalized = (actionTypeName ?? string.Empty)
+                .Trim()
+                .Trim('[', ']')
+                .Trim();
+            return normalized.Equals("increase chance lottery", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static int GetActionParameter(PvfLib.StackableItemFile stackable, int index)
+        {
+            return stackable?.ActionTypeParams != null && index >= 0 && index < stackable.ActionTypeParams.Count
+                ? Math.Max(0, stackable.ActionTypeParams[index])
+                : 0;
         }
 
         private static PvfLib.BoosterRewardEntry CloneReward(PvfLib.BoosterRewardEntry reward)

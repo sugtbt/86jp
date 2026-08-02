@@ -642,6 +642,14 @@ CREATE TABLE IF NOT EXISTS account_dungeon_permissions (
             (49, "附魔师设备耐久", MigrateEnchanterEndurance),
             (50, "quest activation identity and per-activation event inbox",
                 MigrateQuestActivationIdentity),
+            (51, "account increase chance lottery progress", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS account_increase_chance_lottery_progress (
+    account_id INTEGER NOT NULL,
+    item_template_id INTEGER NOT NULL,
+    reward_index INTEGER NOT NULL CHECK(reward_index >= 0 AND reward_index < 20),
+    PRIMARY KEY (account_id, item_template_id, reward_index),
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+);")),
         };
 
         private static void MigrateEnchanterEndurance(SqliteConnection connection)
