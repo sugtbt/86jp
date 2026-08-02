@@ -66,6 +66,18 @@ namespace DfoServer.SelfTests
                     && extendedSpecialPassiveMap.SpecialPassiveObjects[0].Spawns[1].Code == 59013,
                     ref failures);
 
+                var projectedSpecialPassiveActors =
+                    DfoServer.GameWorld.DungeonActorTemplateProjector.Project(
+                        extendedSpecialPassiveMap,
+                        dungeonBasicLevel: 62,
+                        mapId: 1);
+                Check("special passive parent remains MAP-owned while inline templates are projected",
+                    !ContainsActorType(projectedSpecialPassiveActors, 9)
+                    && CountActor(projectedSpecialPassiveActors, 61801) == 1
+                    && CountActor(projectedSpecialPassiveActors, 59013) == 1
+                    && projectedSpecialPassiveActors.TrueForAll(actor => actor.Flag0 == 1),
+                    ref failures);
+
                 var eventPositionMap = MapFile.Parse(
                     "[event monster position]\n" +
                     "10 20 0 30 40 1\n");
@@ -867,13 +879,43 @@ namespace DfoServer.SelfTests
                     && HasTemplate(issue167Boss, 61494, 2, 0, 2)
                     && HasTemplate(issue167Boss, 59013, 2, 1, 2),
                     ref failures);
-                Check("issue 167 final room includes special passive wave checker object",
-                    HasStartMapObject(issue167Boss, 14056, 9, 9) && !ContainsBlockingMonster(issue167Boss, 14056),
+                Check("issue 167 special passive parents remain MAP-owned",
+                    !ContainsActorType(issue167Boss.Monsters, 9)
+                    && IndexOfMonster(issue167Boss, 14056) < 0,
                     ref failures);
-                Check("issue 167 special passive object rows precede hidden templates",
-                    IndexOfMonster(issue167Boss, 14056) >= 0
-                    && IndexOfMonster(issue167Boss, 14056) < IndexOfFirstHiddenTemplate(issue167Boss)
+                Check("issue 167 hidden templates precede the final AI boss",
+                    IndexOfFirstHiddenTemplate(issue167Boss) >= 0
                     && IndexOfMonster(issue167Boss, 10409) > IndexOfLastHiddenTemplate(issue167Boss),
+                    ref failures);
+
+                var crawlingPartyBoss = MapFile.Parse(
+                    DfoServer.GameWorld.PvfArchiveAccessor.ReadText(
+                        Path.Combine(
+                            "map",
+                            "RealSkyCastle",
+                            "RealSkyCastle06.map")));
+                var crawlingSoloBoss = MapFile.Parse(
+                    DfoServer.GameWorld.PvfArchiveAccessor.ReadText(
+                        Path.Combine(
+                            "map",
+                            "dimensiongate_tutorial",
+                            "ActiveSkyCastle",
+                            "39132RealSkyCastle06.map")));
+                var crawlingPartyActors =
+                    DfoServer.GameWorld.DungeonActorTemplateProjector.Project(
+                        crawlingPartyBoss,
+                        dungeonBasicLevel: 70,
+                        mapId: 16205);
+                var crawlingSoloActors =
+                    DfoServer.GameWorld.DungeonActorTemplateProjector.Project(
+                        crawlingSoloBoss,
+                        dungeonBasicLevel: 70,
+                        mapId: 39132);
+                Check("crawling city party and solo parents are not duplicated in START_MAP",
+                    !ContainsActorType(crawlingPartyActors, 9)
+                    && !ContainsActorType(crawlingSoloActors, 9)
+                    && CountActor(crawlingPartyActors, 61128) == 1
+                    && CountActor(crawlingSoloActors, 120081) == 1,
                     ref failures);
 
                 var firstWaveIndex = IndexOfFirstHiddenTemplate(issue167Boss);
@@ -1150,19 +1192,29 @@ namespace DfoServer.SelfTests
             return false;
         }
 
-        private static bool HasStartMapObject(DungeonData.MazeSumInfo maze, int objectCode, byte type, int packetIndex)
+        private static bool ContainsActorType(
+            IReadOnlyList<DungeonData.MonsterSumInfo> actors,
+            byte type)
         {
-            if (maze.Monsters == null)
+            if (actors == null)
                 return false;
-            foreach (var monster in maze.Monsters)
-            {
-                if (monster.Code == objectCode
-                    && monster.Type == type
-                    && monster.PacketIndex == packetIndex
-                    && monster.Flag0 == 0)
+            foreach (var actor in actors)
+                if (actor.Type == type)
                     return true;
-            }
             return false;
+        }
+
+        private static int CountActor(
+            IReadOnlyList<DungeonData.MonsterSumInfo> actors,
+            int actorCode)
+        {
+            var count = 0;
+            if (actors == null)
+                return count;
+            foreach (var actor in actors)
+                if (actor.Code == actorCode)
+                    count++;
+            return count;
         }
 
         private static int IndexOfMonster(DungeonData.MazeSumInfo maze, int monsterCode)

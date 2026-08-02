@@ -484,6 +484,7 @@ namespace DfoServer.SelfTests
                     CreateDisjointRequest(37),
                     out var systemRejectedResult)
                 && systemRejectedResult.ErrorCode == DisjointItemResult.ErrorInvalidTarget
+                && systemRejectedResult.InventoryMutations.Count == 0
                 && systemDisjointInventory.GetItem(InventoryListType.Main, 37)?.AmplifyType == 0x80,
                 ref failures);
 
@@ -525,6 +526,10 @@ namespace DfoServer.SelfTests
                 && qualifiedResult.DisjointResult.Materials.Any(material =>
                     material.ItemTemplateId == 10088692
                     && material.Count == 6)
+                && qualifiedResult.DisjointResult.InventoryMutations.Any(mutation =>
+                    mutation.ItemTemplateId == unidentifiedEpicEquipmentId)
+                && qualifiedResult.DisjointResult.InventoryMutations.Any(mutation =>
+                    mutation.ItemTemplateId == 10088692)
                 && qualifiedStore.DisjointMachine.Endurance < 300,
                 ref failures);
 
@@ -566,7 +571,11 @@ namespace DfoServer.SelfTests
                 && extractionResult.Materials.All(material =>
                     material.ItemTemplateId > 0
                     && material.Count > 0
-                    && extractionInventory.CountMainItem(material.ItemTemplateId) >= material.Count),
+                    && extractionInventory.CountMainItem(material.ItemTemplateId) >= material.Count
+                    && extractionResult.InventoryMutations.Any(mutation =>
+                        mutation.ItemTemplateId == material.ItemTemplateId))
+                && extractionResult.InventoryMutations.Any(mutation =>
+                    mutation.ItemTemplateId == testEquipmentId),
                 ref failures);
             var alchemistExtractionInventory = new InventoryService(990514, 990514);
             alchemistExtractionInventory.SetItem(InventoryListType.Main, 3, new ItemCore

@@ -510,6 +510,11 @@ namespace DfoServer.SelfTests
                         Type = 0,
                     },
                 },
+                SpecialPassiveObjects = new List<PvfLib.SpecialPassiveObjectInfo>
+                {
+                    new PvfLib.SpecialPassiveObjectInfo { ObjectCode = 9001 },
+                    new PvfLib.SpecialPassiveObjectInfo { ObjectCode = 9001 },
+                },
             };
             var actorRoomKey = new RoomKey(2, 0, -1);
             var actorRoom = sharedInstance.GetOrCreateRoom(
@@ -540,6 +545,43 @@ namespace DfoServer.SelfTests
                 && ReferenceEquals(actorRoom, sameActorRoom)
                 && actorRoom.FirstActorSequenceId == 43210
                 && BitConverter.ToUInt16(actorStartMap, 23) == 43210,
+                ref failures);
+            leaderRun.SetCurrentRoom(actorRoom);
+            var firstMapOwnedDeath = actorRoom
+                .TryRecordNextMapOwnedPassiveObjectDeath(
+                    DungeonEventEnvelope.Create(
+                        leaderRun,
+                        sourcePlayerId: 1,
+                        cause: "first map-owned passive object"),
+                    actorCode: 9001,
+                    out var firstMapOwnedActorDefined);
+            var secondMapOwnedDeath = actorRoom
+                .TryRecordNextMapOwnedPassiveObjectDeath(
+                    DungeonEventEnvelope.Create(
+                        leaderRun,
+                        sourcePlayerId: 1,
+                        cause: "second map-owned passive object"),
+                    actorCode: 9001,
+                    out var secondMapOwnedActorDefined);
+            var exhaustedMapOwnedDeath = actorRoom
+                .TryRecordNextMapOwnedPassiveObjectDeath(
+                    DungeonEventEnvelope.Create(
+                        leaderRun,
+                        sourcePlayerId: 1,
+                        cause: "exhausted map-owned passive object"),
+                    actorCode: 9001,
+                    out var exhaustedMapOwnedActorDefined);
+            Check("MAP-owned passive objects keep an instance ledger without wire sequences",
+                firstMapOwnedActorDefined
+                && firstMapOwnedDeath.Accepted
+                && firstMapOwnedDeath.Created
+                && firstMapOwnedDeath.Fact.SequenceId == 0
+                && secondMapOwnedActorDefined
+                && secondMapOwnedDeath.Accepted
+                && secondMapOwnedDeath.Created
+                && secondMapOwnedDeath.Fact.SequenceId == 0
+                && exhaustedMapOwnedActorDefined
+                && !exhaustedMapOwnedDeath.Accepted,
                 ref failures);
             var bossPosition = new[] { 5, 4 };
             var ridableObjects = new[]

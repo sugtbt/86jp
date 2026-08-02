@@ -162,11 +162,16 @@ namespace DfoServer.Game.Dungeon
 
     public sealed class DungeonInstanceRoom
     {
+        private const byte SpecialPassiveObjectActorType = 9;
+
         private readonly object _syncRoot = new object();
         private readonly Dictionary<string, DungeonEncounterRuntime> _encounters =
             new Dictionary<string, DungeonEncounterRuntime>(StringComparer.Ordinal);
         private readonly Dictionary<ushort, DungeonActorDeathFact> _actorDeaths =
             new Dictionary<ushort, DungeonActorDeathFact>();
+        private readonly Dictionary<int, DungeonActorDeathFact>
+            _mapOwnedActorDeaths =
+                new Dictionary<int, DungeonActorDeathFact>();
         private DungeonRoomState _state = DungeonRoomState.Created;
         private long _partyDungeonInstanceId;
         private DungeonEventEnvelope _clearSource;
@@ -282,10 +287,9 @@ namespace DfoServer.Game.Dungeon
         }
 
         internal DungeonRoomActorDeathApplication
-            TryRecordNextActorDeathByCode(
+            TryRecordNextMapOwnedPassiveObjectDeath(
                 DungeonEventEnvelope source,
                 int actorCode,
-                byte actorType,
                 out bool actorDefined)
         {
             actorDefined = false;
@@ -297,31 +301,27 @@ namespace DfoServer.Game.Dungeon
                 if (_state == DungeonRoomState.Closed)
                     return default;
 
-                var actors = Maze.Monsters;
+                var actors = Maze.SpecialPassiveObjects;
                 if (actors == null)
                     return default;
 
                 for (var index = 0; index < actors.Count; index++)
                 {
                     var actor = actors[index];
-                    if (actor.Code != actorCode || actor.Type != actorType)
+                    if (actor?.ObjectCode != actorCode)
                         continue;
 
                     actorDefined = true;
-                    var sequenceValue = (int)FirstActorSequenceId + index;
-                    if (sequenceValue <= 0 || sequenceValue > ushort.MaxValue)
+                    if (_mapOwnedActorDeaths.ContainsKey(index))
                         continue;
 
-                    var sequenceId = (ushort)sequenceValue;
-                    if (_actorDeaths.ContainsKey(sequenceId))
-                        continue;
-
+                    // MAP-owned actors have no START_MAP wire sequence.
                     var fact = new DungeonActorDeathFact(
                         source,
-                        sequenceId,
-                        actor.Code,
-                        actor.Type);
-                    _actorDeaths.Add(sequenceId, fact);
+                        sequenceId: 0,
+                        actor.ObjectCode,
+                        SpecialPassiveObjectActorType);
+                    _mapOwnedActorDeaths.Add(index, fact);
                     return new DungeonRoomActorDeathApplication(
                         accepted: true,
                         created: true,

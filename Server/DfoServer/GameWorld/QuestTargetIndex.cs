@@ -8,12 +8,14 @@ namespace DfoServer.GameWorld
         ExactMonsterCode = 0,
         AnyOrdinaryMonster = 1,
         AnyEliteMonster = 2,
+        AnyBossMonster = 3,
     }
 
     internal sealed class HuntMonsterQuestTarget
     {
         internal const int AnyOrdinaryMonsterCode = -1;
         internal const int AnyEliteMonsterCode = -2;
+        internal const int AnyBossMonsterCode = -3;
 
         public int QuestId;
         public int DungeonId;
@@ -26,13 +28,16 @@ namespace DfoServer.GameWorld
             ? HuntMonsterTargetKind.AnyOrdinaryMonster
             : MonsterCode == AnyEliteMonsterCode
                 ? HuntMonsterTargetKind.AnyEliteMonster
-                : HuntMonsterTargetKind.ExactMonsterCode;
+                : MonsterCode == AnyBossMonsterCode
+                    ? HuntMonsterTargetKind.AnyBossMonster
+                    : HuntMonsterTargetKind.ExactMonsterCode;
 
         internal static bool IsSupportedMonsterCode(int monsterCode)
         {
             return monsterCode > 0
                 || monsterCode == AnyOrdinaryMonsterCode
-                || monsterCode == AnyEliteMonsterCode;
+                || monsterCode == AnyEliteMonsterCode
+                || monsterCode == AnyBossMonsterCode;
         }
     }
 
@@ -405,6 +410,11 @@ namespace DfoServer.GameWorld
 
                 case HuntMonsterTargetKind.AnyEliteMonster:
                     if (monsterType != 1)
+                        return false;
+                    break;
+
+                case HuntMonsterTargetKind.AnyBossMonster:
+                    if (monsterType != 3)
                         return false;
                     break;
 

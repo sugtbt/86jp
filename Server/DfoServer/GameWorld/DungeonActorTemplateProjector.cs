@@ -9,8 +9,6 @@ namespace DfoServer.GameWorld
 {
     internal static class DungeonActorTemplateProjector
     {
-        private const byte StartMapSpecialPassiveObjectType = 9;
-
         private static readonly Lazy<LstFile> AiCharacterList =
             new Lazy<LstFile>(() => DungeonCatalog.LoadListFile(
                 Path.Combine("AICharacter", "AICharacter.lst")));
@@ -66,7 +64,7 @@ namespace DfoServer.GameWorld
                 });
             }
 
-            AppendSpecialPassiveObjects(
+            AppendSpecialPassiveObjectTemplates(
                 result,
                 mapFile,
                 dungeonBasicLevel,
@@ -216,7 +214,7 @@ namespace DfoServer.GameWorld
             return false;
         }
 
-        private static void AppendSpecialPassiveObjects(
+        private static void AppendSpecialPassiveObjectTemplates(
             List<Dungeon.MonsterSumInfo> actors,
             MapFile mapFile,
             byte dungeonBasicLevel,
@@ -229,28 +227,9 @@ namespace DfoServer.GameWorld
                 return;
             }
 
-            var objectRows = 0;
+            // The client creates parent objects from the MAP. START_MAP only
+            // supplies the inline templates those objects can activate.
             var templateRows = 0;
-            for (var objectIndex = 0;
-                 objectIndex < mapFile.SpecialPassiveObjects.Count;
-                 objectIndex++)
-            {
-                var obj = mapFile.SpecialPassiveObjects[objectIndex];
-                if (obj?.ObjectCode <= 0)
-                    continue;
-
-                actors.Add(new Dungeon.MonsterSumInfo
-                {
-                    Code = obj.ObjectCode,
-                    Type = StartMapSpecialPassiveObjectType,
-                    Level = 0,
-                    IsBlocking = false,
-                    PacketIndex = objectIndex,
-                    SourceSpecialPassiveObjectIndex = objectIndex,
-                });
-                objectRows++;
-            }
-
             for (var objectIndex = 0;
                  objectIndex < mapFile.SpecialPassiveObjects.Count;
                  objectIndex++)
@@ -293,11 +272,11 @@ namespace DfoServer.GameWorld
                 }
             }
 
-            if (objectRows > 0 || templateRows > 0)
+            if (templateRows > 0)
             {
                 FileLogger.Log(
-                    $"[DungeonActorTemplateProjector] special passive objects: " +
-                    $"map={mapId} objects={objectRows} templates={templateRows}");
+                    $"[DungeonActorTemplateProjector] special passive object " +
+                    $"templates: map={mapId} templates={templateRows}");
             }
         }
 

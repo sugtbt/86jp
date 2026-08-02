@@ -125,6 +125,13 @@ namespace DfoServer.Network.Handlers
                         0x00CD,
                         expertJobBody));
                 }
+                var questManager = session.GameSession?.QuestManager;
+                if (questManager != null)
+                {
+                    await questManager.SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                        lease,
+                        result.InventoryMutations);
+                }
                 FileLogger.Log(
                     $"[ExpertJob] EXTRACT cid={player.CharacterId} " +
                     $"type={command.ExtractorType} extractorSlot={command.ExtractorSlotIndex} " +

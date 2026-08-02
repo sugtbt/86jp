@@ -369,6 +369,14 @@ namespace DfoServer.Network.Handlers
                     await SendMailboxListRefresh(session, characterId, "claim-page-complete");
             }
 
+            var questManager = session.GameSession?.QuestManager;
+            if (questManager != null)
+            {
+                await questManager.SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                    receiverInventory,
+                    result.InventoryMutations);
+            }
+
             FileLogger.Log($"[Mailbox] CLAIM ok claimObjectId={claimObjectId} messageId={result.MessageId} gold={result.ClaimedGold} attachments={result.ClaimedAttachmentCount} removed={result.RemovedFromInbox} refreshSlots={FormatClaimRefreshSlots(updatedSlots)}");
         }
 

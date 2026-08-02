@@ -26,6 +26,9 @@ namespace DfoServer.Game.Inventory
         public int SourceItemTemplateId { get; set; }
 
         public List<DisjointMaterialResult> Materials { get; } = new List<DisjointMaterialResult>();
+
+        public List<InventoryMutationResult> InventoryMutations { get; } =
+            new List<InventoryMutationResult>();
     }
 
     public sealed class DisjointMaterialResult

@@ -74,10 +74,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                     && roomSnapshot.RoomState?.InstanceRoom != null)
                 {
                     var death = roomSnapshot.RoomState.InstanceRoom
-                        .TryRecordNextActorDeathByCode(
+                        .TryRecordNextMapOwnedPassiveObjectDeath(
                             passiveObjectEvent,
                             objectCode,
-                            actorType: 9,
                             out var actorDefined);
                     if (actorDefined)
                     {

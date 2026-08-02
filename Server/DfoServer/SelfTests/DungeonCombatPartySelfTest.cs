@@ -34,6 +34,7 @@ namespace DfoServer.SelfTests
         private const int AnyMonsterDungeonId = 144;
         private const int AnyMonsterCode = 65301;
         private const ushort EliteMonsterQuestId = 4;
+        private const ushort BossMonsterQuestId = 6;
         private const ushort RescueSilmaQuestId = 1791;
         private const int RescueSilmaDungeonId = 149;
         private const int RescueSilmaApcCode = 6510;
@@ -228,6 +229,28 @@ namespace DfoServer.SelfTests
                 fixture.KillMonster();
                 Check("duplicate elite death does not repeat quest progress",
                     fixture.LoadKillerQuestTrigger(EliteMonsterQuestId) == 4,
+                    ref failures);
+
+                fixture.PrepareBossQuestKill(monsterType: 0);
+                fixture.KillMonster();
+                Check("boss-monster quest excludes ordinary actor deaths",
+                    fixture.LoadKillerQuestTrigger(BossMonsterQuestId) == 5,
+                    ref failures);
+
+                fixture.PrepareBossQuestKill(monsterType: 1);
+                fixture.KillMonster();
+                Check("boss-monster quest excludes elite actor deaths",
+                    fixture.LoadKillerQuestTrigger(BossMonsterQuestId) == 5,
+                    ref failures);
+
+                fixture.PrepareBossQuestKill(monsterType: 3);
+                fixture.KillMonster();
+                Check("boss-monster quest advances through the canonical kill bridge",
+                    fixture.LoadKillerQuestTrigger(BossMonsterQuestId) == 4,
+                    ref failures);
+                fixture.KillMonster();
+                Check("duplicate boss death does not repeat quest progress",
+                    fixture.LoadKillerQuestTrigger(BossMonsterQuestId) == 4,
                     ref failures);
 
                 var rescueSilmaBossSequence =
@@ -516,6 +539,21 @@ namespace DfoServer.SelfTests
             {
                 var active = SaveKillerActiveQuest(
                     EliteMonsterQuestId,
+                    triggerValue: 5);
+                var runs = CreateSharedRuns(
+                    monsterType,
+                    AnyMonsterCode,
+                    dungeonId: AnyMonsterDungeonId,
+                    difficulty: 0);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void PrepareBossQuestKill(byte monsterType)
+            {
+                var active = SaveKillerActiveQuest(
+                    BossMonsterQuestId,
                     triggerValue: 5);
                 var runs = CreateSharedRuns(
                     monsterType,

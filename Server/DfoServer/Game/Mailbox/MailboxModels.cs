@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.Mailbox
 {
@@ -142,6 +143,8 @@ namespace DfoServer.Game.Mailbox
         public IReadOnlyList<short> UpdatedMainSlots { get; set; } = Array.Empty<short>();
         public IReadOnlyList<short> UpdatedAvatarSlots { get; set; } = Array.Empty<short>();
         public IReadOnlyList<short> UpdatedPetSlots { get; set; } = Array.Empty<short>();
+        public IReadOnlyList<InventoryMutationResult> InventoryMutations { get; set; } =
+            Array.Empty<InventoryMutationResult>();
 
         public static MailboxClaimResult Fail(MailboxSendError error)
         {

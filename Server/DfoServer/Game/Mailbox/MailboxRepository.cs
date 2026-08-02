@@ -989,8 +989,28 @@ LIMIT 1;";
                 RemovedFromInbox = false,
                 UpdatedMainSlots = updatedMainSlots,
                 UpdatedAvatarSlots = updatedAvatarSlots,
-                UpdatedPetSlots = updatedPetSlots
+                UpdatedPetSlots = updatedPetSlots,
+                InventoryMutations = BuildClaimInventoryMutations(inventory, grantResult),
             };
+        }
+
+        private static IReadOnlyList<InventoryMutationResult> BuildClaimInventoryMutations(
+            InventoryService inventory,
+            InventoryRewardGrantBatchResult grantResult)
+        {
+            var mutations = new List<InventoryMutationResult>();
+            if (inventory == null || grantResult == null || !grantResult.Success)
+                return mutations;
+
+            foreach (var grant in grantResult.Results)
+            {
+                var mutation = InventoryMutationResultFactory.FromGrant(
+                    inventory,
+                    grant);
+                if (mutation != null)
+                    mutations.Add(mutation);
+            }
+            return mutations;
         }
 
         private static bool AllocateDetailUidsInTransaction(

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Mailbox;
 using DfoServer.Game.Quests;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -29,6 +30,7 @@ namespace DfoServer.SelfTests
         private const ushort FitzLieutenantQuestId = 2547;
         private const ushort AnyMonsterQuestId = 4303;
         private const ushort EliteMonsterQuestId = 4;
+        private const ushort BossMonsterQuestId = 6;
         private const ushort SeekingPurchaseQuestId = 10;
         private const ushort SeekingSingleItemQuestId = 13092;
         private const int SeekingSingleItemId = 10088630;
@@ -139,6 +141,24 @@ namespace DfoServer.SelfTests
             Check("4 elite wildcard does not materialize a synthetic quest actor",
                 GameWorld.QuestData.GetUnfinishedDungeonActorTargets(
                     EliteMonsterQuestId,
+                    trigger: 5,
+                    dungeonId: 144,
+                    difficulty: 0).Count == 0,
+                ref failures);
+            var bossTargets = GameWorld.QuestData.GetHuntMonsterTargets(
+                BossMonsterQuestId);
+            Check("6 preserves the PVF boss-monster wildcard",
+                bossTargets.Count == 1
+                    && bossTargets[0].DungeonId == -1
+                    && bossTargets[0].MinimumDifficulty == -1
+                    && bossTargets[0].MonsterCode == -3
+                    && bossTargets[0].Kind
+                        == GameWorld.HuntMonsterTargetKind.AnyBossMonster
+                    && bossTargets[0].RequiredCount == 5,
+                ref failures);
+            Check("6 boss wildcard does not materialize a synthetic quest actor",
+                GameWorld.QuestData.GetUnfinishedDungeonActorTargets(
+                    BossMonsterQuestId,
                     trigger: 5,
                     dungeonId: 144,
                     difficulty: 0).Count == 0,
@@ -267,6 +287,13 @@ namespace DfoServer.SelfTests
                 .GetAwaiter()
                 .GetResult();
             failures += CheckNpcShopSeekingProjectionAsync(
+                    connStr,
+                    dbPath,
+                    inventoryLease,
+                    inventory)
+                .GetAwaiter()
+                .GetResult();
+            failures += CheckMailboxAndDisjointSeekingProjectionAsync(
                     connStr,
                     dbPath,
                     inventoryLease,
@@ -412,6 +439,61 @@ namespace DfoServer.SelfTests
                     && eliteReplay.Count == 0
                     && LoadTrigger(connStr, EliteMonsterQuestId) == 4
                     && CountProgressEvents(connStr, eliteEventId) == 1,
+                ref failures);
+
+            SaveActiveQuest(connStr, BossMonsterQuestId, 5);
+            var bossSnapshot = QuestRunSnapshot.Capture(
+                QuestService.LoadActiveQuests(connStr, CharacterId));
+            var bossOrdinaryEventId = Guid.NewGuid();
+            var bossOrdinary = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: bossOrdinaryEventId,
+                eligibleQuestIds: bossSnapshot.QuestIds,
+                eligibleQuestActivations: bossSnapshot.Activations,
+                monsterType: 0);
+            var bossEliteEventId = Guid.NewGuid();
+            var bossElite = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: bossEliteEventId,
+                eligibleQuestIds: bossSnapshot.QuestIds,
+                eligibleQuestActivations: bossSnapshot.Activations,
+                monsterType: 1);
+            var bossEventId = Guid.NewGuid();
+            var bossFirst = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: bossEventId,
+                eligibleQuestIds: bossSnapshot.QuestIds,
+                eligibleQuestActivations: bossSnapshot.Activations,
+                monsterType: 3);
+            var bossReplay = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: bossEventId,
+                eligibleQuestIds: bossSnapshot.QuestIds,
+                eligibleQuestActivations: bossSnapshot.Activations,
+                monsterType: 3);
+            Check("6 counts only canonical boss deaths and deduplicates one fact",
+                bossOrdinary.Count == 0
+                    && bossElite.Count == 0
+                    && CountProgressEvents(connStr, bossOrdinaryEventId) == 0
+                    && CountProgressEvents(connStr, bossEliteEventId) == 0
+                    && bossFirst.Count == 1
+                    && bossFirst[0].PreviousTriggerValue == 5
+                    && bossFirst[0].TriggerValue == 4
+                    && bossReplay.Count == 0
+                    && LoadTrigger(connStr, BossMonsterQuestId) == 4
+                    && CountProgressEvents(connStr, bossEventId) == 1,
                 ref failures);
 
             SaveActiveQuest(connStr, SyntheticQuestId, 1);
@@ -1109,6 +1191,140 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
                     && sender.CountCalls("NOTI:023F") == 2,
                 ref failures);
+            return failures;
+        }
+
+        private static async Task<int> CheckMailboxAndDisjointSeekingProjectionAsync(
+            string connStr,
+            string dbPath,
+            InventoryLease inventoryLease,
+            InventoryService inventory)
+        {
+            var failures = 0;
+            var held = inventory.CountMainItem(SeekingSingleItemId);
+            if (held > 0)
+                inventory.TryConsumeMainItem(SeekingSingleItemId, held, out _);
+
+            SaveActiveQuest(connStr, SeekingSingleItemQuestId, 1);
+            var mailbox = new MailboxRepository(dbPath, ServerPaths.SchemaFilePath);
+            var sent = mailbox.SendSystemMail(new MailboxSendRequest
+            {
+                SenderCharacterId = CharacterId,
+                SenderAccountId = AccountId,
+                SenderName = "DNFadmin",
+                ReceiverCharacterId = CharacterId,
+                ReceiverAccountId = AccountId,
+                ReceiverName = "quest-trigger-count-test",
+                Text = "seeking-mail-fixture",
+                MailType = 1,
+                IdempotencyKey = "selftest:seeking-mail-fixture",
+                Attachments = new[]
+                {
+                    new MailboxSendAttachmentRequest
+                    {
+                        ItemType = 0,
+                        ItemId = SeekingSingleItemId,
+                        ItemCount = 1,
+                    },
+                },
+            });
+            var claim = sent.Success
+                ? mailbox.ClaimMail(CharacterId, sent.MessageId, inventoryLease)
+                : MailboxClaimResult.Fail(MailboxSendError.InvalidRequest);
+            var mailSender = new RecordingSender();
+            var mailManager = new QuestManager(mailSender, connStr);
+            if (claim.Success)
+            {
+                await mailManager.SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                    inventoryLease,
+                    claim.InventoryMutations);
+            }
+            Check("mail attachment mutation immediately completes seeking quest",
+                sent.Success
+                    && claim.Success
+                    && claim.InventoryMutations.Count == 1
+                    && claim.InventoryMutations[0].ItemTemplateId == SeekingSingleItemId
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 0
+                    && mailSender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            held = inventory.CountMainItem(SeekingSingleItemId);
+            if (held > 0)
+                inventory.TryConsumeMainItem(SeekingSingleItemId, held, out _);
+            SaveActiveQuest(connStr, SeekingSingleItemQuestId, 1);
+            const short sourceSlot = 37;
+            const int sourceEquipmentId = 33000;
+            inventory.SetItem(InventoryListType.Main, sourceSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindEquipment,
+                ItemId = sourceEquipmentId,
+                Uid = 284037,
+            });
+            var disjointed = InventoryDisjointService.TryDisjointItem(
+                inventory,
+                new DisjointItemRequest
+                {
+                    ItemSpace = InventoryListType.Main,
+                    TargetSlotIndex = sourceSlot,
+                    DisjointItemSlotIndex = -1,
+                },
+                (ItemCore _,
+                    ItemMetadata __,
+                    out List<DisjointMaterialResult> materials,
+                    out byte errorCode) =>
+                {
+                    materials = new List<DisjointMaterialResult>
+                    {
+                        new DisjointMaterialResult
+                        {
+                            ItemTemplateId = SeekingSingleItemId,
+                            Count = 1,
+                            SlotIndex = -1,
+                        },
+                    };
+                    errorCode = 0;
+                    return true;
+                },
+                out var disjointResult);
+            var disjointSender = new RecordingSender();
+            var disjointManager = new QuestManager(disjointSender, connStr);
+            if (disjointed)
+            {
+                await disjointManager.SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                    inventoryLease,
+                    disjointResult.InventoryMutations);
+            }
+            Check("disjoint fixture completes its inventory operation",
+                disjointed,
+                ref failures);
+            Check("disjoint mutation records the consumed source",
+                disjointed
+                    && disjointResult.InventoryMutations.Exists(mutation =>
+                        mutation.ItemTemplateId == sourceEquipmentId
+                        && mutation.AppliedCount == 1),
+                ref failures);
+            Check("disjoint mutation records the granted material",
+                disjointed
+                    && disjointResult.InventoryMutations.Exists(mutation =>
+                        mutation.ItemTemplateId == SeekingSingleItemId
+                        && mutation.AppliedCount == 1),
+                ref failures);
+            Check("disjoint inventory contains the granted material",
+                disjointed
+                    && inventory.CountMainItem(SeekingSingleItemId) >= 1,
+                ref failures);
+            Check("disjoint material mutation completes seeking trigger",
+                disjointed
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 0,
+                ref failures);
+            Check("disjoint material mutation projects one active quest refresh",
+                disjointed
+                    && disjointSender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            held = inventory.CountMainItem(SeekingSingleItemId);
+            if (held > 0)
+                inventory.TryConsumeMainItem(SeekingSingleItemId, held, out _);
             return failures;
         }
 

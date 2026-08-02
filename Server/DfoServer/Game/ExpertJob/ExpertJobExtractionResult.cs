@@ -20,5 +20,7 @@ namespace DfoServer.Game.ExpertJob
         internal List<int> LearnedRecipeIds { get; } = new List<int>();
         internal List<ExpertJobExtractionMaterial> Materials { get; } =
             new List<ExpertJobExtractionMaterial>();
+        internal List<InventoryMutationResult> InventoryMutations { get; } =
+            new List<InventoryMutationResult>();
     }
 }

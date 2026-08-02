@@ -338,6 +338,13 @@ namespace DfoServer.Network.Handlers
                 {
                     await BroadcastClose(session, exhaustedStore, includeOwner: true);
                 }
+                var questManager = session.GameSession?.QuestManager;
+                if (questManager != null)
+                {
+                    await questManager.SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                        requesterLease,
+                        result.DisjointResult.InventoryMutations);
+                }
             }
             finally
             {

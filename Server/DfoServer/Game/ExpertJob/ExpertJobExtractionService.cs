@@ -95,6 +95,7 @@ namespace DfoServer.Game.ExpertJob
                     Count = material.Count,
                 });
             }
+            result.InventoryMutations.AddRange(disjointResult.InventoryMutations);
             result.LearnedRecipeIds.AddRange(config.RecipeConfig.GetNewAutoLearnRecipeIds(
                 currentExperience,
                 finalExperience));

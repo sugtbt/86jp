@@ -63,6 +63,13 @@ namespace DfoServer.Network.Handlers
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x001A, DisjointItemAckBuilder.BuildSuccess(result)));
             // 分解 ACK 自带目标槽位和产物 slot/item/count，客户端据此刷新，不额外补 0x000E。
+            var questManager = session.GameSession?.QuestManager;
+            if (questManager != null)
+            {
+                await questManager.SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                    lease,
+                    result.InventoryMutations);
+            }
 
             var materialText = result.Materials.Count > 0
                 ? string.Join(", ", result.Materials.ConvertAll(m => $"0x{m.ItemTemplateId:X8}x{m.Count}@{m.SlotIndex}"))

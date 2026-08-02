@@ -103,6 +103,10 @@ namespace DfoServer.SelfTests
                     && claim.ClaimedGold == 100
                     && receiverLease.Inventory.CountMainItem(TransferItemId) == 2
                     && receiverLease.Inventory.GetMainVirtualCount(0)?.Count == 100);
+                Check("claim exposes committed attachment mutation",
+                    claim.InventoryMutations.Count == 1
+                    && claim.InventoryMutations[0].ItemTemplateId == TransferItemId
+                    && claim.InventoryMutations[0].AppliedCount == 2);
                 Check("claimed letter remains as an empty read letter",
                     repository.LoadInboxPage(ReceiverCharacterId, 20)
                         .Entries.Any(entry => entry.MessageId == send.MessageId
@@ -117,6 +121,7 @@ namespace DfoServer.SelfTests
                         receiverLease)));
                 Check("duplicate claim cannot grant a second copy",
                     duplicateClaims.All(result => !result.Success)
+                    && duplicateClaims.All(result => result.InventoryMutations.Count == 0)
                     && receiverLease.Inventory.CountMainItem(TransferItemId) == 2
                     && receiverLease.Inventory.GetMainVirtualCount(0)?.Count == 100);
 
