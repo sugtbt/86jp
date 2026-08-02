@@ -15,16 +15,6 @@ namespace DfoServer.GameWorld
         private static readonly Lazy<PresentationCatalog> Catalog =
             new Lazy<PresentationCatalog>(BuildCatalog);
 
-        internal static IReadOnlyList<ushort> ProjectAvailableQuestIds(
-            IReadOnlyCollection<ushort> questIds,
-            IReadOnlyDictionary<int, int> clearedFlags)
-        {
-            if (questIds == null || questIds.Count == 0)
-                return Array.Empty<ushort>();
-
-            return ProjectQuestIds(questIds, clearedFlags);
-        }
-
         internal static IReadOnlyList<ActiveQuest> ProjectActiveQuests(
             IReadOnlyCollection<ActiveQuest> activeQuests)
         {
@@ -36,8 +26,7 @@ namespace DfoServer.GameWorld
                     activeQuests
                         .Where(quest => quest != null)
                         .Select(quest => quest.QuestId)
-                        .ToArray(),
-                    clearedFlags: null));
+                        .ToArray()));
             return activeQuests
                 .Where(quest => quest != null && visibleIds.Contains(quest.QuestId))
                 .ToArray();
@@ -54,45 +43,23 @@ namespace DfoServer.GameWorld
                         : activeQuests
                             .Where(quest => quest != null)
                             .Select(quest => quest.QuestId)
-                            .ToArray(),
-                    clearedFlags)
+                            .ToArray())
                     .Select(questId => (int)questId));
         }
 
-        internal static bool IsAcceptanceAllowed(
-            int questId,
-            IReadOnlyCollection<ActiveQuest> activeQuests)
+        internal static bool SharesPhysicalSlot(
+            int leftQuestId,
+            int rightQuestId)
         {
-            if (questId <= 0 || activeQuests == null || activeQuests.Count == 0)
-                return true;
-
-            if (!Catalog.Value.TryGetQuestSlots(questId, out var candidateSlots))
-                return true;
-
-            foreach (var activeQuest in activeQuests)
-            {
-                if (activeQuest == null || activeQuest.QuestId <= 0)
-                    continue;
-                if (!Catalog.Value.TryGetQuestSlots(
-                        activeQuest.QuestId,
-                        out var activeSlots))
-                {
-                    continue;
-                }
-
-                if (!SharesSlot(candidateSlots, activeSlots))
-                    continue;
-
-                if (CompareQuestPriority(questId, activeQuest.QuestId) > 0)
-                    return false;
-            }
-
-            return true;
+            return leftQuestId > 0
+                && rightQuestId > 0
+                && Catalog.Value.TryGetQuestSlots(leftQuestId, out var leftSlots)
+                && Catalog.Value.TryGetQuestSlots(rightQuestId, out var rightSlots)
+                && SharesSlot(leftSlots, rightSlots);
         }
 
         private static IReadOnlyList<ushort> ProjectQuestIds(
-            IReadOnlyCollection<ushort> questIds,
-            IReadOnlyDictionary<int, int> clearedFlags)
+            IReadOnlyCollection<ushort> questIds)
         {
             var input = new HashSet<int>();
             foreach (var questId in questIds ?? Array.Empty<ushort>())

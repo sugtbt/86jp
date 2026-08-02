@@ -105,7 +105,7 @@ namespace DfoServer.Game.Quests
                             {
                                 return QuestAcceptResult.Fail(21);
                             }
-                            if (!GameWorld.QuestDungeonPresentationPlanner
+                            if (!QuestDungeonActivationPolicy
                                     .IsAcceptanceAllowed(questId, active))
                             {
                                 FileLogger.Log(

@@ -211,11 +211,11 @@ namespace DfoServer.SelfTests
 
             var allowed = granFloris.Contains(7803) ? (ushort)7803 : (ushort)7807;
             var blocked = allowed == 7803 ? (ushort)7807 : (ushort)7803;
-            Check("global slot winner is the only accepted candidate",
-                QuestDungeonPresentationPlanner.IsAcceptanceAllowed(
+            Check("an occupied task-dungeon slot rejects every second active candidate",
+                !QuestDungeonActivationPolicy.IsAcceptanceAllowed(
                     blocked,
-                    new[] { new ActiveQuest { Slot = 1, QuestId = allowed } }) == false
-                && QuestDungeonPresentationPlanner.IsAcceptanceAllowed(
+                    new[] { new ActiveQuest { Slot = 1, QuestId = allowed } })
+                && !QuestDungeonActivationPolicy.IsAcceptanceAllowed(
                     allowed,
                     new[] { new ActiveQuest { Slot = 1, QuestId = blocked } }),
                 ref failures);
@@ -230,8 +230,21 @@ namespace DfoServer.SelfTests
                     [2404] = 1,
                 });
             var acceptableIds = ParseQuestIds(acceptableBody);
-            Check("acceptable quest packet projects one Time Gate card",
-                acceptableIds.Contains(2356) && !acceptableIds.Contains(2406),
+            Check("acceptable quest packet preserves all legal Time Gate choices",
+                acceptableIds.Contains(2356) && acceptableIds.Contains(2406),
+                ref failures);
+
+            var jobChoiceBody = QuestListBodyBuilder.BuildBody(
+                level: 86,
+                job: 0,
+                growType: 0,
+                clearedFlags: new Dictionary<int, int> { [13099] = 1 });
+            var jobChoiceIds = ParseQuestIds(jobChoiceBody);
+            Check("acceptable quest packet preserves every swordman job branch",
+                jobChoiceIds.Contains(7803)
+                && jobChoiceIds.Contains(7807)
+                && jobChoiceIds.Contains(7810)
+                && jobChoiceIds.Contains(7814),
                 ref failures);
         }
 

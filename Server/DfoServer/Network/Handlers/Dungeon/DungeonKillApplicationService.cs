@@ -629,10 +629,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                     out towerDrops);
 
             TryGetCurrentRoomState(run, out var roomState);
+            var actorAllowsRewards = DungeonActorRewardEligibility
+                .AllowsParticipantCombatRewards(monster);
             var allowsExperience = run.RewardPolicy.AllowsMonsterExperience
-                && (dynamicPolicy?.GrantsMonsterExperience ?? true);
+                && (dynamicPolicy?.GrantsMonsterExperience ?? true)
+                && actorAllowsRewards;
             var allowsDrops = run.RewardPolicy.AllowsMonsterDrops
-                && (dynamicPolicy?.GeneratesMonsterDrops ?? true);
+                && (dynamicPolicy?.GeneratesMonsterDrops ?? true)
+                && actorAllowsRewards;
             var rewardMonsterType = GetRewardMonsterType(monster.Type);
             var isBoss = IsBossActorType(monster.Type);
             var isChampion = monster.Type == 1;

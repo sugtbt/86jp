@@ -100,7 +100,7 @@ namespace PvfLib
         public int X { get; set; }
         public int Y { get; set; }
         public int Direction { get; set; }
-        public ApcFaction Faction { get; set; }
+        public ApcFaction? Faction { get; set; }
         public ApcAIType AIType { get; set; }
     }
 

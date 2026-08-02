@@ -26,6 +26,7 @@ namespace DfoServer.SelfTests
         private const ushort SurvivorQuestId = 1836;
         private const ushort HelpVoiceQuestId = 2021;
         private const ushort SeekAndMeetQuestId = 2043;
+        private const ushort NightAssaultQuestId = 2188;
         private const ushort DragonObstacleQuestId = 20722;
         private const ushort FitzLieutenantQuestId = 2547;
         private const ushort AnyMonsterQuestId = 4303;
@@ -109,6 +110,16 @@ namespace DfoServer.SelfTests
                     && fitzTargets[1].MonsterCode == 63047
                     && fitzTargets[1].RequiredCount == 40
                     && fitzTargets[1].ChannelIndex == 1,
+                ref failures);
+            var nightAssaultTargets = GameWorld.QuestData.GetHuntMonsterTargets(
+                NightAssaultQuestId);
+            Check("2188 resolves the configured Night Assault monster target",
+                nightAssaultTargets.Count == 1
+                    && nightAssaultTargets[0].DungeonId == 83
+                    && nightAssaultTargets[0].MinimumDifficulty == -1
+                    && nightAssaultTargets[0].MonsterCode == 61438
+                    && nightAssaultTargets[0].RequiredCount == 15
+                    && nightAssaultTargets[0].ChannelIndex == 0,
                 ref failures);
             var anyMonsterTargets = GameWorld.QuestData.GetHuntMonsterTargets(
                 AnyMonsterQuestId);

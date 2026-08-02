@@ -38,6 +38,9 @@ namespace DfoServer.SelfTests
         private const ushort RescueSilmaQuestId = 1791;
         private const int RescueSilmaDungeonId = 149;
         private const int RescueSilmaApcCode = 6510;
+        private const ushort NightAssaultQuestId = 2188;
+        private const int NightAssaultDungeonId = 83;
+        private const int NightAssaultMonsterCode = 61438;
         private const ushort ConditionalBossQuestId = 13504;
         private const int ConditionalBossDungeonId = 2010;
         private const int ConditionalBossMonsterCode = 69264;
@@ -122,6 +125,48 @@ namespace DfoServer.SelfTests
                     && memberRun.Drops.Count == memberDropCount,
                     ref failures);
 
+                fixture.PrepareFriendlyApcPartyKill();
+                var friendlyKillerRun = fixture.Killer.Session.Player.CurrentRun;
+                var friendlyMemberRun = fixture.Member.Session.Player.CurrentRun;
+                killerExp = fixture.Killer.Session.Player.Exp;
+                memberExp = fixture.Member.Session.Player.Exp;
+                fixture.KillMonster();
+                killerPackets = fixture.Killer.ReadAvailableTypes();
+                memberPackets = fixture.Member.ReadAvailableTypes();
+                Check("friendly APC death is projected without participant combat rewards",
+                    fixture.Killer.Session.Player.Exp == killerExp
+                    && fixture.Member.Session.Player.Exp == memberExp
+                    && friendlyKillerRun.TotalExp == 0
+                    && friendlyMemberRun.TotalExp == 0
+                    && friendlyKillerRun.TotalGold == 0
+                    && friendlyMemberRun.TotalGold == 0
+                    && friendlyKillerRun.Drops.Count == 0
+                    && friendlyMemberRun.Drops.Count == 0
+                    && !killerPackets.Contains(0x0025)
+                    && !memberPackets.Contains(0x0025)
+                    && killerPackets.Contains(0x0026)
+                    && memberPackets.Contains(0x0026),
+                    ref failures);
+                Check("actor reward eligibility preserves hostile and legacy APC paths",
+                    !DungeonActorRewardEligibility.AllowsParticipantCombatRewards(
+                        new GameWorld.Dungeon.MonsterSumInfo
+                        {
+                            Type = (byte)PvfLib.ApcAIType.Normal,
+                            Faction = PvfLib.ApcFaction.Neutral,
+                        })
+                    && DungeonActorRewardEligibility.AllowsParticipantCombatRewards(
+                        new GameWorld.Dungeon.MonsterSumInfo
+                        {
+                            Type = (byte)PvfLib.ApcAIType.Normal,
+                            Faction = PvfLib.ApcFaction.Monster,
+                        })
+                    && DungeonActorRewardEligibility.AllowsParticipantCombatRewards(
+                        new GameWorld.Dungeon.MonsterSumInfo
+                        {
+                            Type = (byte)PvfLib.ApcAIType.Normal,
+                        }),
+                    ref failures);
+
                 fixture.PrepareTrainingPartyKill();
                 var killerRun = fixture.Killer.Session.Player.CurrentRun;
                 memberRun = fixture.Member.Session.Player.CurrentRun;
@@ -191,6 +236,16 @@ namespace DfoServer.SelfTests
                 fixture.KillMonster();
                 Check("duplicate ordinary monster report does not repeat quest progress",
                     fixture.LoadKillerQuestTrigger(OrdinaryKillQuestId) == 2,
+                    ref failures);
+
+                fixture.PrepareNightAssaultQuestKill();
+                fixture.KillMonster();
+                Check("Night Assault quest 2188 advances from its canonical PVF actor",
+                    fixture.LoadKillerQuestTrigger(NightAssaultQuestId) == 14,
+                    ref failures);
+                fixture.KillMonster();
+                Check("duplicate Night Assault actor death does not repeat quest progress",
+                    fixture.LoadKillerQuestTrigger(NightAssaultQuestId) == 14,
                     ref failures);
 
                 fixture.PrepareAnyMonsterQuestKill(monsterType: 0);
@@ -451,6 +506,42 @@ namespace DfoServer.SelfTests
                 _member.Session.Player.CurrentRun = runs.Member;
             }
 
+            public void PrepareFriendlyApcPartyKill()
+            {
+                _killer.ReadAvailableTypes();
+                _member.ReadAvailableTypes();
+                _killer.Session.Player.Level = 50;
+                _killer.Session.Player.Exp = 0;
+                _member.Session.Player.Level = 50;
+                _member.Session.Player.Exp = 0;
+                var actors = new List<GameWorld.Dungeon.MonsterSumInfo>
+                {
+                    new GameWorld.Dungeon.MonsterSumInfo
+                    {
+                        Code = 65001,
+                        Level = 50,
+                        Type = (byte)PvfLib.ApcAIType.Normal,
+                        Faction = PvfLib.ApcFaction.Character,
+                        IsBlocking = false,
+                        PacketIndex = MonsterSequence,
+                    },
+                    new GameWorld.Dungeon.MonsterSumInfo
+                    {
+                        Code = 1001,
+                        Level = 50,
+                        Type = 0,
+                        IsBlocking = true,
+                        PacketIndex = MonsterSequence + 1,
+                    },
+                };
+                var runs = CreateSharedRuns(
+                    monsterType: 0,
+                    monsterCode: 0,
+                    roomMonsters: actors);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
             public void PrepareTimeCrackPartyKill()
             {
                 var definition = new SpecialDungeonDefinitionBuilder
@@ -515,6 +606,22 @@ namespace DfoServer.SelfTests
                     monsterCode: OrdinaryKillMonsterCode,
                     dungeonId: OrdinaryKillDungeonId,
                     difficulty: 2);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void PrepareNightAssaultQuestKill()
+            {
+                var active = SaveKillerActiveQuest(
+                    NightAssaultQuestId,
+                    triggerValue: 15);
+                var runs = CreateSharedRuns(
+                    monsterType: 0,
+                    monsterCode: NightAssaultMonsterCode,
+                    dungeonId: NightAssaultDungeonId,
+                    difficulty: 0,
+                    mapId: 21336);
                 runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
                 _killer.Session.Player.CurrentRun = runs.Killer;
                 _member.Session.Player.CurrentRun = runs.Member;
