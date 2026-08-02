@@ -275,6 +275,29 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
+            var entryParty = session?.Player == null
+                ? null
+                : _svc.PartyManager?.GetPartyByUser(session.Player.UserId);
+            var entryPartyMemberCount = entryParty == null
+                ? 1
+                : Math.Max(1, Math.Min(4, entryParty.Count));
+            var entryRewardPolicy = DungeonRewardPolicyData.Resolve(req.DungeonId);
+            if (!DungeonInteractionPolicy.Resolve(entryRewardPolicy)
+                .AllowsPartyState(entryParty != null))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON interaction policy rejected party: " +
+                    $"cid={session.Player.CharacterId} dungeon={req.DungeonId} " +
+                    $"policy={entryRewardPolicy.Kind} partyId={entryParty.PartyId} " +
+                    $"partyCount={entryPartyMemberCount}");
+                await _svc.AdmissionRejects.SendAsync(
+                    session,
+                    header.type,
+                    DungeonAdmissionReject.DungeonUnavailable);
+                return;
+            }
+
             // 塔类副本分流: dungeonKind==1 走专属流程(NOTI 142+143, 非普通副本的 START_MAP)
             if (_svc.DeathTower.TryCreateSession(req.DungeonId, out var tower))
             {
@@ -374,7 +397,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 bossPos,
                 activeQuests,
                 "select_dungeon");
-            var entryPartyMemberCount = ResolveEntryPartyMemberCount(session);
             if (!await PrepareTournamentEntryAsync(
                     session,
                     header,
@@ -904,16 +926,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 RidableObjects = randomizedObjects,
                 ClearConditionTemplate = clearConditionTemplate,
             };
-        }
-
-        private int ResolveEntryPartyMemberCount(EnhancedClientSession session)
-        {
-            var party = session?.Player == null
-                ? null
-                : _svc.PartyManager?.GetPartyByUser(session.Player.UserId);
-            return party == null
-                ? 1
-                : Math.Max(1, Math.Min(4, party.Count));
         }
 
         private async Task<bool> PrepareTournamentEntryAsync(

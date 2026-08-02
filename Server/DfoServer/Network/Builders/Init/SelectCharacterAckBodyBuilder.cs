@@ -1,6 +1,7 @@
 using DfoServer.Game.Characters;
 using DfoServer.Game.Quests;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.GameWorld;
 using System;
 using System.Collections.Generic;
 
@@ -68,7 +69,10 @@ namespace DfoServer.Network.Builders
                 }
                 catch { }
             }
-            var activeQuestSlots = QuestSlotLayout.ProjectFixedSlots(activeQuests);
+            var projectedActiveQuests = QuestDungeonPresentationPlanner
+                .ProjectActiveQuests(activeQuests);
+            var activeQuestSlots = QuestSlotLayout.ProjectFixedSlots(
+                projectedActiveQuests);
             for (int i = 0; i < QuestSlotLayout.ActiveSlotCount; i++)
             {
                 var activeQuest = activeQuestSlots[i];

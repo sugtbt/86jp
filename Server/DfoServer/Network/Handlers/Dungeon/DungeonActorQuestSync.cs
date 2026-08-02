@@ -39,7 +39,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         sourceEvent,
                         run.DungeonId,
                         run.Difficulty,
-                        actorCode));
+                        actorCode,
+                        actorType));
                 if (!run.Matches(sourceEvent.RunIdentity))
                     return;
             }

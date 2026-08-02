@@ -161,9 +161,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 session,
                 run,
                 request);
-            if (!mechanismClear.ShouldClearDungeon)
-                return;
-
             var bossCheckEvent = DungeonEventEnvelope.Create(
                 run,
                 session.Player.CharacterId,
@@ -178,6 +175,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 mechanismClear.BossCode,
                 session.Player.UserId);
             if (!session.Player.IsCurrentDungeonRun(runIdentity))
+                return;
+            if (!mechanismClear.ShouldClearDungeon)
                 return;
             await _settlement.SubmitClearIntentAsync(
                 session,

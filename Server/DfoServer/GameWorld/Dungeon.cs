@@ -32,6 +32,10 @@ namespace DfoServer.GameWorld
             // 仅 APC/AICharacter 有值；保留 PVF 阵营供副本清房策略判断，不改变通用解析语义。
             public ApcFaction? Faction { get; set; }
 
+            public bool IsHostileApcBoss =>
+                Type == (byte)ApcAIType.Boss
+                && Faction == ApcFaction.Monster;
+
             public bool IsBlocking { get; set; }
 
             // START_MAP 模板/波次字段。深渊隐藏行使用 map [hellparty] 的 order。

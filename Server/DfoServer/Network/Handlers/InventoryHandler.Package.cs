@@ -1,4 +1,5 @@
 using DfoServer.Game.Currency;
+using DfoServer.Game.Dungeon;
 using DfoServer.Game.ExpertJob;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Mailbox;
@@ -14,6 +15,112 @@ namespace DfoServer.Network.Handlers
 {
     public sealed partial class InventoryHandler
     {
+        internal async Task<bool> TryHandleDungeonUseStackable(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            if (body == null || body.Length < 7)
+                return false;
+
+            var rewardPolicy = session?.Player?.CurrentRun?.RewardPolicy;
+            if (DungeonInteractionPolicy.Resolve(rewardPolicy)
+                .ConsumesStackableItems)
+            {
+                return false;
+            }
+
+            var slotIndex = BitConverter.ToInt16(body, 0);
+            var listType = (InventoryListType)body[2];
+            var instanceValue = BitConverter.ToInt32(body, 3);
+            var itemCode = body.Length >= 11 ? BitConverter.ToInt32(body, 7) : 0;
+            var (characterId, _) = ResolveOwner(session);
+
+            InventoryLease lease = null;
+            TryGetOwnedInventoryLease(session, characterId, out lease);
+            UseStackableResponsePlan responsePlan;
+            if (lease == null)
+            {
+                TryBuildDungeonUseStackableResponsePlan(
+                    rewardPolicy,
+                    null,
+                    listType,
+                    slotIndex,
+                    instanceValue,
+                    itemCode,
+                    out responsePlan);
+            }
+            else
+            {
+                lock (lease.SyncRoot)
+                {
+                    TryBuildDungeonUseStackableResponsePlan(
+                        rewardPolicy,
+                        lease.Inventory,
+                        listType,
+                        slotIndex,
+                        instanceValue,
+                        itemCode,
+                        out responsePlan);
+                }
+            }
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                0x002C,
+                responsePlan.AckBody));
+            if (responsePlan.RefreshSourceSlot)
+                await _refresh.SendUpdateItemList(session, listType, slotIndex);
+            FileLogger.Log(
+                $"[{ProtocolName}] USE_STACKABLE training: " +
+                $"cid={characterId} list={listType} slot={slotIndex} " +
+                $"item=0x{itemCode:X8} accepted={responsePlan.Accepted} " +
+                "persistentCountUnchanged=true");
+            return true;
+        }
+
+        internal static bool TryBuildDungeonUseStackableResponsePlan(
+            DungeonRewardPolicy rewardPolicy,
+            InventoryService inventory,
+            InventoryListType listType,
+            short slotIndex,
+            int instanceValue,
+            int itemCode,
+            out UseStackableResponsePlan responsePlan)
+        {
+            responsePlan = null;
+            if (DungeonInteractionPolicy.Resolve(rewardPolicy)
+                .ConsumesStackableItems)
+            {
+                return false;
+            }
+
+            var valid = InventoryDeleteService.CanUseStackableForClient(
+                inventory,
+                listType,
+                slotIndex,
+                itemCode,
+                out var resolvedItemId);
+            var responseItemCode = itemCode > 0 ? itemCode : resolvedItemId;
+            responsePlan = new UseStackableResponsePlan
+            {
+                AckBody = valid
+                    ? UseStackableAckBuilder.BuildPracticeSuccess(
+                        (byte)listType,
+                        instanceValue,
+                        responseItemCode)
+                    : UseStackableAckBuilder.BuildError(
+                        (byte)listType,
+                        instanceValue,
+                        responseItemCode),
+                ItemListUpdateBody = null,
+                StalePetConsumable = false,
+                RefreshSourceSlot = false,
+                Accepted = valid,
+            };
+            return true;
+        }
+
         public async Task Handle_ENUM_CMDPACKET_USE_STACKABLE(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
 
@@ -110,6 +217,10 @@ namespace DfoServer.Network.Handlers
             }
 
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x002C, responsePlan.AckBody));
+            session.GameSession?.QuestManager
+                ?.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                    lease,
+                    result);
 
             var petSatietyLog = result.PetSatietyChanged
                 ? $" petSatiety key={result.PetCreatureKey} {result.PetSatietyBefore}->{result.PetSatietyAfter}"
@@ -423,6 +534,7 @@ namespace DfoServer.Network.Handlers
                 AckBody = ackBody,
                 ItemListUpdateBody = null,
                 StalePetConsumable = stalePetConsumable,
+                Accepted = consumed || stalePetConsumable,
             };
         }
 
@@ -440,6 +552,10 @@ namespace DfoServer.Network.Handlers
             public byte[] ItemListUpdateBody { get; set; }
 
             public bool StalePetConsumable { get; set; }
+
+            public bool RefreshSourceSlot { get; set; }
+
+            public bool Accepted { get; set; }
         }
 
         public async Task Handle_OPEN_AVATAR_PACKAGE(EnhancedClientSession session, GamePacketHeader header, byte[] body)

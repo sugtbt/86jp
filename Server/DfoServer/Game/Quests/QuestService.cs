@@ -319,9 +319,13 @@ namespace DfoServer.Game.Quests
                 Guid sourceEventId = default,
                 IReadOnlyCollection<ushort> eligibleQuestIds = null,
                 IReadOnlyDictionary<ushort, QuestActivationId>
-                    eligibleQuestActivations = null)
+                    eligibleQuestActivations = null,
+                byte monsterType = 0)
         {
-            if (characterId <= 0 || dungeonId <= 0 || monsterCode <= 0)
+            if (characterId <= 0
+                || dungeonId <= 0
+                || monsterCode <= 0
+                || monsterType > 3)
                 return Array.Empty<QuestSetTriggerResult>();
 
             var applied = _progress.Apply(new QuestProgressApplicationRequest
@@ -332,6 +336,7 @@ namespace DfoServer.Game.Quests
                 DungeonId = dungeonId,
                 Difficulty = difficulty,
                 MonsterCode = monsterCode,
+                MonsterType = monsterType,
                 EligibleQuestIds = eligibleQuestIds,
                 EligibleQuestActivations = eligibleQuestActivations,
             });
@@ -339,7 +344,8 @@ namespace DfoServer.Game.Quests
             {
                 FileLogger.Log(
                     $"[QuestService] HUNT_MONSTER progress failed: " +
-                    $"cid={characterId} dungeon={dungeonId} monster={monsterCode} " +
+                    $"cid={characterId} dungeon={dungeonId} " +
+                    $"monster={monsterCode} type={monsterType} " +
                     $"event={sourceEventId:N} error={applied.Error}");
                 return Array.Empty<QuestSetTriggerResult>();
             }

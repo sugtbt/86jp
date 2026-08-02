@@ -25,6 +25,7 @@ namespace DfoServer.Game.Quests
         internal int Difficulty { get; set; }
         internal int MapId { get; set; }
         internal int MonsterCode { get; set; }
+        internal byte MonsterType { get; set; }
         internal int EnemyType { get; set; }
         internal IReadOnlyCollection<ushort> EligibleQuestIds { get; set; }
         internal IReadOnlyDictionary<ushort, QuestActivationId>

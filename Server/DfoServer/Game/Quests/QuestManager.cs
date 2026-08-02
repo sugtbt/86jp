@@ -341,21 +341,76 @@ namespace DfoServer.Game.Quests
             InventoryLease expectedLease,
             InventoryMutationResult mutation)
         {
+            if (mutation == null)
+                return;
+
+            await SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+                expectedLease,
+                new[] { mutation });
+        }
+
+        internal async Task SyncItemSeekingQuestProgressAfterInventoryMutationsAsync(
+            InventoryLease expectedLease,
+            IEnumerable<InventoryMutationResult> mutations)
+        {
+            if (!RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
+                    expectedLease,
+                    mutations))
+                return;
+
             var cid = _sender.CharacterId;
-            if (mutation == null
-                || expectedLease == null
+            if (!InventoryContext.IsCurrentLease(
+                    expectedLease,
+                    expectedLease.SessionId,
+                    cid))
+                return;
+
+            await _notifications.SendActiveQuestListAsync(cid);
+        }
+
+        internal bool RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+            InventoryLease expectedLease,
+            InventoryMutationResult mutation)
+        {
+            return mutation != null
+                && RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
+                    expectedLease,
+                    new[] { mutation });
+        }
+
+        internal bool RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
+            InventoryLease expectedLease,
+            IEnumerable<InventoryMutationResult> mutations)
+        {
+            var cid = _sender.CharacterId;
+            if (expectedLease == null
                 || !InventoryContext.IsCurrentLease(
                     expectedLease,
                     expectedLease.SessionId,
                     cid))
             {
-                return;
+                return false;
             }
 
+            var itemFilter = CollectInventoryMutationItemFilter(mutations);
+            return itemFilter.Count > 0
+                && SyncItemSeekingQuestProgressWithoutNotification(itemFilter);
+        }
+
+        private static HashSet<int> CollectInventoryMutationItemFilter(
+            IEnumerable<InventoryMutationResult> mutations)
+        {
             var itemFilter = new HashSet<int>();
             var pending = new Stack<InventoryMutationResult>();
             var visited = new HashSet<InventoryMutationResult>();
-            pending.Push(mutation);
+            if (mutations != null)
+            {
+                foreach (var mutation in mutations)
+                {
+                    if (mutation != null)
+                        pending.Push(mutation);
+                }
+            }
             while (pending.Count > 0)
             {
                 var current = pending.Pop();
@@ -376,21 +431,7 @@ namespace DfoServer.Game.Quests
                 }
             }
 
-            if (itemFilter.Count == 0)
-                return;
-
-            var matched = SyncItemSeekingQuestProgressWithoutNotification(
-                itemFilter);
-            if (!matched
-                || !InventoryContext.IsCurrentLease(
-                    expectedLease,
-                    expectedLease.SessionId,
-                    cid))
-            {
-                return;
-            }
-
-            await _notifications.SendActiveQuestListAsync(cid);
+            return itemFilter;
         }
 
         public bool SyncItemSeekingQuestProgressWithoutNotification(
@@ -449,10 +490,14 @@ namespace DfoServer.Game.Quests
             IReadOnlyCollection<ushort> eligibleQuestIds = null,
             DungeonRunIdentity sourceRunIdentity = default,
             IReadOnlyDictionary<ushort, QuestActivationId>
-                eligibleQuestActivations = null)
+                eligibleQuestActivations = null,
+            byte monsterType = 0)
         {
             var cid = _sender.CharacterId;
-            if (cid <= 0 || dungeonId <= 0 || monsterCode <= 0)
+            if (cid <= 0
+                || dungeonId <= 0
+                || monsterCode <= 0
+                || monsterType > 3)
                 return Task.CompletedTask;
 
             var changes = _service.SyncHuntMonsterQuestProgress(
@@ -462,7 +507,8 @@ namespace DfoServer.Game.Quests
                 monsterCode,
                 sourceEventId,
                 eligibleQuestIds,
-                eligibleQuestActivations);
+                eligibleQuestActivations,
+                monsterType);
             TrackServerDrivenTriggerChanges(
                 cid,
                 changes,

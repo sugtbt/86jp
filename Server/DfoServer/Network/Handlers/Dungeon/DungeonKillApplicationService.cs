@@ -205,12 +205,13 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             var run = session?.Player?.CurrentRun;
             if (!IsCurrent(run, source)
-                || actorCode <= 0
-                || !TryResolvePendingBossSequence(
+                || !TryResolvePendingBossActor(
                     run,
                     source.RoomIdentity,
                     actorCode,
-                    out var sequenceId))
+                    source.SourceActorId,
+                    out var sequenceId,
+                    out var resolvedActorCode))
             {
                 return source;
             }
@@ -222,7 +223,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 source.SourcePlayerId,
                 source.AffectedPlayerId,
                 sequenceId,
-                actorCode,
+                resolvedActorCode,
                 source.Cause,
                 source.OccurredTick);
             await ProcessAsync(new KillContext(
@@ -517,22 +518,31 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             if (roomCleared)
             {
-                var projectedClearSource = (roomClearSource ?? context.Envelope)
+                // Room effects stay bound to the first clear fact; a later APC Boss death
+                // may only provide the event that releases deferred dungeon settlement.
+                var projectedRoomClearSource = (roomClearSource ?? context.Envelope)
                     .ForAffectedPlayer(
                         run.CaptureIdentity(),
                         run.CurrentRoomInstanceId > 0
                             ? run.CurrentRoomInstanceId
                             : null,
                         session.Player.CharacterId);
+                var projectedSettlementSource = context.Envelope.ForAffectedPlayer(
+                    run.CaptureIdentity(),
+                    run.CurrentRoomInstanceId > 0
+                        ? run.CurrentRoomInstanceId
+                        : null,
+                    session.Player.CharacterId);
                 await ApplyRoomClearedAsync(
                     session,
                     run,
                     new KillContext(
                         session,
-                        projectedClearSource,
+                        projectedSettlementSource,
                         context.SequenceId,
                         context.SourceUserId,
                         context.Origin),
+                    projectedRoomClearSource,
                     killedMonsterCode,
                     blockingCount,
                     killedBlockingCount);
@@ -779,15 +789,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             DungeonRun run,
             KillContext context,
+            DungeonEventEnvelope roomClearSource,
             int killedMonsterCode,
             int blockingCount,
             int killedBlockingCount)
         {
             TryGetCurrentRoomState(run, out var roomState);
+            var clearSource = roomClearSource ?? context.Envelope;
             DungeonEncounterApplicationService.Apply(
                 run,
                 new DungeonEncounterDirective(
-                    context.Envelope,
+                    clearSource,
                     DungeonEncounterDirectiveKind.Succeed,
                     cause: "tracked room actors cleared"));
             roomState?.TryClear();
@@ -800,6 +812,12 @@ namespace DfoServer.Network.Handlers.Dungeon
             var currentMapId = roomState?.Maze.Index ?? 0;
             var explicitMapClear = run.ClearCondition != null
                 && run.ClearCondition.Check(1, currentMapId);
+            var shouldClearDungeon = DungeonCombatHandler.ShouldClearDungeon(
+                explicitMapClear,
+                endPoint,
+                run.IgnoreDefaultDungeonClear);
+            var hasPendingHostileApcBoss = roomState?.InstanceRoom != null
+                && roomState.InstanceRoom.HasPendingHostileApcBoss();
 
             await PetCreatureRuntimeService.GrantRoomClearExperienceOnceAsync(
                 session,
@@ -808,10 +826,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (!IsCurrent(run, context.Envelope))
                 return;
 
-            if (DungeonCombatHandler.ShouldClearDungeon(
-                    explicitMapClear,
-                    endPoint,
-                    run.IgnoreDefaultDungeonClear))
+            if (shouldClearDungeon && !hasPendingHostileApcBoss)
             {
                 await _settlement.SubmitClearIntentAsync(
                     session,
@@ -852,7 +867,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 0,
                 currentMapId,
                 "room_clear",
-                context.Envelope);
+                clearSource);
         }
 
         private bool TryCanonicalizeSharedDeath(
@@ -1114,15 +1129,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             return null;
         }
 
-        private static bool TryResolvePendingBossSequence(
+        private static bool TryResolvePendingBossActor(
             DungeonRun run,
             DungeonRoomIdentity roomIdentity,
             int actorCode,
-            out ushort sequenceId)
+            long? requestedSequenceId,
+            out ushort sequenceId,
+            out int resolvedActorCode)
         {
             sequenceId = 0;
+            resolvedActorCode = 0;
             if (run == null
-                || actorCode <= 0
                 || !run.TryCaptureCurrentRoomSnapshot(
                     roomIdentity,
                     out var snapshot)
@@ -1131,10 +1148,20 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return false;
             }
 
+            var hasExpectedActorCode = actorCode > 0;
+            if (!hasExpectedActorCode
+                && (!requestedSequenceId.HasValue
+                    || requestedSequenceId.Value <= 0
+                    || requestedSequenceId.Value > ushort.MaxValue))
+            {
+                return false;
+            }
+
             for (var index = 0; index < snapshot.Monsters.Count; index++)
             {
-                if (snapshot.Monsters[index].Code != actorCode
-                    || !IsBossActorType(snapshot.Monsters[index].Type))
+                var actor = snapshot.Monsters[index];
+                if (!IsBossActorType(actor.Type)
+                    || (hasExpectedActorCode && actor.Code != actorCode))
                     continue;
 
                 var sequenceValue = (int)snapshot.RoomStartSequence + index;
@@ -1142,6 +1169,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     continue;
 
                 var candidate = (ushort)sequenceValue;
+                if (!hasExpectedActorCode
+                    && candidate != (ushort)requestedSequenceId.Value)
+                {
+                    continue;
+                }
                 if (snapshot.RoomState.InstanceRoom.TryGetActorDeathFact(
                         candidate,
                         out _))
@@ -1150,6 +1182,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
 
                 sequenceId = candidate;
+                resolvedActorCode = actor.Code;
                 return true;
             }
             return false;

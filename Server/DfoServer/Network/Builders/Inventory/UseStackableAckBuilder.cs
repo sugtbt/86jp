@@ -6,6 +6,18 @@ namespace DfoServer.Network.Builders
     {
         private const byte InvalidItemErrorCode = 23;
 
+        // Practice rooms accept the use action without reporting a persistent inventory mutation.
+        public static byte[] BuildPracticeSuccess(byte listType, int instanceValue, int itemCode)
+        {
+            var writer = new GamePacketWriter();
+            writer.WriteByte(0x00);
+            writer.WriteByte(0x00);
+            writer.WriteByte(listType);
+            writer.WriteInt32(instanceValue);
+            writer.WriteInt32(itemCode);
+            return writer.ToArray();
+        }
+
         public static byte[] BuildSuccess(short slotIndex, byte listType, int instanceValue, int itemCode)
         {
             var writer = new GamePacketWriter();

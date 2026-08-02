@@ -7,6 +7,7 @@ using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Quests;
 using DfoServer.Game.Session;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using Microsoft.Data.Sqlite;
@@ -45,6 +46,7 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             CheckCompletionRefresh(ref failures);
+            CheckTimeGateSameSlotProjection(ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
@@ -152,6 +154,85 @@ namespace DfoServer.SelfTests
             BitConverter.GetBytes((ushort)1).CopyTo(body, 6);
             BitConverter.GetBytes(ushort.MaxValue).CopyTo(body, 8);
             return body;
+        }
+
+        private static void CheckTimeGateSameSlotProjection(ref int failures)
+        {
+            // PVF fixture: dungeon 515 and 518 share one physical XUI slot.
+            // The planner must make this deterministic without changing
+            // prerequisite OR semantics.
+            var active = new List<ActiveQuest>
+            {
+                new ActiveQuest { Slot = 3, QuestId = 2356 },
+                new ActiveQuest { Slot = 5, QuestId = 2406 },
+            };
+
+            var projected = QuestDungeonPresentationPlanner.ProjectActiveQuestIds(
+                active,
+                new Dictionary<int, int>
+                {
+                    [2350] = 1,
+                    [2404] = 1,
+                });
+
+            Check("same XUI slot projects only the higher-priority Time Gate quest",
+                projected.Contains(2356) && !projected.Contains(2406),
+                ref failures);
+
+            var fallback = QuestDungeonPresentationPlanner.ProjectActiveQuestIds(
+                new[] { new ActiveQuest { Slot = 5, QuestId = 2406 } },
+                new Dictionary<int, int> { [2404] = 1 });
+            Check("same-slot candidate takes over after the winner is removed",
+                fallback.Contains(2406),
+                ref failures);
+
+            var unrelated = QuestDungeonPresentationPlanner.ProjectActiveQuestIds(
+                new[]
+                {
+                    new ActiveQuest { Slot = 3, QuestId = 2356 },
+                    new ActiveQuest { Slot = 7, QuestId = 2358 },
+                },
+                new Dictionary<int, int> { [2350] = 1 });
+            Check("different physical slots remain independently visible",
+                unrelated.Contains(2356) && unrelated.Contains(2358),
+                ref failures);
+
+            var granFloris = QuestDungeonPresentationPlanner.ProjectActiveQuestIds(
+                new[]
+                {
+                    new ActiveQuest { Slot = 1, QuestId = 7803 },
+                    new ActiveQuest { Slot = 2, QuestId = 7807 },
+                },
+                new Dictionary<int, int>());
+            Check("non-Time-Gate world map uses the same global slot arbitration",
+                granFloris.Count == 1
+                && (granFloris.Contains(7803) || granFloris.Contains(7807)),
+                ref failures);
+
+            var allowed = granFloris.Contains(7803) ? (ushort)7803 : (ushort)7807;
+            var blocked = allowed == 7803 ? (ushort)7807 : (ushort)7803;
+            Check("global slot winner is the only accepted candidate",
+                QuestDungeonPresentationPlanner.IsAcceptanceAllowed(
+                    blocked,
+                    new[] { new ActiveQuest { Slot = 1, QuestId = allowed } }) == false
+                && QuestDungeonPresentationPlanner.IsAcceptanceAllowed(
+                    allowed,
+                    new[] { new ActiveQuest { Slot = 1, QuestId = blocked } }),
+                ref failures);
+
+            var acceptableBody = QuestListBodyBuilder.BuildBody(
+                level: 86,
+                job: 0,
+                growType: 0,
+                clearedFlags: new Dictionary<int, int>
+                {
+                    [2350] = 1,
+                    [2404] = 1,
+                });
+            var acceptableIds = ParseQuestIds(acceptableBody);
+            Check("acceptable quest packet projects one Time Gate card",
+                acceptableIds.Contains(2356) && !acceptableIds.Contains(2406),
+                ref failures);
         }
 
         private static void SeedCharacter(string databasePath)

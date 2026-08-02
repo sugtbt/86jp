@@ -251,6 +251,7 @@ namespace DfoServer.Game.Inventory
                 return 1;
             }
 
+            var soldSource = delete.SourceSnapshot;
             var finalGold = (int)Math.Min(int.MaxValue, Math.Max(0L, targetGold));
             if (!inventory.SetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart, finalGold))
                 return 22;
@@ -259,12 +260,12 @@ namespace DfoServer.Game.Inventory
             {
                 ListType = listType,
                 SlotIndex = slotIndex,
-                ItemTemplateId = source.ItemId,
+                ItemTemplateId = soldSource.ItemId,
                 RemainingStackCount = delete.RemainingCount,
-                InstanceValue = InventoryStackRuleService.IsStackable(source)
+                InstanceValue = InventoryStackRuleService.IsStackable(soldSource)
                     ? delete.RemainingCount
-                    : source.InstanceValue,
-                Durability = source.Durability,
+                    : soldSource.InstanceValue,
+                Durability = soldSource.Durability,
                 UpdatedGold = finalGold,
                 RequestedCount = sellCount,
                 AppliedCount = (short)Math.Min(short.MaxValue, appliedCount),

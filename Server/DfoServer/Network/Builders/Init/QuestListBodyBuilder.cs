@@ -4,6 +4,7 @@ using DfoServer.Game.Inventory;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace DfoServer.Network.Builders
 {
@@ -56,6 +57,9 @@ namespace DfoServer.Network.Builders
                 clearedSet,
                 clearedFlags,
                 allowedCreatureKinds);
+            questIds = GameWorld.QuestDungeonPresentationPlanner
+                .ProjectAvailableQuestIds(questIds, clearedFlags)
+                .ToList();
 
             var writer = new GamePacketWriter();
             writer.WriteByte((byte)level);

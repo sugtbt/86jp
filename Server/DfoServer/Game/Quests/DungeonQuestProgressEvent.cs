@@ -20,6 +20,7 @@ namespace DfoServer.Game.Quests
             int difficulty,
             int mapId,
             int actorCode,
+            byte monsterType,
             int enemyType)
         {
             Envelope = envelope ?? throw new ArgumentNullException(nameof(envelope));
@@ -28,6 +29,7 @@ namespace DfoServer.Game.Quests
             Difficulty = difficulty;
             MapId = mapId;
             ActorCode = actorCode;
+            MonsterType = monsterType;
             EnemyType = enemyType;
         }
 
@@ -39,13 +41,15 @@ namespace DfoServer.Game.Quests
         public int MapId { get; }
         public int ActorCode { get; }
         public int MonsterCode => ActorCode;
+        public byte MonsterType { get; }
         public int EnemyType { get; }
 
         public static DungeonQuestProgressEvent HuntMonster(
             DungeonEventEnvelope envelope,
             int dungeonId,
             int difficulty,
-            int monsterCode) =>
+            int monsterCode,
+            byte monsterType) =>
             new DungeonQuestProgressEvent(
                 envelope,
                 DungeonQuestProgressKind.HuntMonster,
@@ -53,6 +57,7 @@ namespace DfoServer.Game.Quests
                 difficulty,
                 mapId: 0,
                 actorCode: monsterCode,
+                monsterType: monsterType,
                 enemyType: 0);
 
         public static DungeonQuestProgressEvent HuntEnemy(
@@ -68,7 +73,8 @@ namespace DfoServer.Game.Quests
                 difficulty,
                 mapId: 0,
                 actorCode: enemyCode,
-                enemyType);
+                monsterType: 0,
+                enemyType: enemyType);
 
         public static DungeonQuestProgressEvent ClearMap(
             DungeonEventEnvelope envelope,
@@ -83,6 +89,7 @@ namespace DfoServer.Game.Quests
                 difficulty: 0,
                 mapId,
                 actorCode: 0,
+                monsterType: 0,
                 enemyType: 0);
     }
 }

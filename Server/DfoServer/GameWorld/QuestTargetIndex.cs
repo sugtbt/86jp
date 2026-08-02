@@ -3,14 +3,37 @@ using PvfLib;
 
 namespace DfoServer.GameWorld
 {
+    internal enum HuntMonsterTargetKind
+    {
+        ExactMonsterCode = 0,
+        AnyOrdinaryMonster = 1,
+        AnyEliteMonster = 2,
+    }
+
     internal sealed class HuntMonsterQuestTarget
     {
+        internal const int AnyOrdinaryMonsterCode = -1;
+        internal const int AnyEliteMonsterCode = -2;
+
         public int QuestId;
         public int DungeonId;
         public int MinimumDifficulty;
         public int MonsterCode;
         public int RequiredCount;
         public int ChannelIndex;
+
+        internal HuntMonsterTargetKind Kind => MonsterCode == AnyOrdinaryMonsterCode
+            ? HuntMonsterTargetKind.AnyOrdinaryMonster
+            : MonsterCode == AnyEliteMonsterCode
+                ? HuntMonsterTargetKind.AnyEliteMonster
+                : HuntMonsterTargetKind.ExactMonsterCode;
+
+        internal static bool IsSupportedMonsterCode(int monsterCode)
+        {
+            return monsterCode > 0
+                || monsterCode == AnyOrdinaryMonsterCode
+                || monsterCode == AnyEliteMonsterCode;
+        }
     }
 
     internal enum HuntEnemyProgressSource
@@ -106,7 +129,7 @@ namespace DfoServer.GameWorld
                 var monsterCode = values[offset + 2];
                 var requiredCount = values[offset + 3];
                 if ((dungeonId <= 0 && dungeonId != -1)
-                    || monsterCode <= 0
+                    || !HuntMonsterQuestTarget.IsSupportedMonsterCode(monsterCode)
                     || requiredCount <= 0)
                 {
                     continue;
@@ -219,11 +242,13 @@ namespace DfoServer.GameWorld
             var seen = new HashSet<(int MapId, int ActorCode)>();
             foreach (var target in GetHuntMonsterTargets(questId))
             {
-                if (!MatchesHuntMonsterTarget(
+                if (target.Kind != HuntMonsterTargetKind.ExactMonsterCode
+                    || !MatchesHuntMonsterTarget(
                         target,
                         dungeonId,
                         difficulty,
-                        target.MonsterCode)
+                        target.MonsterCode,
+                        monsterType: 0)
                     || QuestData.GetTriggerChannel(trigger, target.ChannelIndex) <= 0
                     || target.MonsterCode <= 0
                     || !seen.Add((-1, target.MonsterCode)))
@@ -358,13 +383,33 @@ namespace DfoServer.GameWorld
             HuntMonsterQuestTarget target,
             int dungeonId,
             int difficulty,
-            int monsterCode)
+            int monsterCode,
+            byte monsterType)
         {
-            if (target == null
-                || monsterCode <= 0
-                || target.MonsterCode != monsterCode)
+            if (target == null || monsterCode <= 0)
             {
                 return false;
+            }
+
+            switch (target.Kind)
+            {
+                case HuntMonsterTargetKind.ExactMonsterCode:
+                    if (target.MonsterCode != monsterCode)
+                        return false;
+                    break;
+
+                case HuntMonsterTargetKind.AnyOrdinaryMonster:
+                    if (monsterType != 0)
+                        return false;
+                    break;
+
+                case HuntMonsterTargetKind.AnyEliteMonster:
+                    if (monsterType != 1)
+                        return false;
+                    break;
+
+                default:
+                    return false;
             }
 
             if (target.DungeonId != -1

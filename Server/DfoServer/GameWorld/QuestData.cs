@@ -262,12 +262,14 @@ namespace DfoServer.GameWorld
             HuntMonsterQuestTarget target,
             int dungeonId,
             int difficulty,
-            int monsterCode)
+            int monsterCode,
+            byte monsterType = 0)
             => QuestTargetIndex.MatchesHuntMonsterTarget(
                 target,
                 dungeonId,
                 difficulty,
-                monsterCode);
+                monsterCode,
+                monsterType);
 
         internal static bool MatchesHuntEnemyTarget(
             HuntEnemyQuestTarget target,

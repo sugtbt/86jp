@@ -93,7 +93,8 @@ namespace DfoServer.Game.Quests
                         target,
                         request.DungeonId,
                         request.Difficulty,
-                        request.MonsterCode))
+                        request.MonsterCode,
+                        request.MonsterType))
                 {
                     continue;
                 }

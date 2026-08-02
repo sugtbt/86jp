@@ -417,6 +417,34 @@ namespace DfoServer.Game.Dungeon
                 return _actorDeaths.TryGetValue(sequenceId, out fact);
         }
 
+        internal bool HasPendingHostileApcBoss()
+        {
+            lock (_syncRoot)
+            {
+                var actors = Maze.Monsters;
+                if (actors == null)
+                    return false;
+
+                for (var index = 0; index < actors.Count; index++)
+                {
+                    var actor = actors[index];
+                    if (!actor.IsHostileApcBoss)
+                        continue;
+
+                    var sequenceValue = (int)FirstActorSequenceId + index;
+                    if (sequenceValue <= 0 || sequenceValue > ushort.MaxValue)
+                        continue;
+
+                    var candidate = (ushort)sequenceValue;
+                    if (_actorDeaths.ContainsKey(candidate))
+                        continue;
+
+                    return true;
+                }
+                return false;
+            }
+        }
+
         internal void CopyKilledActorSequenceIdsTo(
             ISet<ushort> destination,
             Func<DungeonActorDeathFact, bool> include = null)

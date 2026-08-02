@@ -27,7 +27,11 @@ namespace DfoServer.SelfTests
         private const ushort SeekAndMeetQuestId = 2043;
         private const ushort DragonObstacleQuestId = 20722;
         private const ushort FitzLieutenantQuestId = 2547;
+        private const ushort AnyMonsterQuestId = 4303;
+        private const ushort EliteMonsterQuestId = 4;
         private const ushort SeekingPurchaseQuestId = 10;
+        private const ushort SeekingSingleItemQuestId = 13092;
+        private const int SeekingSingleItemId = 10088630;
         private const ushort SyntheticQuestId = 65000;
 
         public static int Run()
@@ -103,6 +107,41 @@ namespace DfoServer.SelfTests
                     && fitzTargets[1].MonsterCode == 63047
                     && fitzTargets[1].RequiredCount == 40
                     && fitzTargets[1].ChannelIndex == 1,
+                ref failures);
+            var anyMonsterTargets = GameWorld.QuestData.GetHuntMonsterTargets(
+                AnyMonsterQuestId);
+            Check("4303 preserves the PVF any-monster wildcard",
+                anyMonsterTargets.Count == 1
+                    && anyMonsterTargets[0].DungeonId == -1
+                    && anyMonsterTargets[0].MinimumDifficulty == -1
+                    && anyMonsterTargets[0].MonsterCode == -1
+                    && anyMonsterTargets[0].RequiredCount == 30
+                    && anyMonsterTargets[0].ChannelIndex == 0,
+                ref failures);
+            Check("4303 wildcard does not materialize a synthetic quest actor",
+                GameWorld.QuestData.GetUnfinishedDungeonActorTargets(
+                    AnyMonsterQuestId,
+                    trigger: 30,
+                    dungeonId: 144,
+                    difficulty: 0).Count == 0,
+                ref failures);
+            var eliteTargets = GameWorld.QuestData.GetHuntMonsterTargets(
+                EliteMonsterQuestId);
+            Check("4 preserves the PVF elite-monster wildcard",
+                eliteTargets.Count == 1
+                    && eliteTargets[0].DungeonId == -1
+                    && eliteTargets[0].MinimumDifficulty == -1
+                    && eliteTargets[0].MonsterCode == -2
+                    && eliteTargets[0].Kind
+                        == GameWorld.HuntMonsterTargetKind.AnyEliteMonster
+                    && eliteTargets[0].RequiredCount == 5,
+                ref failures);
+            Check("4 elite wildcard does not materialize a synthetic quest actor",
+                GameWorld.QuestData.GetUnfinishedDungeonActorTargets(
+                    EliteMonsterQuestId,
+                    trigger: 5,
+                    dungeonId: 144,
+                    difficulty: 0).Count == 0,
                 ref failures);
 
             Check("hunt-enemy is not treated as a seeking item quest",
@@ -234,6 +273,12 @@ namespace DfoServer.SelfTests
                     inventory)
                 .GetAwaiter()
                 .GetResult();
+            failures += CheckPhysicalSeekingMutationProjectionAsync(
+                    connStr,
+                    inventoryLease,
+                    inventory)
+                .GetAwaiter()
+                .GetResult();
 
             InventoryContext.Unregister(inventorySessionId, CharacterId);
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
@@ -265,9 +310,108 @@ namespace DfoServer.SelfTests
                 eligibleQuestIds: snapshot.QuestIds);
             Check("same dungeon EventId replays hunt progress as a no-op",
                 first.Count == 1
-                && replay.Count == 0
-                && LoadTrigger(connStr, DragonObstacleQuestId) == 2
-                && CountProgressEvents(connStr, replayEventId) == 1,
+                    && replay.Count == 0
+                    && LoadTrigger(connStr, DragonObstacleQuestId) == 2
+                    && CountProgressEvents(connStr, replayEventId) == 1,
+                ref failures);
+
+            SaveActiveQuest(connStr, AnyMonsterQuestId, 30);
+            var anyMonsterSnapshot = QuestRunSnapshot.Capture(
+                QuestService.LoadActiveQuests(connStr, CharacterId));
+            var anyMonsterEventId = Guid.NewGuid();
+            var anyMonsterFirst = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: anyMonsterEventId,
+                eligibleQuestIds: anyMonsterSnapshot.QuestIds,
+                eligibleQuestActivations: anyMonsterSnapshot.Activations);
+            var anyMonsterReplay = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: anyMonsterEventId,
+                eligibleQuestIds: anyMonsterSnapshot.QuestIds,
+                eligibleQuestActivations: anyMonsterSnapshot.Activations);
+            var anotherMonster = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 3536,
+                difficulty: 4,
+                monsterCode: 100003,
+                sourceEventId: Guid.NewGuid(),
+                eligibleQuestIds: anyMonsterSnapshot.QuestIds,
+                eligibleQuestActivations: anyMonsterSnapshot.Activations);
+            Check("4303 counts any canonical monster and deduplicates one death fact",
+                anyMonsterFirst.Count == 1
+                    && anyMonsterFirst[0].PreviousTriggerValue == 30
+                    && anyMonsterFirst[0].TriggerValue == 29
+                    && anyMonsterReplay.Count == 0
+                    && anotherMonster.Count == 1
+                    && anotherMonster[0].PreviousTriggerValue == 29
+                    && anotherMonster[0].TriggerValue == 28
+                    && LoadTrigger(connStr, AnyMonsterQuestId) == 28
+                    && CountProgressEvents(connStr, anyMonsterEventId) == 1,
+                ref failures);
+
+            var anyMonsterEliteEventId = Guid.NewGuid();
+            var anyMonsterElite = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: anyMonsterEliteEventId,
+                eligibleQuestIds: anyMonsterSnapshot.QuestIds,
+                eligibleQuestActivations: anyMonsterSnapshot.Activations,
+                monsterType: 1);
+            Check("4303 ordinary wildcard excludes elite deaths",
+                anyMonsterElite.Count == 0
+                    && LoadTrigger(connStr, AnyMonsterQuestId) == 28
+                    && CountProgressEvents(connStr, anyMonsterEliteEventId) == 0,
+                ref failures);
+
+            SaveActiveQuest(connStr, EliteMonsterQuestId, 5);
+            var eliteSnapshot = QuestRunSnapshot.Capture(
+                QuestService.LoadActiveQuests(connStr, CharacterId));
+            var eliteOrdinaryEventId = Guid.NewGuid();
+            var eliteOrdinary = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: eliteOrdinaryEventId,
+                eligibleQuestIds: eliteSnapshot.QuestIds,
+                eligibleQuestActivations: eliteSnapshot.Activations,
+                monsterType: 0);
+            var eliteEventId = Guid.NewGuid();
+            var eliteFirst = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: eliteEventId,
+                eligibleQuestIds: eliteSnapshot.QuestIds,
+                eligibleQuestActivations: eliteSnapshot.Activations,
+                monsterType: 1);
+            var eliteReplay = questService.SyncHuntMonsterQuestProgress(
+                CharacterId,
+                dungeonId: 144,
+                difficulty: 0,
+                monsterCode: 65301,
+                sourceEventId: eliteEventId,
+                eligibleQuestIds: eliteSnapshot.QuestIds,
+                eligibleQuestActivations: eliteSnapshot.Activations,
+                monsterType: 1);
+            Check("4 counts only canonical elite deaths and deduplicates one fact",
+                eliteOrdinary.Count == 0
+                    && CountProgressEvents(connStr, eliteOrdinaryEventId) == 0
+                    && eliteFirst.Count == 1
+                    && eliteFirst[0].PreviousTriggerValue == 5
+                    && eliteFirst[0].TriggerValue == 4
+                    && eliteReplay.Count == 0
+                    && LoadTrigger(connStr, EliteMonsterQuestId) == 4
+                    && CountProgressEvents(connStr, eliteEventId) == 1,
                 ref failures);
 
             SaveActiveQuest(connStr, SyntheticQuestId, 1);
@@ -725,6 +869,54 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 sender.CountCalls("NOTI:023F") == 1,
                 ref failures);
 
+            InventoryService.TryResolveMainVirtualSlotByItemId(
+                purchasedItemId,
+                out var purchasedSlot,
+                out _);
+            var discarded = InventoryDeleteService.TryDeleteForClient(
+                inventory,
+                InventoryListType.Main,
+                purchasedSlot,
+                purchasedCount,
+                out var discardMutation);
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
+                inventoryLease,
+                new[]
+                {
+                    discardMutation,
+                    new InventoryMutationResult { ItemTemplateId = 1004 },
+                });
+            Check("discarding the final seeking item recalibrates a completed quest",
+                discarded
+                    && discardMutation != null
+                    && discardMutation.ItemTemplateId == purchasedItemId
+                    && LoadTrigger(connStr, SeekingPurchaseQuestId)
+                        == (uint)purchasedCount
+                    && sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+            Check("extended delete mutations do not rebuild the active quest list",
+                sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+            Check("discarded seeking progress remains incomplete after reload",
+                QuestService.FindByQuestId(
+                        QuestService.LoadActiveQuests(connStr, CharacterId),
+                        SeekingPurchaseQuestId)
+                    ?.TriggerValue == (uint)purchasedCount,
+                ref failures);
+
+            var restored = TrySetHeldItemCount(
+                inventory,
+                purchasedItemId,
+                purchasedCount);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                new InventoryMutationResult { ItemTemplateId = purchasedItemId });
+            Check("restoring the final seeking item completes the same active quest",
+                restored
+                    && LoadTrigger(connStr, SeekingPurchaseQuestId) == 0
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+
             var consumed = inventory.TryConsumeMainItem(
                 purchasedItemId,
                 1,
@@ -738,8 +930,8 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 });
             Check("NPC purchase cost item reduction recalibrates seeking progress",
                 consumed
-                    && LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 2,
+                && LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 3,
                 ref failures);
 
             await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
@@ -750,20 +942,16 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 });
             Check("unrelated NPC purchase does not refresh seeking quests",
                 LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 2,
+                    && sender.CountCalls("NOTI:023F") == 3,
                 ref failures);
 
-            InventoryService.TryResolveMainVirtualSlotByItemId(
-                purchasedItemId,
-                out var purchasedSlot,
-                out _);
             inventory.SetMainVirtualCount(purchasedSlot, purchasedCount);
             var staleLease = new InventoryLease(
                 Guid.NewGuid(),
                 CharacterId,
                 inventory,
                 inventoryLease.Version + 1);
-            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
                 staleLease,
                 new InventoryMutationResult
                 {
@@ -771,6 +959,154 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 });
             Check("stale inventory lease cannot project seeking progress",
                 LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 3,
+                ref failures);
+            return failures;
+        }
+
+        private static async Task<int> CheckPhysicalSeekingMutationProjectionAsync(
+            string connStr,
+            InventoryLease inventoryLease,
+            InventoryService inventory)
+        {
+            var failures = 0;
+            var seekingItems = GameWorld.QuestData.GetSeekingConsumeItems(
+                SeekingSingleItemQuestId);
+            Check("13092 exposes its single physical seeking item",
+                seekingItems.Count == 1
+                    && seekingItems[0].ItemId == SeekingSingleItemId
+                    && seekingItems[0].Count == 1,
+                ref failures);
+
+            SaveActiveQuest(connStr, SeekingSingleItemQuestId, 0);
+            var sender = new RecordingSender();
+            var manager = new QuestManager(sender, connStr);
+            var granted = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var grant);
+            Check("13092 fixture creates the physical seeking item",
+                granted
+                    && grant != null
+                    && grant.Success
+                    && grant.Kind == InventoryRewardGrantKind.InventoryItem
+                    && inventory.CountMainItem(SeekingSingleItemId) == 1,
+                ref failures);
+
+            InventoryMutationResult deleteMutation = null;
+            var deleted = grant != null
+                && InventoryDeleteService.TryDeleteForClient(
+                    inventory,
+                    grant.ListType,
+                    grant.SlotIndex,
+                    1,
+                    out deleteMutation);
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                inventoryLease,
+                deleteMutation);
+            Check("ordinary physical delete reopens completed seeking quest",
+                deleted
+                    && deleteMutation != null
+                    && deleteMutation.ItemTemplateId == SeekingSingleItemId
+                    && inventory.CountMainItem(SeekingSingleItemId) == 0
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 0,
+                ref failures);
+
+            var restored = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var restoredGrant);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                new InventoryMutationResult
+                {
+                    ItemTemplateId = SeekingSingleItemId,
+                });
+            Check("restoring physical seeking item completes quest 13092",
+                restored
+                    && restoredGrant != null
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 0
+                    && sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            var sellCode = InventoryShopRuntimeService.TrySellItem(
+                inventory,
+                restoredGrant.ListType,
+                restoredGrant.SlotIndex,
+                1,
+                out var sellMutation);
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                inventoryLease,
+                sellMutation);
+            Check("selling physical seeking item reopens completed quest",
+                sellCode == 0
+                    && sellMutation != null
+                    && sellMutation.ItemTemplateId == SeekingSingleItemId
+                    && inventory.CountMainItem(SeekingSingleItemId) == 0
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            var restoredForUse = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var useGrant);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                new InventoryMutationResult
+                {
+                    ItemTemplateId = SeekingSingleItemId,
+                });
+            InventoryMutationResult useMutation = null;
+            var used = restoredForUse
+                && useGrant != null
+                && InventoryDeleteService.TryUseStackableForClient(
+                    inventory,
+                    useGrant.ListType,
+                    useGrant.SlotIndex,
+                    SeekingSingleItemId,
+                    out useMutation);
+            manager.RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                inventoryLease,
+                useMutation);
+            Check("using the final physical seeking item reopens the completed quest",
+                used
+                    && useMutation != null
+                    && useMutation.ItemTemplateId == SeekingSingleItemId
+                    && inventory.CountMainItem(SeekingSingleItemId) == 0
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+
+            var restoredForStaleLease = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingSingleItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out _);
+            var staleLease = new InventoryLease(
+                Guid.NewGuid(),
+                CharacterId,
+                inventory,
+                inventoryLease.Version + 1);
+            var staleMatched = manager
+                .RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
+                    staleLease,
+                    new InventoryMutationResult
+                    {
+                        ItemTemplateId = SeekingSingleItemId,
+                    });
+            Check("stale lease cannot recalibrate a physical seeking item",
+                restoredForStaleLease
+                    && !staleMatched
+                    && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
                     && sender.CountCalls("NOTI:023F") == 2,
                 ref failures);
             return failures;

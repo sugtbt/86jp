@@ -30,6 +30,13 @@ namespace DfoServer.SelfTests
         private const ushort OrdinaryKillQuestId = 20722;
         private const int OrdinaryKillDungeonId = 3536;
         private const int OrdinaryKillMonsterCode = 100003;
+        private const ushort AnyMonsterQuestId = 4303;
+        private const int AnyMonsterDungeonId = 144;
+        private const int AnyMonsterCode = 65301;
+        private const ushort EliteMonsterQuestId = 4;
+        private const ushort RescueSilmaQuestId = 1791;
+        private const int RescueSilmaDungeonId = 149;
+        private const int RescueSilmaApcCode = 6510;
         private const ushort ConditionalBossQuestId = 13504;
         private const int ConditionalBossDungeonId = 2010;
         private const int ConditionalBossMonsterCode = 69264;
@@ -183,6 +190,70 @@ namespace DfoServer.SelfTests
                 fixture.KillMonster();
                 Check("duplicate ordinary monster report does not repeat quest progress",
                     fixture.LoadKillerQuestTrigger(OrdinaryKillQuestId) == 2,
+                    ref failures);
+
+                fixture.PrepareAnyMonsterQuestKill(monsterType: 0);
+                fixture.KillMonster();
+                Check("any-monster quest advances through the canonical kill bridge",
+                    fixture.LoadKillerQuestTrigger(AnyMonsterQuestId) == 29,
+                    ref failures);
+                fixture.KillMonster();
+                Check("any-monster quest does not repeat one canonical death fact",
+                    fixture.LoadKillerQuestTrigger(AnyMonsterQuestId) == 29,
+                    ref failures);
+
+                fixture.PrepareAnyMonsterQuestKill(monsterType: 5);
+                fixture.KillMonster();
+                Check("any-monster quest excludes APC actor deaths",
+                    fixture.LoadKillerQuestTrigger(AnyMonsterQuestId) == 30,
+                    ref failures);
+
+                fixture.PrepareAnyMonsterQuestKill(monsterType: 1);
+                fixture.KillMonster();
+                Check("any-monster quest excludes elite actor deaths",
+                    fixture.LoadKillerQuestTrigger(AnyMonsterQuestId) == 30,
+                    ref failures);
+
+                fixture.PrepareEliteQuestKill(monsterType: 0);
+                fixture.KillMonster();
+                Check("elite-monster quest excludes ordinary actor deaths",
+                    fixture.LoadKillerQuestTrigger(EliteMonsterQuestId) == 5,
+                    ref failures);
+
+                fixture.PrepareEliteQuestKill(monsterType: 1);
+                fixture.KillMonster();
+                Check("elite-monster quest advances through the canonical kill bridge",
+                    fixture.LoadKillerQuestTrigger(EliteMonsterQuestId) == 4,
+                    ref failures);
+                fixture.KillMonster();
+                Check("duplicate elite death does not repeat quest progress",
+                    fixture.LoadKillerQuestTrigger(EliteMonsterQuestId) == 4,
+                    ref failures);
+
+                var rescueSilmaBossSequence =
+                    fixture.PrepareRescueSilmaApcBossQuest();
+                fixture.ConfirmBossDeath((ushort)(rescueSilmaBossSequence + 1));
+                Check("BOSS_DIE_CHECK rejects a sequence outside the current room actor",
+                    fixture.LoadKillerQuestTrigger(RescueSilmaQuestId) == 1,
+                    ref failures);
+                for (var index = 0; index < 6; index++)
+                    fixture.KillMonster((ushort)(MonsterSequence + index));
+                Check("endpoint clear waits for a frozen hostile APC boss",
+                    fixture.Killer.Session.Player.CurrentRun.Phase
+                        < DungeonRunPhase.Cleared
+                    && fixture.LoadKillerQuestTrigger(RescueSilmaQuestId) == 1,
+                    ref failures);
+                fixture.ConfirmBossDeath(rescueSilmaBossSequence);
+                Check("BOSS_DIE_CHECK routes a normal APC boss death through the quest bridge",
+                    fixture.LoadKillerQuestTrigger(RescueSilmaQuestId) == 0,
+                    ref failures);
+                Check("hostile APC boss death releases endpoint settlement",
+                    fixture.Killer.Session.Player.CurrentRun.Phase
+                        >= DungeonRunPhase.Cleared,
+                    ref failures);
+                fixture.ConfirmBossDeath(rescueSilmaBossSequence);
+                Check("duplicate normal APC BOSS_DIE_CHECK is a canonical death no-op",
+                    fixture.CountKillerProgressEvents("hunt-enemy") == 1,
                     ref failures);
 
                 var bloodAltarSequence = fixture.PrepareBloodAltarQuestDrop();
@@ -426,6 +497,77 @@ namespace DfoServer.SelfTests
                 _member.Session.Player.CurrentRun = runs.Member;
             }
 
+            public void PrepareAnyMonsterQuestKill(byte monsterType)
+            {
+                var active = SaveKillerActiveQuest(
+                    AnyMonsterQuestId,
+                    triggerValue: 30);
+                var runs = CreateSharedRuns(
+                    monsterType,
+                    AnyMonsterCode,
+                    dungeonId: AnyMonsterDungeonId,
+                    difficulty: 0);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void PrepareEliteQuestKill(byte monsterType)
+            {
+                var active = SaveKillerActiveQuest(
+                    EliteMonsterQuestId,
+                    triggerValue: 5);
+                var runs = CreateSharedRuns(
+                    monsterType,
+                    AnyMonsterCode,
+                    dungeonId: AnyMonsterDungeonId,
+                    difficulty: 0);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public ushort PrepareRescueSilmaApcBossQuest()
+            {
+                var active = SaveKillerActiveQuest(
+                    RescueSilmaQuestId,
+                    triggerValue: 1);
+                var monsters = new List<GameWorld.Dungeon.MonsterSumInfo>();
+                for (var index = 0; index < 6; index++)
+                {
+                    monsters.Add(new GameWorld.Dungeon.MonsterSumInfo
+                    {
+                        Code = 68005,
+                        Level = 18,
+                        Type = 0,
+                        IsBlocking = true,
+                        PacketIndex = (ushort)(MonsterSequence + index),
+                    });
+                }
+                monsters.Add(new GameWorld.Dungeon.MonsterSumInfo
+                {
+                    Code = RescueSilmaApcCode,
+                    Level = 18,
+                    Type = 8,
+                    Faction = PvfLib.ApcFaction.Monster,
+                    IsBlocking = false,
+                    PacketIndex = (ushort)(MonsterSequence + 6),
+                });
+                var runs = CreateSharedRuns(
+                    monsterType: 0,
+                    monsterCode: 0,
+                    dungeonId: RescueSilmaDungeonId,
+                    difficulty: 0,
+                    mapId: 13429,
+                    roomMonsters: monsters);
+                runs.Killer.BossMapPos = new[] { 1, 1 };
+                runs.Member.BossMapPos = new[] { 1, 1 };
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+                return (ushort)(MonsterSequence + 6);
+            }
+
             public ushort PrepareBloodAltarQuestDrop()
             {
                 var active = SaveKillerActiveQuest(
@@ -549,6 +691,19 @@ namespace DfoServer.SelfTests
                     .GetResult();
             }
 
+            public void ConfirmBossDeath(ushort bossSequence)
+            {
+                var body = new byte[4];
+                BitConverter.GetBytes(_killer.Session.Player.UserId).CopyTo(body, 0);
+                BitConverter.GetBytes(bossSequence).CopyTo(body, 2);
+                _handler.Handle_BOSS_DIE_CHECK(
+                        _killer.Session,
+                        new GamePacketHeader(),
+                        body)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
             public uint LoadKillerQuestTrigger(ushort questId)
             {
                 var quest = QuestActiveListRules.FindByQuestId(
@@ -562,6 +717,28 @@ namespace DfoServer.SelfTests
             public int CountKillerItem(int itemId)
                 => InventoryContext.Get(KillerCharacterId)?.CountMainItem(itemId)
                     ?? 0;
+
+            public int CountKillerProgressEvents(string eventKind)
+            {
+                using (var connection = new SqliteConnection(_connectionString))
+                {
+                    connection.Open();
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+SELECT COUNT(*)
+FROM quest_progress_event_inbox
+WHERE character_id=@characterId AND event_kind=@eventKind;";
+                        command.Parameters.AddWithValue(
+                            "@characterId",
+                            KillerCharacterId);
+                        command.Parameters.AddWithValue(
+                            "@eventKind",
+                            eventKind);
+                        return Convert.ToInt32(command.ExecuteScalar());
+                    }
+                }
+            }
 
             public void KillMonster(ushort sequenceId = MonsterSequence)
             {
@@ -610,15 +787,19 @@ namespace DfoServer.SelfTests
                 DungeonRewardPolicy rewardPolicy = null,
                 int dungeonId = 11000,
                 int difficulty = 0,
-                int mapId = 33060)
+                int mapId = 33060,
+                IReadOnlyCollection<GameWorld.Dungeon.MonsterSumInfo>
+                    roomMonsters = null)
             {
                 var instance = new DungeonInstance(
                     checked((short)dungeonId),
                     checked((byte)difficulty),
                     rewardPolicy ?? DungeonRewardPolicy.Standard);
                 var roomKey = new RoomKey(1, 1, mapId);
-                var monsters = new List<GameWorld.Dungeon.MonsterSumInfo>();
-                if (monsterCode > 0)
+                var monsters = roomMonsters == null
+                    ? new List<GameWorld.Dungeon.MonsterSumInfo>()
+                    : new List<GameWorld.Dungeon.MonsterSumInfo>(roomMonsters);
+                if (roomMonsters == null && monsterCode > 0)
                 {
                     monsters.Add(new GameWorld.Dungeon.MonsterSumInfo
                     {
@@ -667,7 +848,7 @@ namespace DfoServer.SelfTests
                         InstanceRoom = room,
                         Maze = maze,
                         FirstSeqId = MonsterSequence,
-                        MonsterCount = 1,
+                        MonsterCount = checked((ushort)monsters.Count),
                         KilledSeqIds = run.RoomKilledSeqIds,
                         Seed = room.Seed,
                         Lcg = run.RoomLcg,

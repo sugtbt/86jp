@@ -16,5 +16,14 @@ namespace DfoServer.Network.Builders
             writer.WriteInt16(0);
             return writer.ToArray();
         }
+
+        public static byte[] BuildError(byte listType)
+        {
+            var writer = new GamePacketWriter();
+            writer.WriteByte(0x00);
+            writer.WriteByte(0x17);
+            writer.WriteByte(listType);
+            return writer.ToArray();
+        }
     }
 }

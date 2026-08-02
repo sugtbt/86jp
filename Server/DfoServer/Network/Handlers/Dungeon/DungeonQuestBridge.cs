@@ -49,7 +49,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         progressEvent.SourceEventId,
                         eligibleQuestIds,
                         envelope.RunIdentity,
-                        eligibleQuestActivations);
+                        eligibleQuestActivations,
+                        progressEvent.MonsterType);
 
                 case DungeonQuestProgressKind.HuntEnemy:
                     return questManager.SyncHuntEnemyQuestProgressAsync(

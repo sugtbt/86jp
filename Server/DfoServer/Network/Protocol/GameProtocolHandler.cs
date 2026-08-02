@@ -491,6 +491,8 @@ namespace DfoServer.Network
             {
                 if (await _dungeonHandler.TryHandleDeathTowerUseStackable(s, h, b))
                     return;
+                if (await _inventoryHandler.TryHandleDungeonUseStackable(s, h, b))
+                    return;
                 if (await _petCreatureHandler.TryHandleUseStackable(s, h, b))
                     return;
 

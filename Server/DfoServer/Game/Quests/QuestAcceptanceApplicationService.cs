@@ -105,6 +105,15 @@ namespace DfoServer.Game.Quests
                             {
                                 return QuestAcceptResult.Fail(21);
                             }
+                            if (!GameWorld.QuestDungeonPresentationPlanner
+                                    .IsAcceptanceAllowed(questId, active))
+                            {
+                                FileLogger.Log(
+                                    $"[QuestAcceptanceApplicationService] ACCEPT " +
+                                    $"blocked by task-dungeon presentation priority: " +
+                                    $"quest={questId} cid={characterId}");
+                                return QuestAcceptResult.Fail(21);
+                            }
 
                             slot = QuestActiveListRules.FindFreeSlot(active);
                             if (slot < 0)

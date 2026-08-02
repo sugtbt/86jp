@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DfoServer.Game.Accounts;
 using DfoServer.Game.CharacterData;
@@ -10,6 +11,7 @@ using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Game.Skills;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers.Pets;
@@ -451,6 +453,9 @@ namespace DfoServer.Game.Quests
         private byte[] BuildAcceptedQuestNoti(int characterId)
         {
             var active = QuestService.LoadActiveQuests(_connectionString, characterId);
+            active = QuestDungeonPresentationPlanner
+                .ProjectActiveQuests(active)
+                .ToList();
             var writer = new Network.GamePacketWriter();
             writer.WriteUInt32((uint)active.Count);
             foreach (var quest in active)
