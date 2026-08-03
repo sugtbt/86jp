@@ -6,10 +6,6 @@ using DfoServer.Infrastructure;
 
 namespace DfoServer.Game.CharacterData
 {
-    
-    
-    
-    
     public sealed class SqliteSubtype0FieldsRepository
     {
         private readonly string _connectionString;
@@ -253,9 +249,55 @@ namespace DfoServer.Game.CharacterData
             }
         }
 
-        
-        
-        
-        
+        internal static bool ResetExpertJobInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+            => SetExpertJobStateInTransaction(
+                connection,
+                transaction,
+                characterId,
+                0,
+                -1);
+
+        internal static bool SetExpertJobInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            byte expertJobType)
+            => expertJobType > 0
+                && SetExpertJobStateInTransaction(
+                    connection,
+                    transaction,
+                    characterId,
+                    expertJobType,
+                    0);
+
+        private static bool SetExpertJobStateInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            byte expertJobType,
+            long expertJobExperience)
+        {
+            if (connection == null || transaction == null || characterId <= 0)
+                return false;
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+INSERT INTO character_subtype0_fields (character_id, expert_job_type, expert_job_exp)
+VALUES (@cid, @type, @exp)
+ON CONFLICT(character_id) DO UPDATE SET
+    expert_job_type=excluded.expert_job_type,
+    expert_job_exp=excluded.expert_job_exp;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@type", (int)expertJobType);
+                command.Parameters.AddWithValue("@exp", expertJobExperience);
+                return command.ExecuteNonQuery() == 1;
+            }
+        }
+
     }
 }

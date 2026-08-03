@@ -46,6 +46,7 @@ namespace DfoServer
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),
             ("--selftest-expert-contract-skill", SelfTests.ExpertContractSkillSelfTest.Run),
             ("--selftest-expert-job-store", SelfTests.ExpertJobStoreSelfTest.Run),
+            ("--selftest-expert-job-giveup", SelfTests.ExpertJobGiveupSelfTest.Run),
             ("--selftest-crystal-contract", SelfTests.CrystalContractSelfTest.Run),
             ("--selftest-slot-expansion-quest", SelfTests.SlotExpansionQuestSelfTest.Run),
             ("--selftest-character-slot-policy", SelfTests.CharacterSlotPolicySelfTest.Run),

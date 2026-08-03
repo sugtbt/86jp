@@ -394,6 +394,56 @@ namespace DfoServer.Game.Quests
             }
         }
 
+        internal static bool HasAnyClearedQuest(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            IReadOnlyCollection<ushort> questIds)
+        {
+            if (conn == null)
+                throw new ArgumentNullException(nameof(conn));
+            if (questIds == null || questIds.Count == 0)
+                return false;
+
+            foreach (var questId in questIds)
+            {
+                if (questId != 0
+                    && IsQuestCleared(conn, tx, characterId, questId))
+                    return true;
+            }
+            return false;
+        }
+
+        internal static void ResetQuestProgress(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            IReadOnlyCollection<ushort> questIds)
+        {
+            if (conn == null)
+                throw new ArgumentNullException(nameof(conn));
+            if (questIds == null || questIds.Count == 0)
+                return;
+
+            foreach (var questId in questIds)
+            {
+                if (questId == 0)
+                    continue;
+
+                DeleteClearedFlag(conn, tx, characterId, questId);
+                using (var command = conn.CreateCommand())
+                {
+                    command.Transaction = tx;
+                    command.CommandText = @"
+DELETE FROM character_active_quests
+WHERE character_id=@cid AND quest_id=@qid;";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.Parameters.AddWithValue("@qid", (int)questId);
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
         // 初始化路径的整表重建(先清后写), 供选角种子数据载入使用。
         public static void ReplaceAllClearedFlags(SqliteConnection conn, SqliteTransaction tx, int characterId, IReadOnlyList<KeyValuePair<int, int>> flags)
         {

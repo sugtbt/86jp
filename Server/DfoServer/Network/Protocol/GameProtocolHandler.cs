@@ -50,6 +50,7 @@ namespace DfoServer.Network
         private readonly ExpertJobStoreHandler _expertJobStoreHandler;
         private readonly ExpertJobExtractionHandler _expertJobExtractionHandler;
         private readonly ExpertJobCompoundHandler _expertJobCompoundHandler;
+        private readonly ExpertJobGiveupHandler _expertJobGiveupHandler;
         private readonly EnchanterHandler _enchanterHandler;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
@@ -202,6 +203,19 @@ namespace DfoServer.Network
                 honorLevel,
                 expertJobPersistence,
                 _inventoryRefreshSender,
+                expertJobOperations);
+            _expertJobGiveupHandler = new ExpertJobGiveupHandler(
+                expertJobStores,
+                new ExpertJobGiveupApplicationService(
+                    databasePath,
+                    schemaFilePath,
+                    expertJobStateRepository),
+                new ExpertJobGiveupNotificationProjector(
+                    characterRepository,
+                    subtype0Repository,
+                    honorLevel,
+                    sqliteSelectCharacterDataSource,
+                    _inventoryRefreshSender),
                 expertJobOperations);
             _townHandler = new TownHandler(
                 characterRepository,
@@ -772,6 +786,7 @@ namespace DfoServer.Network
 
         private void RegisterExpertJobHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
+            d[(ushort)CmdPacketType.GIVEUP_EXPERT_JOB] = _expertJobGiveupHandler.Handle;
             d[(ushort)CmdPacketType.CREATE_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleCreate;
             d[(ushort)CmdPacketType.ENTER_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleEnter;
             d[(ushort)CmdPacketType.CLOSE_EXPERT_JOB_STORE] = _expertJobStoreHandler.HandleClose;

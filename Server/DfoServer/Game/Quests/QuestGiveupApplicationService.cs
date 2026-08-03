@@ -71,16 +71,18 @@ namespace DfoServer.Game.Quests
                                     continue;
 
                                 inventoryMutated = true;
-                                if (!TryDeleteMainItem(
+                                if (!InventoryDeleteService
+                                        .TryDeleteMainItemsByTemplateId(
                                         inventory,
                                         entry.ItemId,
                                         deleteCount,
-                                        changes))
+                                        out var deleted))
                                 {
                                     throw new InvalidOperationException(
                                         $"item reclaim failed item={entry.ItemId} " +
                                         $"held={current} retain={entry.RetainCount}");
                                 }
+                                changes.AddRange(deleted);
                             }
 
                             if (!QuestRepository.TryDeleteActiveQuestCas(
@@ -153,43 +155,6 @@ namespace DfoServer.Game.Quests
                     snapshots[pair.Key] = pair.Value.Copy();
             }
             return snapshots;
-        }
-
-        private static bool TryDeleteMainItem(
-            InventoryService inventory,
-            int itemId,
-            int deleteCount,
-            InventoryMutationSet changes)
-        {
-            var remaining = deleteCount;
-            foreach (var pair in inventory.GetItems(InventoryListType.Main))
-            {
-                var item = pair.Value;
-                if (remaining <= 0)
-                    break;
-                if (item == null || item.ItemId != itemId)
-                    continue;
-
-                var available = InventoryStackRuleService.IsStackable(item)
-                    ? Math.Max(0, item.Count)
-                    : 1;
-                var count = Math.Min(remaining, available);
-                if (count <= 0
-                    || !InventoryDeleteService.TryDecreaseStack(
-                        inventory,
-                        InventoryListType.Main,
-                        pair.Key,
-                        count,
-                        out var deleted)
-                    || !deleted.Success)
-                {
-                    return false;
-                }
-
-                changes.AddRange(deleted.Changes);
-                remaining -= deleted.DeletedCount;
-            }
-            return remaining == 0;
         }
 
         private static void RestoreTargetSlots(

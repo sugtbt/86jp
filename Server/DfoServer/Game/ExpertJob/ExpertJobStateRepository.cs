@@ -5,6 +5,27 @@ using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.ExpertJob
 {
+    internal sealed class ExpertJobGiveupState
+    {
+        internal byte ExpertJobType { get; set; }
+
+        internal int GiveupCount { get; set; }
+    }
+
+    internal interface IExpertJobGiveupStateRepository
+    {
+        ExpertJobGiveupState LoadGiveupStateInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId);
+
+        bool ResetAfterGiveupInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            byte nextGiveupCount);
+    }
+
     public interface IExpertJobStateRepository
     {
         ExpertJobState Load(int characterId, int expertJobType);
@@ -57,7 +78,7 @@ namespace DfoServer.Game.ExpertJob
 
     public sealed class SqliteExpertJobStateRepository
         : IExpertJobStateRepository, IDisjointMachineStateRepository,
-          IEnchanterMachineStateRepository
+          IEnchanterMachineStateRepository, IExpertJobGiveupStateRepository
     {
         private readonly string _connectionString;
 
@@ -148,6 +169,55 @@ ORDER BY recipe_id;";
         public EnchanterMachineState ResolveEnchanter(int characterId)
             => Load(characterId, ExpertJobStateCodec.EnchanterType).EnchanterMachine;
 
+        private static ExpertJobGiveupState LoadGiveupStateInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            if (connection == null)
+                throw new ArgumentNullException(nameof(connection));
+            if (transaction == null)
+                throw new ArgumentNullException(nameof(transaction));
+            if (characterId <= 0)
+                return null;
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT COALESCE(f.expert_job_type, 0), COALESCE(e.giveup_count, 0)
+FROM characters c
+LEFT JOIN character_subtype0_fields f ON f.character_id=c.character_id
+LEFT JOIN character_expert_job e ON e.character_id=c.character_id
+WHERE c.character_id=@cid AND c.delete_flag=0;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                using (var reader = command.ExecuteReader())
+                {
+                    if (!reader.Read())
+                        return null;
+
+                    var type = reader.GetInt32(0);
+                    return new ExpertJobGiveupState
+                    {
+                        ExpertJobType = type > 0 && type <= byte.MaxValue
+                            ? (byte)type
+                            : (byte)0,
+                        GiveupCount = Math.Max(0, reader.GetInt32(1)),
+                    };
+                }
+            }
+        }
+
+        ExpertJobGiveupState IExpertJobGiveupStateRepository
+            .LoadGiveupStateInTransaction(
+                SqliteConnection connection,
+                SqliteTransaction transaction,
+                int characterId)
+            => LoadGiveupStateInTransaction(
+                connection,
+                transaction,
+                characterId);
+
         public bool SaveEnchanterInTransaction(
             SqliteConnection connection,
             SqliteTransaction transaction,
@@ -206,6 +276,60 @@ ON CONFLICT(character_id) DO UPDATE SET
                 transaction,
                 characterId,
                 new[] { recipeId });
+
+        private bool ResetAfterGiveupInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            byte nextGiveupCount)
+        {
+            if (connection == null || transaction == null || characterId <= 0)
+                return false;
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+INSERT INTO character_expert_job (
+    character_id, giveup_count,
+    disjoint_machine_grade, disjoint_machine_endurance,
+    enchanter_endurance, updated_at)
+VALUES (@cid, @giveup, 0, 0, 0, CURRENT_TIMESTAMP)
+ON CONFLICT(character_id) DO UPDATE SET
+    giveup_count=excluded.giveup_count,
+    disjoint_machine_grade=0,
+    disjoint_machine_endurance=0,
+    enchanter_endurance=0,
+    updated_at=CURRENT_TIMESTAMP;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@giveup", (int)nextGiveupCount);
+                if (command.ExecuteNonQuery() != 1)
+                    return false;
+            }
+
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+DELETE FROM character_expert_job_recipes
+WHERE character_id=@cid;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.ExecuteNonQuery();
+            }
+
+            return true;
+        }
+
+        bool IExpertJobGiveupStateRepository.ResetAfterGiveupInTransaction(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            byte nextGiveupCount)
+            => ResetAfterGiveupInTransaction(
+                connection,
+                transaction,
+                characterId,
+                nextGiveupCount);
 
         public bool SaveInTransaction(
             SqliteConnection connection,
@@ -334,7 +458,6 @@ INSERT INTO character_expert_job (
     enchanter_endurance, updated_at)
 VALUES (@cid, 0, @grade, @endurance, @enchanterEndurance, CURRENT_TIMESTAMP)
 ON CONFLICT(character_id) DO UPDATE SET
-    giveup_count=0,
     disjoint_machine_grade=excluded.disjoint_machine_grade,
     disjoint_machine_endurance=excluded.disjoint_machine_endurance,
     enchanter_endurance=excluded.enchanter_endurance,

@@ -133,6 +133,51 @@ namespace DfoServer.Game.Inventory
             return TryDecreaseStack(inventory, listType, slotIndex, count, out result);
         }
 
+        internal static bool TryDeleteMainItemsByTemplateId(
+            InventoryService inventory,
+            int itemId,
+            int count,
+            out InventoryMutationSet changes)
+        {
+            changes = new InventoryMutationSet();
+            if (inventory == null || itemId <= 0 || count <= 0)
+                return false;
+            if (inventory.CountMainItem(itemId) < count)
+                return false;
+
+            var remaining = count;
+            foreach (var pair in inventory.GetItems(InventoryListType.Main))
+            {
+                if (remaining <= 0)
+                    break;
+
+                var item = pair.Value;
+                if (item == null || item.ItemId != itemId)
+                    continue;
+
+                var available = InventoryStackRuleService.IsStackable(item)
+                    ? Math.Max(0, item.Count)
+                    : 1;
+                var deleteCount = Math.Min(remaining, available);
+                if (deleteCount <= 0
+                    || !TryDecreaseStack(
+                        inventory,
+                        InventoryListType.Main,
+                        pair.Key,
+                        deleteCount,
+                        out var deleted)
+                    || !deleted.Success)
+                {
+                    return false;
+                }
+
+                changes.AddRange(deleted.Changes);
+                remaining -= deleted.DeletedCount;
+            }
+
+            return remaining == 0;
+        }
+
         internal static bool TryDeleteForClient(
             InventoryService inventory,
             InventoryListType listType,

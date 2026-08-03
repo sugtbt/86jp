@@ -1482,16 +1482,16 @@ namespace DfoServer.Game.Quests
             int characterId,
             int expertJobType)
         {
-            using (var command = connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText = @"
-                    INSERT INTO character_subtype0_fields (character_id, expert_job_type) VALUES (@cid, @ejt)
-                    ON CONFLICT(character_id) DO UPDATE SET expert_job_type=@ejt;";
-                command.Parameters.AddWithValue("@cid", characterId);
-                command.Parameters.AddWithValue("@ejt", expertJobType);
-                command.ExecuteNonQuery();
-            }
+            if (expertJobType <= 0
+                || expertJobType > byte.MaxValue
+                || !CharacterData.SqliteSubtype0FieldsRepository
+                    .SetExpertJobInTransaction(
+                        connection,
+                        transaction,
+                        characterId,
+                        (byte)expertJobType))
+                throw new InvalidOperationException(
+                    $"invalid expert job reward: cid={characterId} type={expertJobType}");
 
             SqliteExpertJobStateRepository.InitializeInTransaction(
                 connection,
