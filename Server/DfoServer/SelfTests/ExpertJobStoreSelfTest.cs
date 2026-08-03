@@ -421,6 +421,8 @@ namespace DfoServer.SelfTests
                     material => material.ItemTemplateId == 3166 && material.Count == 20)
                 && enchanterConfig.CardsByItemId[3619].Qualification == 0
                 && enchanterConfig.BeadItemIdByCardItemId[3619] == 2600313
+                && enchanterConfig.CardsByItemId[10015144].Qualification == 4
+                && enchanterConfig.BeadItemIdByCardItemId[10015144] == 10015170
                 && enchanterConfig.CardExperienceRulesByLevel[1].SuccessRates[0] == 100
                 && enchanterConfig.CardExperienceRulesByLevel[1].MinimumExperienceGain == 3
                 && enchanterConfig.CardExperienceRulesByLevel[1].MaximumExperienceGain == 6
@@ -1299,6 +1301,13 @@ namespace DfoServer.SelfTests
                 targetMetadata?.ItemKind == "equipment"
                 && ItemMetadataResolver.ResolveEquipmentType(targetEquipmentId) == "[shoes]",
                 ref failures);
+            Check("current-PVF unbindable epic card accepts its declared weapon target",
+                ItemMetadataResolver.TryValidateMonsterCardTarget(
+                    10015144,
+                    101040019,
+                    0,
+                    out _),
+                ref failures);
 
             var requester = new InventoryService(990520, 990520);
             requester.AttachMainVirtualCount(
@@ -1485,6 +1494,42 @@ namespace DfoServer.SelfTests
                 .Single(item => item.ItemId == 2600313);
             Check("crafted bead preserves card upgrade count",
                 craftedBead.EnchantUpgradeCount == 2,
+                ref failures);
+
+            var epicCardInventory = new InventoryService(990525, 990525);
+            epicCardInventory.SetItem(InventoryListType.Main, 239, new ItemCore
+            {
+                ItemId = 10015144,
+                Count = 1,
+            });
+            epicCardInventory.SetItem(InventoryListType.Main, 240, new ItemCore
+            {
+                ItemId = 3227,
+                Count = 40,
+            });
+            epicCardInventory.SetItem(InventoryListType.Main, 241, new ItemCore
+            {
+                ItemId = 3167,
+                Count = 60,
+            });
+            epicCardInventory.AttachMainVirtualCount(359, 3262, 20);
+            var epicCardCommand = new ExpertJobCompoundCommand
+            {
+                RecipeItemId = 10015151,
+                RequestedCount = 1,
+                CardSlotIndex = 239,
+            };
+            Check("current-PVF unbindable epic card crafts its enchanter bead",
+                EnchanterCompoundService.TryCraftBead(
+                    epicCardInventory,
+                    epicCardCommand,
+                    1401,
+                    out var epicCardResult)
+                && epicCardResult.SuccessCount == 1
+                && epicCardResult.Outputs.Count == 1
+                && epicCardResult.Outputs[0].ItemId == 10015170
+                && epicCardInventory.CountMainItem(10015144) == 0
+                && epicCardInventory.CountMainItem(10015170) == 1,
                 ref failures);
 
             var ack = ExpertJobCompoundPacketBuilder.BuildSuccess(result);

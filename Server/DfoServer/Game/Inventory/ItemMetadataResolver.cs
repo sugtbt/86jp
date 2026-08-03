@@ -706,10 +706,7 @@ namespace DfoServer.Game.Inventory
         {
             rejectReason = null;
             if (!TryLoadStackable(cardItemTemplateId, out var card)
-                || !string.Equals(
-                    NormalizeItemCategory(card.ItemCategory),
-                    "monster card",
-                    StringComparison.OrdinalIgnoreCase))
+                || !IsEnchanterCard(card))
             {
                 rejectReason = "item is not a monster card";
                 return false;
@@ -886,6 +883,30 @@ namespace DfoServer.Game.Inventory
 
         private static string NormalizeItemCategory(string raw)
             => (raw ?? string.Empty).Replace("`", string.Empty).Trim();
+
+        internal static bool IsMonsterCardCategory(string raw)
+        {
+            var normalized = NormalizeItemCategory(raw);
+            const string category = "monster card";
+            return normalized.StartsWith(category, StringComparison.OrdinalIgnoreCase)
+                && (normalized.Length == category.Length
+                    || char.IsWhiteSpace(normalized[category.Length]));
+        }
+
+        internal static bool IsEnchanterCard(StackableItemFile card)
+        {
+            if (card == null)
+                return false;
+
+            var stackableType = NormalizeItemCategory(card.StackableType);
+            return IsMonsterCardCategory(card.ItemCategory)
+                || (string.Equals(
+                        stackableType,
+                        "[material expert job] 1",
+                        StringComparison.OrdinalIgnoreCase)
+                    && card.EnchantTable.Count > 0
+                    && ExtractAllowedEquipmentTypes(card.StringDataItems).Count > 0);
+        }
 
         private static bool HasDurabilityByType(string normalizedType)
         {

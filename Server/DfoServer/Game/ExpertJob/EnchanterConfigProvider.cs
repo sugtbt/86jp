@@ -20,7 +20,6 @@ namespace DfoServer.Game.ExpertJob
     internal sealed class EnchanterCardDefinition
     {
         internal int Qualification { get; set; }
-        internal int BindChance { get; set; }
     }
 
     internal sealed class EnchanterCardExperienceRule
@@ -330,6 +329,9 @@ namespace DfoServer.Game.ExpertJob
                     var cardItemId = ParseInt(baseResults[index]);
                     var beadItemId = ParseInt(baseResults[index + 1]);
                     DfoServer.Game.Inventory.ItemMetadataResolver.TryLoadStackableFile(
+                        cardItemId,
+                        out var card);
+                    DfoServer.Game.Inventory.ItemMetadataResolver.TryLoadStackableFile(
                         beadItemId,
                         out var bead);
                     if (cardItemId <= 0
@@ -344,52 +346,16 @@ namespace DfoServer.Game.ExpertJob
                             $"card={cardItemId} bead={beadItemId}");
                     }
                     config.BeadItemIdByCardItemId.Add(cardItemId, beadItemId);
+                    if (DfoServer.Game.Inventory.ItemMetadataResolver.IsEnchanterCard(card))
+                    {
+                        config.CardsByItemId[cardItemId] = new EnchanterCardDefinition
+                        {
+                            Qualification = rarity,
+                        };
+                    }
                 }
             }
 
-            ParseCardDefinitions(
-                ReadTokens(root, content, "monstercard bind list"),
-                config,
-                "monstercard bind list");
-        }
-
-        private static void ParseCardDefinitions(
-            string[] bindTokens,
-            EnchanterConfig config,
-            string tag)
-        {
-            if (bindTokens.Length == 0 || bindTokens.Length % 3 != 0)
-                throw new InvalidOperationException($"PVF {PvfPath} [{tag}] row width is not 3");
-
-            for (var index = 0; index < bindTokens.Length; index += 3)
-            {
-                var cardItemId = ParseInt(bindTokens[index]);
-                var qualification = ParseInt(bindTokens[index + 1]);
-                var chance = ParseInt(bindTokens[index + 2]);
-                if (cardItemId <= 0
-                    || qualification < 0
-                    || !config.CardQualificationLevelRequirements.ContainsKey(qualification)
-                    || chance < 0
-                    || chance > 1000
-                    || config.CardsByItemId.ContainsKey(cardItemId)
-                    || !DfoServer.Game.Inventory.ItemMetadataResolver.TryLoadStackableFile(
-                        cardItemId,
-                        out var card)
-                    || !string.Equals(
-                        NormalizeTag(card.ItemCategory),
-                        "monster card",
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException(
-                        $"PVF {PvfPath} has invalid card qualification reference " +
-                        $"tag={tag} card={cardItemId} qualification={qualification}");
-                }
-                config.CardsByItemId.Add(cardItemId, new EnchanterCardDefinition
-                {
-                    Qualification = qualification,
-                    BindChance = chance,
-                });
-            }
         }
 
         private static IReadOnlyList<InventoryMaterialRequirement> ParseMaterialRequirements(
