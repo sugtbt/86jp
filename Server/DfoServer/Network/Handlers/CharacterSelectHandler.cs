@@ -8,7 +8,6 @@ using DfoServer.Game.Names;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
 using DfoServer.Network.Builders;
-using DfoServer.Network.Builders.Channel;
 using DfoServer.Network.Parsers;
 using Microsoft.Data.Sqlite;
 using System;
@@ -30,7 +29,6 @@ namespace DfoServer.Network.Handlers
         private readonly Game.Dungeon.DungeonPersistentEffectApplicationService
             _dungeonPersistentEffects;
         private readonly Game.Dungeon.DungeonInstanceRegistry _dungeonInstances;
-        private readonly RaidChannelService _raidChannelService;
 
         public string ProtocolName => "GameProtocol";
 
@@ -42,8 +40,7 @@ namespace DfoServer.Network.Handlers
             ICharacterRepository characterRepository,
             GetUserInfoTemplate getUserInfoTemplate,
             Game.Session.ISessionDirectory sessions = null,
-            IMercenaryRestrictionService mercenaryRestrictions = null,
-            RaidChannelService raidChannelService = null)
+            IMercenaryRestrictionService mercenaryRestrictions = null)
             : this(
                 null,
                 selectCharacterDataSource,
@@ -51,8 +48,7 @@ namespace DfoServer.Network.Handlers
                 getUserInfoTemplate,
                 sessions,
                 null,
-                mercenaryRestrictions,
-                raidChannelService)
+                mercenaryRestrictions)
         {
         }
 
@@ -67,8 +63,7 @@ namespace DfoServer.Network.Handlers
             GetUserInfoTemplate getUserInfoTemplate,
             Game.Session.ISessionDirectory sessions = null,
             Game.Dungeon.DungeonInstanceRegistry dungeonInstances = null,
-            IMercenaryRestrictionService mercenaryRestrictions = null,
-            RaidChannelService raidChannelService = null)
+            IMercenaryRestrictionService mercenaryRestrictions = null)
         {
             _selectCharacterDataSource = selectCharacterDataSource ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
             _characterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
@@ -79,7 +74,6 @@ namespace DfoServer.Network.Handlers
             _mercenaryRestrictions = mercenaryRestrictions;
             _dungeonPersistentEffects = dungeonPersistentEffects;
             _dungeonInstances = dungeonInstances;
-            _raidChannelService = raidChannelService;
         }
 
         // 按 UserId 找在线会话(他人外观拉取用)。
@@ -122,8 +116,9 @@ namespace DfoServer.Network.Handlers
                     return false;
 
                 // 客户端必须先建立 subtype0 最小资料上下文，后续 subtype1 明细才会进入远程资料解析器。
+                byte[] minimumBody = null;
                 if (snapshot?.CharacterRecord == null
-                    || !new UserInfoBodyBuilder().TryBuild(snapshot, 0, out var minimumBody)
+                    || !new UserInfoBodyBuilder().TryBuild(snapshot, 0, out minimumBody)
                     || minimumBody == null
                     || !UserInfoBodyBuilder.TryRewriteSubtype0UserId(minimumBody, target.Player.UserId))
                 {
@@ -362,21 +357,6 @@ namespace DfoServer.Network.Handlers
                             record.Subtype0Tail = tail;
                             session.Player.Subtype0Tail = tail;
 
-                            // 选角阶段仍然登录普通 ch.11；只清理历史上被误写的公共频道标记，避免客户端把登录频道与角色状态判定为不一致。
-                            if ((_raidChannelService == null || !_raidChannelService.IsRaidChannelProfile)
-                                && GameNetworkConfig.NormalizeRaidPublicChannelToDefault(tail))
-                            {
-                                using (var conn = new SqliteConnection(
-                                    Infrastructure.SqliteDatabaseBootstrap.Initialize(
-                                        Infrastructure.ServerPaths.DatabasePath,
-                                        Infrastructure.ServerPaths.SchemaFilePath)))
-                                {
-                                    conn.Open();
-                                    Game.CharacterData.SqliteSubtype0FieldsRepository.Save(conn, record.CharacterId, tail);
-                                }
-
-                                FileLogger.Log($"[{ProtocolName}] Select character normalized stale raid channel state to default: character_id={record.CharacterId}");
-                            }
                         }
 
                         // 城镇模型使用会话内的 AppearanceEntries；不要使用可能过期/空的 characters.appearance_blob，
@@ -385,8 +365,6 @@ namespace DfoServer.Network.Handlers
                             record.CharacterId,
                             record.Job,
                             record.GrowType);
-                        // 在任何角色初始化包发出前完成频道地图修正，避免普通频道先加载安图恩专属 town=19。
-                        _raidChannelService?.ApplySelectedCharacterChannelState(session, "select_character");
                     }
                     catch (Exception ex)
                     {
@@ -783,18 +761,6 @@ namespace DfoServer.Network.Handlers
                 _dungeonInstances);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0007, CommonPacketBodyBuilder.BuildSuccessAck()));
             FileLogger.Log($"[{ProtocolName}] RETURN_SELECT_CHARACTER: sent ACK for session {session.SessionId}");
-
-            if (_raidChannelService?.IsRaidChannelProfile == true)
-            {
-                // 团队频道不能在原 10012 会话内继续选择其他角色，否则下一角色会继承安图恩频道环境。
-                // ACK 后只请求客户端回到频道选择场景，不再下发本频道角色列表，避免两个场景互相覆盖。
-                await session.SendPacketAsync(ChannelSelectionScenePacketBuilder.BuildNotification());
-                FileLogger.Log(
-                    $"[{ProtocolName}] RETURN_SELECT_CHARACTER: requested channel-selection scene " +
-                    $"notification=0x{ChannelSelectionScenePacketBuilder.NotificationType:X4} " +
-                    $"channel={GameNetworkConfig.RaidProfile.ChannelName} session={session.SessionId}");
-                return;
-            }
 
             await SendCharacterListAsync(session);
         }
