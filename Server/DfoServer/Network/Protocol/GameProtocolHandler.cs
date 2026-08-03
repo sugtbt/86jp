@@ -172,6 +172,7 @@ namespace DfoServer.Network
                 schemaFilePath);
             _expertJobStoreHandler = new ExpertJobStoreHandler(
                 expertJobStores,
+                new ExpertJobStorePlacementValidator(),
                 _partyManager,
                 sessionDirectory,
                 expertJobStateRepository,

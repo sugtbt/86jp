@@ -5,25 +5,27 @@ namespace DfoServer.Network.Builders.ExpertJob
 {
     internal static class ExpertJobStorePacketBuilder
     {
-        private const byte EnchanterPlayerAttachedStoreMode = 1;
-
-        internal static byte[] BuildCreateNotification(ExpertJobStoreSession store)
-        {
-            var writer = new GamePacketWriter();
-            writer.WriteUInt16(store.OwnerUserId);
-            writer.WriteDstr(store.NameBytes);
-            writer.WriteByte(store.TownId);
-            writer.WriteByte(store.AreaId);
-            writer.WriteInt16(store.PositionX);
-            writer.WriteInt16(store.PositionY);
-            writer.WriteInt32(store.Cost);
-            return writer.ToArray();
-        }
+        private const byte PlayerAttachedStoreMode = 1;
 
         internal static byte[] BuildCreateExpertJobNotification(ExpertJobStoreSession store)
         {
-            if (store?.Kind != ExpertJobStoreKind.EnchantShop || store.Enchanter == null)
+            if (store == null)
+                throw new ArgumentNullException(nameof(store));
+            if (store.Kind == ExpertJobStoreKind.DisjointMachine
+                && store.DisjointMachine == null)
+            {
+                throw new ArgumentException("a disjoint machine store is required", nameof(store));
+            }
+            if (store.Kind == ExpertJobStoreKind.EnchantShop
+                && store.Enchanter?.CardQualificationLevels == null)
+            {
                 throw new ArgumentException("an enchanter store is required", nameof(store));
+            }
+            if (store.Kind != ExpertJobStoreKind.DisjointMachine
+                && store.Kind != ExpertJobStoreKind.EnchantShop)
+            {
+                throw new ArgumentException("an unsupported expert job store was supplied", nameof(store));
+            }
 
             var writer = new GamePacketWriter();
             writer.WriteByte((byte)store.Kind);
@@ -34,13 +36,18 @@ namespace DfoServer.Network.Builders.ExpertJob
             writer.WriteInt16(store.PositionX);
             writer.WriteInt16(store.PositionY);
             writer.WriteInt32(store.Cost);
-            writer.WriteByte(EnchanterPlayerAttachedStoreMode);
-            writer.WriteByte((byte)Math.Min(byte.MaxValue, store.Enchanter.CardQualificationLevels.Count));
-            for (var index = 0;
-                index < store.Enchanter.CardQualificationLevels.Count && index < byte.MaxValue;
-                index++)
+            writer.WriteByte(PlayerAttachedStoreMode);
+            if (store.Kind == ExpertJobStoreKind.EnchantShop)
             {
-                writer.WriteByte(store.Enchanter.CardQualificationLevels[index]);
+                writer.WriteByte((byte)Math.Min(
+                    byte.MaxValue,
+                    store.Enchanter.CardQualificationLevels.Count));
+                for (var index = 0;
+                    index < store.Enchanter.CardQualificationLevels.Count && index < byte.MaxValue;
+                    index++)
+                {
+                    writer.WriteByte(store.Enchanter.CardQualificationLevels[index]);
+                }
             }
             return writer.ToArray();
         }

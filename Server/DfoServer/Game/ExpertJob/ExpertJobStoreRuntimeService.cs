@@ -59,29 +59,18 @@ namespace DfoServer.Game.ExpertJob
             out byte errorCode)
         {
             store = null;
-            errorCode = ErrorInvalidRequest;
-            if (ownerCharacterId <= 0
-                || ownerUserId == 0
-                || townId == 0
-                || command == null
-                || command.NameBytes == null
-                || command.NameBytes.Length > 255
-                || command.Cost < 0)
-            {
+            if (!TryValidateCreateRequest(
+                    ownerCharacterId,
+                    ownerUserId,
+                    expertJobType,
+                    townId,
+                    isInDungeon,
+                    isInParty,
+                    command,
+                    disjointMachineState,
+                    enchanterState,
+                    out errorCode))
                 return false;
-            }
-
-            if (isInDungeon || isInParty)
-            {
-                errorCode = ErrorInvalidState;
-                return false;
-            }
-
-            if (!TryValidateKind(expertJobType, command, disjointMachineState, enchanterState))
-            {
-                errorCode = ErrorInvalidState;
-                return false;
-            }
 
             lock (_syncRoot)
             {
@@ -125,6 +114,46 @@ namespace DfoServer.Game.ExpertJob
                 errorCode = 0;
                 return true;
             }
+        }
+
+        internal bool TryValidateCreate(
+            int ownerCharacterId,
+            ushort ownerUserId,
+            byte expertJobType,
+            byte townId,
+            bool isInDungeon,
+            bool isInParty,
+            ExpertJobStoreCreateCommand command,
+            DisjointMachineState disjointMachineState,
+            EnchanterStoreState enchanterState,
+            out byte errorCode)
+        {
+            if (!TryValidateCreateRequest(
+                    ownerCharacterId,
+                    ownerUserId,
+                    expertJobType,
+                    townId,
+                    isInDungeon,
+                    isInParty,
+                    command,
+                    disjointMachineState,
+                    enchanterState,
+                    out errorCode))
+            {
+                return false;
+            }
+
+            lock (_syncRoot)
+            {
+                if (_storesByOwnerCharacterId.ContainsKey(ownerCharacterId))
+                {
+                    errorCode = ErrorStoreBusy;
+                    return false;
+                }
+            }
+
+            errorCode = 0;
+            return true;
         }
 
         public bool TryGetStoreInArea(
@@ -329,6 +358,40 @@ namespace DfoServer.Game.ExpertJob
                 default:
                     return false;
             }
+        }
+
+        private static bool TryValidateCreateRequest(
+            int ownerCharacterId,
+            ushort ownerUserId,
+            byte expertJobType,
+            byte townId,
+            bool isInDungeon,
+            bool isInParty,
+            ExpertJobStoreCreateCommand command,
+            DisjointMachineState disjointMachineState,
+            EnchanterStoreState enchanterState,
+            out byte errorCode)
+        {
+            errorCode = ErrorInvalidRequest;
+            if (ownerCharacterId <= 0
+                || ownerUserId == 0
+                || townId == 0
+                || command == null
+                || command.NameBytes == null
+                || command.NameBytes.Length > 255
+                || command.Cost < 0)
+            {
+                return false;
+            }
+
+            if (isInDungeon || isInParty
+                || !TryValidateKind(expertJobType, command, disjointMachineState, enchanterState))
+            {
+                errorCode = ErrorInvalidState;
+                return false;
+            }
+
+            return true;
         }
 
         private void RemoveVisitorsForOwner(int ownerCharacterId)

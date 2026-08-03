@@ -17,10 +17,8 @@ namespace DfoServer.Network.Handlers
     {
         private const ushort CreateCommand = (ushort)CmdPacketType.CREATE_EXPERT_JOB_STORE;
         private const ushort EnterCommand = (ushort)CmdPacketType.ENTER_EXPERT_JOB_STORE;
-        private const ushort CreateNotification = (ushort)NotiPacketType.CREATE_DISJOINT_STORE;
         private const ushort CreateExpertJobNotification =
             (ushort)NotiPacketType.CREATE_EXPERT_JOB_STORE;
-        private const ushort CloseNotification = (ushort)NotiPacketType.CLOSE_DISJOINT_STORE;
         private const ushort CloseExpertJobNotification =
             (ushort)NotiPacketType.CLOSE_EXPERT_JOB_STORE;
         private const ushort DisjointCommand = (ushort)CmdPacketType.REQUEST_DISJOINT_ITEM;
@@ -31,6 +29,7 @@ namespace DfoServer.Network.Handlers
         private const ushort EnchantNotification = (ushort)NotiPacketType.USE_ENCHANT_STORE;
 
         private readonly ExpertJobStoreRuntimeService _stores;
+        private readonly ExpertJobStorePlacementValidator _placement;
         private readonly PartyManager _parties;
         private readonly ISessionDirectory _sessions;
         private readonly IDisjointMachineStateRepository _disjointMachineStates;
@@ -44,6 +43,7 @@ namespace DfoServer.Network.Handlers
 
         internal ExpertJobStoreHandler(
             ExpertJobStoreRuntimeService stores,
+            ExpertJobStorePlacementValidator placement,
             PartyManager parties,
             ISessionDirectory sessions,
             IDisjointMachineStateRepository disjointMachineStates,
@@ -56,6 +56,7 @@ namespace DfoServer.Network.Handlers
             InventoryRefreshSender inventoryRefresh)
         {
             _stores = stores ?? throw new ArgumentNullException(nameof(stores));
+            _placement = placement ?? throw new ArgumentNullException(nameof(placement));
             _parties = parties ?? throw new ArgumentNullException(nameof(parties));
             _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
             _disjointMachineStates = disjointMachineStates
@@ -111,22 +112,48 @@ namespace DfoServer.Network.Handlers
                             player.Subtype0Tail?.ExpertJobExp ?? 0),
                     }
                     : null;
-                if (!_stores.TryCreate(
-                        session.SessionId,
+                if (!_stores.TryValidateCreate(
                         player.CharacterId,
                         player.UserId,
                         expertJobType,
                         player.CurTownId,
-                        player.CurAreaId,
                         player.CurrentRun != null,
                         isInParty,
                         command,
                         state,
                         enchanterState,
-                        out store,
                         out errorCode))
                 {
                     store = null;
+                }
+                else if (!_placement.TryValidate(
+                             player.CurTownId,
+                             player.CurAreaId,
+                             command.PositionX,
+                             command.PositionY,
+                             out errorCode))
+                {
+                    store = null;
+                }
+                else
+                {
+                    if (!_stores.TryCreate(
+                            session.SessionId,
+                            player.CharacterId,
+                            player.UserId,
+                            expertJobType,
+                            player.CurTownId,
+                            player.CurAreaId,
+                            player.CurrentRun != null,
+                            isInParty,
+                            command,
+                            state,
+                            enchanterState,
+                            out store,
+                            out errorCode))
+                    {
+                        store = null;
+                    }
                 }
             }
             finally
@@ -147,8 +174,7 @@ namespace DfoServer.Network.Handlers
                 CreateCommand,
                 CommonPacketBodyBuilder.BuildSuccessAck()));
             var notification = BuildCreateNotification(store);
-            if (store.Kind == ExpertJobStoreKind.EnchantShop)
-                await session.SendPacketAsync(notification);
+            await session.SendPacketAsync(notification);
             await _sessions.BroadcastToAreaAsync(
                 store.TownId,
                 store.AreaId,
@@ -698,7 +724,8 @@ namespace DfoServer.Network.Handlers
             GamePacketHeader header,
             byte[] body)
         {
-            var characterId = session.Player?.CharacterId ?? 0;
+            var player = session.Player;
+            var characterId = player?.CharacterId ?? 0;
             if (!CloseExpertJobStoreRequest.IsValid(body) || characterId <= 0)
             {
                 await SendError(session, header.type, ExpertJobStoreRuntimeService.ErrorInvalidState);
@@ -730,7 +757,7 @@ namespace DfoServer.Network.Handlers
             if (removedVisitor)
                 return;
 
-            await SendError(session, header.type, ExpertJobStoreRuntimeService.ErrorInvalidState);
+            await session.SendPacketAsync(BuildCloseNotification(player.UserId));
         }
 
         public async Task CloseSessionAsync(EnhancedClientSession session, bool includeOwner)
@@ -785,12 +812,7 @@ namespace DfoServer.Network.Handlers
             ExpertJobStoreSession store,
             bool includeOwner)
         {
-            var notification = GamePacketEnvelopeBuilder.Build(
-                0x00,
-                store.Kind == ExpertJobStoreKind.EnchantShop
-                    ? CloseExpertJobNotification
-                    : CloseNotification,
-                ExpertJobStorePacketBuilder.BuildCloseNotification(store.OwnerUserId));
+            var notification = BuildCloseNotification(store.OwnerUserId);
             if (includeOwner)
                 await ownerSession.SendPacketAsync(notification);
             await _sessions.BroadcastToAreaAsync(
@@ -811,15 +833,18 @@ namespace DfoServer.Network.Handlers
 
         private static byte[] BuildCreateNotification(ExpertJobStoreSession store)
         {
-            return store.Kind == ExpertJobStoreKind.EnchantShop
-                ? GamePacketEnvelopeBuilder.Build(
-                    0x00,
-                    CreateExpertJobNotification,
-                    ExpertJobStorePacketBuilder.BuildCreateExpertJobNotification(store))
-                : GamePacketEnvelopeBuilder.Build(
-                    0x00,
-                    CreateNotification,
-                    ExpertJobStorePacketBuilder.BuildCreateNotification(store));
+            return GamePacketEnvelopeBuilder.Build(
+                0x00,
+                CreateExpertJobNotification,
+                ExpertJobStorePacketBuilder.BuildCreateExpertJobNotification(store));
+        }
+
+        private static byte[] BuildCloseNotification(ushort ownerUserId)
+        {
+            return GamePacketEnvelopeBuilder.Build(
+                0x00,
+                CloseExpertJobNotification,
+                ExpertJobStorePacketBuilder.BuildCloseNotification(ownerUserId));
         }
 
         private static Task SendDisjointError(EnhancedClientSession session, byte errorCode)

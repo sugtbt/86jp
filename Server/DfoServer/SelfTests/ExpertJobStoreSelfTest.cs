@@ -10,6 +10,7 @@ using DfoServer.Network.Builders.ExpertJob;
 using DfoServer.Network.Parsers.ExpertJob;
 using DfoServer.Sqlite;
 using Microsoft.Data.Sqlite;
+using PvfLib;
 
 namespace DfoServer.SelfTests
 {
@@ -39,6 +40,55 @@ namespace DfoServer.SelfTests
                 && command.Direction == -1, ref failures);
             Check("truncated request rejects", !CreateExpertJobStoreRequest.TryParse(capturedBody.Take(15).ToArray(), out _), ref failures);
             Check("trailing request bytes reject", !CreateExpertJobStoreRequest.TryParse(capturedBody.Concat(new byte[] { 0 }).ToArray(), out _), ref failures);
+            var placementMap = MapFile.Parse(@"
+[virtual movable area]
+0 0 250 500
+251 0 249 500
+[/virtual movable area]
+[NPC]
+7 `[left]` 100 100 0
+8 `[right]` 400 100 0
+9 `[left]` 100 400 0
+10 `[right]` 400 400 0
+[/NPC]");
+            Check("town map NPC placement fields parse",
+                placementMap.NpcCount == 4
+                && placementMap.Npcs.Count == 4
+                && placementMap.Npcs[0].NpcId == 7
+                && placementMap.Npcs[0].Direction == "[left]"
+                && placementMap.Npcs[0].X == 100
+                && placementMap.Npcs[0].Y == 100
+                && placementMap.Npcs[3].NpcId == 10
+                && placementMap.Npcs[3].Direction == "[right]",
+                ref failures);
+            Check("store placement rejects point outside movable area",
+                ExpertJobStorePlacementValidator.Validate(
+                    placementMap.VirtualMovableArea,
+                    placementMap.Npcs,
+                    501,
+                    100) == ExpertJobStorePlacementValidator.ErrorUnavailablePoint,
+                ref failures);
+            Check("store placement ignores malformed negative movable area",
+                ExpertJobStorePlacementValidator.Validate(
+                    new[] { 100, 100, -1, 0 },
+                    Array.Empty<MapNpcInfo>(),
+                    100,
+                    100) == ExpertJobStorePlacementValidator.ErrorUnavailablePoint,
+                ref failures);
+            Check("store placement rejects official NPC commercial zone",
+                ExpertJobStorePlacementValidator.Validate(
+                    placementMap.VirtualMovableArea,
+                    placementMap.Npcs,
+                    179,
+                    249) == ExpertJobStorePlacementValidator.ErrorRestrictedCommercialZone,
+                ref failures);
+            Check("store placement keeps official commercial-zone boundary available",
+                ExpertJobStorePlacementValidator.Validate(
+                    placementMap.VirtualMovableArea,
+                    placementMap.Npcs,
+                    180,
+                    250) == 0,
+                ref failures);
             Check("captured enter request parses",
                 EnterExpertJobStoreRequest.TryParse(new byte[] { 0xF1, 0x03 }, out var enterRequest)
                 && enterRequest.OwnerUserId == 1009, ref failures);
@@ -199,16 +249,19 @@ namespace DfoServer.SelfTests
                 && runtime.TryGetOwnedStore(sessionId, 990486, out var ownedStore)
                 && ReferenceEquals(store, ownedStore), ref failures);
 
-            var createBody = ExpertJobStorePacketBuilder.BuildCreateNotification(store);
-            Check("create notification field order", createBody.Length == 17
-                && BitConverter.ToUInt16(createBody, 0) == 321
-                && BitConverter.ToInt32(createBody, 2) == 1
-                && createBody[6] == 0x30
-                && createBody[7] == 1
-                && createBody[8] == 2
-                && BitConverter.ToInt16(createBody, 9) == 933
-                && BitConverter.ToInt16(createBody, 11) == 266
-                && BitConverter.ToInt32(createBody, 13) == 1, ref failures);
+            var createBody = ExpertJobStorePacketBuilder.BuildCreateExpertJobNotification(store);
+            var disjointStoreTail = 7 + store.NameBytes.Length;
+            Check("disjoint store create notification field order",
+                createBody.Length == disjointStoreTail + 11
+                && createBody[0] == (byte)ExpertJobStoreKind.DisjointMachine
+                && BitConverter.ToUInt16(createBody, 1) == 321
+                && createBody[disjointStoreTail] == 1
+                && createBody[disjointStoreTail + 1] == 2
+                && BitConverter.ToInt16(createBody, disjointStoreTail + 2) == 933
+                && BitConverter.ToInt16(createBody, disjointStoreTail + 4) == 266
+                && BitConverter.ToInt32(createBody, disjointStoreTail + 6) == 1
+                && createBody[disjointStoreTail + 10] == 1,
+                ref failures);
             Check("success ack shape", CommonPacketBodyBuilder.BuildSuccessAck().SequenceEqual(new byte[] { 1 }), ref failures);
             Check("same-area owner uid resolves",
                 runtime.TryGetStoreInArea(1, 2, 321, out var entered)

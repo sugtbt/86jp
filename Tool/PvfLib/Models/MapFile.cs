@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace PvfLib
@@ -80,6 +81,15 @@ namespace PvfLib
         public int Z { get; set; }
     }
 
+    public class MapNpcInfo
+    {
+        public int NpcId { get; set; }
+        public string Direction { get; set; }
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int Flags { get; set; }
+    }
+
     public enum ApcFaction
     {
         Character = 0,
@@ -150,6 +160,7 @@ namespace PvfLib
         public int EventMonsterPositionCount { get; set; } = -1;
         public List<EventMonsterPositionInfo> EventMonsterPositions { get; set; } = new List<EventMonsterPositionInfo>();
         public int NpcCount { get; set; } = -1;
+        public List<MapNpcInfo> Npcs { get; set; } = new List<MapNpcInfo>();
         public string MonsterSpecificAI { get; set; }
         public string Buff { get; set; }
         public List<AICharacterInfo> AICharacters { get; set; } = new List<AICharacterInfo>();
@@ -326,7 +337,9 @@ namespace PvfLib
                         map.EventMonsterPositions = ParseEventMonsterPositions(data);
                         break;
                     case "npc":
-                        map.NpcCount = CountNumberGroups(data, 4);
+                        var npcData = GetAllDataContent(node, content);
+                        map.NpcCount = CountNumberGroups(npcData, 4);
+                        map.Npcs = ParseNpcs(npcData);
                         break;
                     case "monster specific ai":
                         map.MonsterSpecificAI = data;
@@ -449,7 +462,7 @@ namespace PvfLib
                         map.PvpPracticeStartArea = ParseIntArray(data);
                         break;
                     case "virtual movable area":
-                        map.VirtualMovableArea = ParseIntArray(data);
+                        map.VirtualMovableArea = ParseIntArray(GetAllDataContent(node, content));
                         break;
                     case "town movable area":
                         map.TownMovableArea = ParseIntArray(data);
@@ -639,6 +652,13 @@ namespace PvfLib
             return numbers.Length / groupSize;
         }
 
+        private static string GetAllDataContent(ScriptNode node, string content)
+        {
+            return string.Join(" ", node.DataItems
+                .Select(item => item.GetContent(content).Trim())
+                .Where(item => !string.IsNullOrWhiteSpace(item)));
+        }
+
         private static List<AICharacterInfo> ParseAICharacters(string data)
         {
             var result = new List<AICharacterInfo>();
@@ -797,6 +817,42 @@ namespace PvfLib
                     X = values[index],
                     Y = values[index + 1],
                     Z = values[index + 2],
+                });
+            }
+
+            return result;
+        }
+
+        private static List<MapNpcInfo> ParseNpcs(string data)
+        {
+            var result = new List<MapNpcInfo>();
+            if (string.IsNullOrWhiteSpace(data))
+                return result;
+
+            var values = data.Split(
+                new[] { ' ', '\t', '\r', '\n' },
+                StringSplitOptions.RemoveEmptyEntries);
+            if (values.Length % 5 != 0)
+                return result;
+
+            for (var index = 0; index < values.Length; index += 5)
+            {
+                if (!int.TryParse(values[index], out var npcId)
+                    || !int.TryParse(values[index + 2], out var x)
+                    || !int.TryParse(values[index + 3], out var y)
+                    || !int.TryParse(values[index + 4], out var flags))
+                {
+                    result.Clear();
+                    return result;
+                }
+
+                result.Add(new MapNpcInfo
+                {
+                    NpcId = npcId,
+                    Direction = StripBacktick(values[index + 1]),
+                    X = x,
+                    Y = y,
+                    Flags = flags,
                 });
             }
 
