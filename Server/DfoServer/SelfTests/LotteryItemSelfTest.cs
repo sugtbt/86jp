@@ -107,9 +107,14 @@ namespace DfoServer.SelfTests
                 ref failures);
             var resetResponse = IncreaseChanceLotteryPacketBuilder.BuildResetResponse(0, true);
             Check("increase chance reset response layout",
-                resetResponse.Length == 17
-                && BitConverter.ToInt32(resetResponse, 4) == 0
-                && resetResponse[8] == 1,
+                 resetResponse.Length == 1
+                && resetResponse[0] == 1,
+                ref failures);
+            var failedResetResponse = IncreaseChanceLotteryPacketBuilder.BuildResetResponse(1, false);
+            Check("increase chance reset error response layout",
+                failedResetResponse.Length == 2
+                && failedResetResponse[0] == 0
+                && failedResetResponse[1] == 1,
                 ref failures);
             var emptyProgressBody = IncreaseChanceLotteryPacketBuilder.BuildAllState(
                 (LotteryProgressSnapshot)null);

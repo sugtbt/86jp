@@ -57,10 +57,11 @@ namespace DfoServer.Network.Builders
 
         public static byte[] BuildResetResponse(int result, bool showSuccess)
         {
-            var body = new byte[17];
-            WriteInt32(body, 4, result);
-            body[8] = showSuccess ? (byte)1 : (byte)0;
-            return body;
+            if (showSuccess && result == 0)
+                return new byte[] { 1 };
+
+            var errorCode = (byte)Math.Min(byte.MaxValue, Math.Max(1, result));
+            return new byte[] { 0, errorCode };
         }
 
         private static void WriteInt32(byte[] body, int offset, int value)
