@@ -93,7 +93,7 @@ namespace DfoServer.Network.Handlers
         // 构建某在线会话玩家的【完整 USERINFO subtype1】(0x0002 occ1, ~1458B: 属性/装备/技能)。
         // 同屏时仅推 subtype0(精简外观)客户端能渲染但判定"对方不在城镇/不可邀请"; self 进游戏收的是 subtype0+subtype1
         // 两份, 故给同屏他人补 subtype1。id 头(bytes 3-4)由 CharacterId 改写为 UserId 以对齐城镇名册。
-        private byte[] BuildFullUserInfoPacket(EnhancedClientSession s)
+        internal byte[] BuildFullUserInfoPacket(EnhancedClientSession s)
         {
             if (_selectDataSource == null || s?.Player == null || s.Player.CharacterId <= 0)
                 return null;
@@ -662,5 +662,19 @@ namespace DfoServer.Network.Handlers
                     session,
                     projectionGuard.EndedRun);
         }
+
+        internal static byte[] BuildUserLeavePacket(ushort userId)
+            => GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x0006,
+                TownAreaNotificationBuilder.BuildUserLeave(userId));
+
+        internal static bool IsTownArrivalStateEligible(
+            PlayerContext player)
+            => player != null
+               && player.TownPresenceReady
+               && player.CharacterId > 0
+               && player.CurrentRun == null
+               && player.UserState == 0x00;
     }
 }

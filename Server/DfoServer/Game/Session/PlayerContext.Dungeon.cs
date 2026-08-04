@@ -129,6 +129,12 @@ namespace DfoServer.Game.Session
         internal Game.Dungeon.LinkedDungeonEntryAuthorization
             PendingLinkedDungeonEntryAuthorization { get; set; }
 
+        // A party leader can drive a follower's return from the leader's
+        // connection while that follower is also processing its own EPLP.
+        // Serialize those transitions so an old return cannot clear a newer run.
+        internal SemaphoreSlim DungeonRunTransitionGate { get; } =
+            new SemaphoreSlim(1, 1);
+
         // ---- 跨局存活字段(刻意不随 run 重建) ----
 
         // 深渊华丽挑战 UI 开关: 在选图界面(进本之前)切换。
