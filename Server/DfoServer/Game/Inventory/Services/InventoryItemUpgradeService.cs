@@ -10,8 +10,6 @@ namespace DfoServer.Game.Inventory
     internal static class InventoryItemUpgradeService
     {
         private const int WeightScale = 100000;
-        private const int DefaultDestroyRewardItemId = 3037;
-        private const int DefaultDestroyRewardCount = 1;
         private static readonly ItemSlotRange QuickSlotRange = new ItemSlotRange(3, 8);
 
         internal static bool TryUpgradeItem(
@@ -185,6 +183,37 @@ namespace DfoServer.Game.Inventory
 
             var resultCode = success ? (byte)0 : (byte)Math.Max(1, effectivePenaltyType);
 
+            var destroyRewardRequests = new List<InventoryRewardGrantRequest>();
+            InventoryRewardGrantBatchPlan destroyRewardPlan = null;
+            if (destroyed)
+            {
+                foreach (var bonus in ItemUpgradeTableProvider.CalculateDestroyBonuses(
+                    tableKind,
+                    chance.TargetLevel,
+                    targetMetadata.Grade,
+                    targetMetadata.Rarity))
+                {
+                    if (bonus.HasValue)
+                    {
+                        destroyRewardRequests.Add(InventoryRewardGrantRequest.Create(
+                            bonus.ItemId,
+                            bonus.Count,
+                            ItemCreateReason.Unknown));
+                    }
+                }
+
+                if (destroyRewardRequests.Count > 0
+                    && (!InventoryRewardGrantService.TryPlanBatch(
+                            inventory,
+                            destroyRewardRequests,
+                            out destroyRewardPlan)
+                        || !destroyRewardPlan.Success))
+                {
+                    result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorInventoryFull);
+                    return false;
+                }
+            }
+
             if (!ConsumeMaterial(inventory, command.MaterialSlotIndex, material, context.Cost, out var materialUpdate))
             {
                 result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorInvalidMaterial);
@@ -232,28 +261,32 @@ namespace DfoServer.Game.Inventory
                 targetItemSnapshot = updatedTarget;
             }
 
-            ItemUpgradeSlotCount destroyRewardUpdate = null;
+            var destroyRewardItems = new List<ItemUpgradeRewardItem>();
             if (destroyed)
             {
-                if (!InventoryRewardGrantService.TryCreateAndInsert(
-                        inventory,
-                        DefaultDestroyRewardItemId,
-                        ItemCreateReason.Unknown,
-                        DefaultDestroyRewardCount,
-                        out var rewardGrant))
+                InventoryRewardGrantBatchResult rewardBatch = null;
+                if (destroyRewardRequests.Count > 0
+                    && (!InventoryRewardGrantService.TryApplyPreparedBatch(
+                            inventory,
+                            destroyRewardPlan,
+                            out rewardBatch)
+                        || !rewardBatch.Success
+                        || rewardBatch.Results.Count != destroyRewardRequests.Count))
                 {
                     result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorInventoryFull);
                     return false;
                 }
 
-                destroyRewardUpdate = CreateSlotCount(
-                    rewardGrant.SlotIndex,
-                    DefaultDestroyRewardItemId,
-                    rewardGrant.FinalCount);
-                if (materialUpdate != null
-                    && materialUpdate.ItemTemplateId == DefaultDestroyRewardItemId
-                    && materialUpdate.SlotIndex == destroyRewardUpdate.SlotIndex)
-                    materialUpdate = destroyRewardUpdate;
+                for (var index = 0; index < destroyRewardRequests.Count; index++)
+                {
+                    var rewardGrant = rewardBatch.Results[index];
+                    destroyRewardItems.Add(new ItemUpgradeRewardItem
+                    {
+                        SlotIndex = rewardGrant.SlotIndex,
+                        ItemTemplateId = rewardGrant.ItemTemplateId,
+                        Count = rewardGrant.GrantedCount,
+                    });
+                }
             }
 
             var upgradeResult = new ItemUpgradeResult
@@ -286,17 +319,10 @@ namespace DfoServer.Game.Inventory
                 AddRefreshSlot(upgradeResult.MainRefreshSlots, materialUpdate.SlotIndex);
             if (protectTicketUpdate != null)
                 AddRefreshSlot(upgradeResult.MainRefreshSlots, protectTicketUpdate.SlotIndex);
-            if (destroyRewardUpdate != null)
-                AddRefreshSlot(upgradeResult.MainRefreshSlots, destroyRewardUpdate.SlotIndex);
-
-            if (destroyRewardUpdate != null)
+            foreach (var reward in destroyRewardItems)
             {
-                upgradeResult.DestroyRewardItems.Add(new ItemUpgradeRewardItem
-                {
-                    SlotIndex = destroyRewardUpdate.SlotIndex,
-                    ItemTemplateId = DefaultDestroyRewardItemId,
-                    Count = DefaultDestroyRewardCount,
-                });
+                AddRefreshSlot(upgradeResult.MainRefreshSlots, reward.SlotIndex);
+                upgradeResult.DestroyRewardItems.Add(reward);
             }
 
             result = upgradeResult;
