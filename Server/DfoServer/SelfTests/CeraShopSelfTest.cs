@@ -7,6 +7,7 @@ using DfoServer.Game.Premium;
 using DfoServer.Game.Shop;
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
+using DfoServer.Network.Builders.CeraShop;
 using DfoServer.Network.Parsers.CeraShop;
 using Microsoft.Data.Sqlite;
 
@@ -66,6 +67,7 @@ namespace DfoServer.SelfTests
             Check("package purchase parses trailing coupon after component list", CheckPackageCouponPurchasePacket());
             Check("PVF coupon type is accepted", InventoryCeraShopRuntimeService.IsPurchaseCoupon(10007350));
             Check("ordinary item is rejected as coupon", !InventoryCeraShopRuntimeService.IsPurchaseCoupon(10000006));
+            Check("buy-only-cera item reports insufficient cera instead of inventory full", CheckBuyOnlyCeraErrorAck());
             Check("happy-token gift box grants account currency atomically without an inventory item", CheckHappyTokenCeraGiftBox());
             Check("60-day Devil Contract package activates all services without an inventory item", CheckDevilContractPackage());
             Check("mixed packages route all premium services without inventory slots", CheckMixedContractRewardRouting());
@@ -109,6 +111,24 @@ namespace DfoServer.SelfTests
                 && request.CouponSelected
                 && request.CouponItemId == 10007350
                 && request.CouponSlot == 68;
+        }
+
+        private static bool CheckBuyOnlyCeraErrorAck()
+        {
+            const int productId = 104267;
+            const int itemTemplateId = 10007282;
+            if (!CeraShopProductCatalog.TryResolve(productId, out var product)
+                || product?.ItemTemplateId != itemTemplateId
+                || !CeraShopProductCatalog.IsBuyOnlyCera(itemTemplateId))
+                return false;
+
+            var insufficientCera = CeraShopPurchaseAckBuilder.BuildError(
+                CeraShopPurchaseAckBuilder.ErrorCodeInsufficientCera);
+            var inventoryFull = CeraShopPurchaseAckBuilder.BuildError();
+            return insufficientCera.Length == inventoryFull.Length
+                && insufficientCera[0] == 0
+                && insufficientCera[1] == CeraShopPurchaseAckBuilder.ErrorCodeInsufficientCera
+                && inventoryFull[1] == CeraShopPurchaseAckBuilder.ErrorCodeInventoryFull;
         }
 
         private static bool CheckNameTagState()

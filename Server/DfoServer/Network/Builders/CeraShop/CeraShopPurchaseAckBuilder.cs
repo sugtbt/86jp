@@ -5,6 +5,10 @@ namespace DfoServer.Network.Builders.CeraShop
 {
     public static class CeraShopPurchaseAckBuilder
     {
+        // 客户端 sub_CD9490 以 body[1] 选择商城购买失败提示。
+        public const byte ErrorCodeInventoryFull = 4;
+        public const byte ErrorCodeInsufficientCera = 11;
+
         public static byte[] BuildSuccess(CeraShopPurchaseRequest request, InventoryMutationResult result)
         {
             int commodityNo = (request != null && request.CommodityNos.Count > 0) ? request.CommodityNos[0] : 0;
@@ -44,13 +48,18 @@ namespace DfoServer.Network.Builders.CeraShop
 
         public static byte[] BuildError(CeraShopPurchaseRequest request = null)
         {
+            return BuildError(ErrorCodeInventoryFull, request);
+        }
+
+        public static byte[] BuildError(byte errorCode, CeraShopPurchaseRequest request = null)
+        {
             // 失败回包: 客户端失败分支(sub_CD9490, a2=0)在 default 错误码下会继续从流里读
             //   var_805(U8) + 5个U32 (共21字节), 并在 CD9ADF 用 body[2..5]作category、body[6..9]作
             //   commodityNo 调 sub_72F060。若 body 太短(原来只有2字节), 这些字段读到下一个包的垃圾,
             //   被当索引 -> 越界崩。故补足 22 字节, 并令 body[6..9]=-1 (a3=-1 时 sub_72F060 立即返回, 不崩)。
             var writer = new GamePacketWriter();
             writer.WriteByte(0);   // [0]      result = 失败
-            writer.WriteByte(4);   // [1]      var_805 (错误标志, 保留原 4)
+            writer.WriteByte(errorCode); // [1]  var_805 (客户端错误码)
             writer.WriteInt32(-1); // [2..5]   body[2..5] (CD9ADF 作 category, -1=全搜索安全)
             writer.WriteInt32(-1); // [6..9]   body[6..9] (CD9ADF 作 commodityNo; =-1 时 sub_72F060 立即返回)
             writer.WriteInt32(0);  // [10..13]

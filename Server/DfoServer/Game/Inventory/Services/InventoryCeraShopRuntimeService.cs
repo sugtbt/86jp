@@ -10,6 +10,12 @@ using PremiumService = DfoServer.Game.Premium.PremiumService;
 
 namespace DfoServer.Game.Inventory
 {
+    internal enum CeraShopPurchaseFailure
+    {
+        Unknown,
+        InsufficientCera,
+    }
+
     internal static class InventoryCeraShopRuntimeService
     {
         private enum CeraPayMode
@@ -19,9 +25,16 @@ namespace DfoServer.Game.Inventory
             OnlyCeraPoint,
         }
 
+        private enum CeraShopPaymentFailure
+        {
+            None,
+            InsufficientCera,
+        }
+
         private struct CeraShopPaymentPlan
         {
             public bool Ok;
+            public CeraShopPaymentFailure Failure;
             public int NewGold;
             public int NewCera;
             public int NewTokenCera;
@@ -55,9 +68,11 @@ namespace DfoServer.Game.Inventory
             short purchaseCouponSlot,
             CeraShopPurchaseOptions purchaseOptions,
             out InventoryMutationResult result,
+            out CeraShopPurchaseFailure failure,
             out bool handled)
         {
             result = null;
+            failure = CeraShopPurchaseFailure.Unknown;
             handled = true;
 
             if (inventory == null || accountId <= 0 || productId <= 0)
@@ -213,7 +228,8 @@ namespace DfoServer.Game.Inventory
                 attributeValue,
                 purchaseOptions,
                 avatarDurationDays,
-                out result);
+                out result,
+                out failure);
         }
 
         internal static bool IsPurchaseCoupon(int itemTemplateId)
@@ -364,9 +380,11 @@ namespace DfoServer.Game.Inventory
             byte attributeValue,
             CeraShopPurchaseOptions purchaseOptions,
             int avatarDurationDays,
-            out InventoryMutationResult result)
+            out InventoryMutationResult result,
+            out CeraShopPurchaseFailure failure)
         {
             result = null;
+            failure = CeraShopPurchaseFailure.Unknown;
             var requests = BuildGrantRequests(
                 inventory.CharacterId,
                 product,
@@ -388,7 +406,11 @@ namespace DfoServer.Game.Inventory
             }
 
             if (!TrySpendPayment(inventory, totalGoldCost, totalCeraCost, ceraMode, out var payment))
+            {
+                if (payment.Failure == CeraShopPaymentFailure.InsufficientCera)
+                    failure = CeraShopPurchaseFailure.InsufficientCera;
                 return false;
+            }
 
             var costMutations = new List<InventoryMutationResult>();
             if (!ApplyInventoryCosts(inventory, totalGoldCost, couponId, costMutations))
@@ -1079,7 +1101,10 @@ namespace DfoServer.Game.Inventory
                     plan.SpentCera = spent;
                 }
                 if (remaining > 0)
+                {
+                    plan.Failure = CeraShopPaymentFailure.InsufficientCera;
                     return plan;
+                }
 
                 plan.NewHappyTokenCera = happy;
                 plan.NewTokenCera = token;

@@ -56,6 +56,7 @@ namespace DfoServer.Network.Handlers
             var contractItems = new List<(int itemTemplateId, int count)>();
             var skillTreeExpansionUnlocked = false;
             var runtimeInventoryDirty = false;
+            var failure = CeraShopPurchaseFailure.Unknown;
 
             for (var idx = 0; idx < request.CommodityNos.Count; idx++)
             {
@@ -77,6 +78,7 @@ namespace DfoServer.Network.Handlers
                 }
 
                 InventoryMutationResult result;
+                CeraShopPurchaseFailure itemFailure;
                 bool handledByRuntime;
                 bool ok;
                 lock (lease.SyncRoot)
@@ -92,6 +94,7 @@ namespace DfoServer.Network.Handlers
                         request.CouponSelected ? request.CouponSlot : (short)-1,
                         itemOptions,
                         out result,
+                        out itemFailure,
                         out handledByRuntime);
                 }
 
@@ -105,13 +108,18 @@ namespace DfoServer.Network.Handlers
                 }
                 else
                 {
+                    if (itemFailure == CeraShopPurchaseFailure.InsufficientCera)
+                        failure = itemFailure;
                     FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY: FAILED commodityNo={commodityNo} avatarChoices={itemOptions?.AvatarChoices.Count ?? 0} selections={itemOptions?.SelectionChoices.Count ?? 0}");
                 }
             }
 
             if (results.Count == 0)
             {
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0040, CeraShopPurchaseAckBuilder.BuildError(request)));
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x0040,
+                    CeraShopPurchaseAckBuilder.BuildError(ResolvePurchaseErrorCode(failure), request)));
                 return;
             }
 
@@ -224,6 +232,13 @@ namespace DfoServer.Network.Handlers
                 0x00,
                 0x000D,
                 ItemListPacketBuilder.BuildBody(characterId, accountId, listType)));
+        }
+
+        private static byte ResolvePurchaseErrorCode(CeraShopPurchaseFailure failure)
+        {
+            return failure == CeraShopPurchaseFailure.InsufficientCera
+                ? CeraShopPurchaseAckBuilder.ErrorCodeInsufficientCera
+                : CeraShopPurchaseAckBuilder.ErrorCodeInventoryFull;
         }
 
         private async Task SendQueuedItemListUpdates(
