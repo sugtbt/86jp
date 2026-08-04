@@ -1,5 +1,6 @@
 using DfoServer.Game.Accounts;
 using DfoServer.Game.Appearance;
+using DfoServer.Game.DailyReset;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
@@ -121,22 +122,23 @@ namespace DfoServer.Network.Handlers
                 InventoryPersistenceService.SaveDirty(lease);
         }
 
-        private void TryRegisterInventoryLease(
+        private InventoryLease TryRegisterInventoryLease(
             EnhancedClientSession session,
             CharacterRecord record,
             InventoryService inventory)
         {
             if (session == null || record == null || inventory == null)
-                return;
+                return null;
 
             try
             {
-                InventoryContext.Register(session.SessionId, record.CharacterId, inventory);
+                return InventoryContext.Register(session.SessionId, record.CharacterId, inventory);
             }
             catch (Exception ex)
             {
                 FileLogger.Log(
                     $"[{ProtocolName}] inventory lease register failed cid={record.CharacterId} aid={inventory.AccountId}: {ex}");
+                return null;
             }
         }
 
@@ -295,6 +297,41 @@ namespace DfoServer.Network.Handlers
 
             foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(_selectCharacterDataSource, ownerCharId, ownerAcctId))
                 await session.SendPacketAsync(packet);
+
+            if (InventoryContext.TryGetLease(ownerCharId, out var inventoryLease)
+                && inventoryLease.IsOwnedBy(session.SessionId))
+            {
+                if (DailyRefillItemService.TryApply(inventoryLease, out var dailyRefillGrants))
+                {
+                    foreach (var group in dailyRefillGrants
+                        .Where(item => item.SlotIndex >= 0)
+                        .GroupBy(item => item.ListType))
+                    {
+                        await InventoryRefreshSender.SendOnlineUpdateItemList(
+                            session,
+                            group.Key,
+                            group.Select(item => item.SlotIndex));
+                    }
+
+                    if (dailyRefillGrants.Count > 0)
+                        FileLogger.Log(
+                            $"[{ProtocolName}] DAILY_REFILL item updates cid={ownerCharId} count={dailyRefillGrants.Count}");
+                }
+                else
+                {
+                    // The database transaction rolled back. Discard any earlier in-memory
+                    // grants from the same batch before the lease can be persisted later.
+                    inventoryLease.Inventory.ClearDirtyState();
+                    var restoredInventory = TryLoadInventoryForLease(ownerCharId, ownerAcctId);
+                    if (restoredInventory != null)
+                        TryRegisterInventoryLease(
+                            session,
+                            _characterRepository.GetById(ownerCharId),
+                            restoredInventory);
+                    FileLogger.Log(
+                        $"[{ProtocolName}] daily refill rolled back and inventory reloaded cid={ownerCharId}");
+                }
+            }
 
             var visibilityBits = session.Player.Subtype0Tail?.UserStateBits ?? (byte)3;
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(

@@ -70,6 +70,7 @@ namespace DfoServer
             ("--selftest-pet-hatch", SelfTests.PetHatchSelfTest.Run),
             ("--selftest-gold-limit", SelfTests.GoldLimitSelfTest.Run),
             ("--selftest-daily-reset", SelfTests.DailyResetSelfTest.Run),
+            ("--selftest-daily-refill-item", SelfTests.DailyRefillItemSelfTest.Run),
             ("--selftest-revive-coin", SelfTests.ReviveCoinSelfTest.Run),
             ("--selftest-clock", SelfTests.ClockSelfTest.Run),
             ("--selftest-rental-info", SelfTests.RentalInfoSelfTest.Run),
