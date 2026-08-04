@@ -628,6 +628,9 @@ namespace DfoServer.Network
             d[0x002A] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
             d[0x0084] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
             d[0x00ED] = _townHandler.Handle_ENUM_CMDPACKET_TELEPORT;
+			d[(ushort)CmdPacketType.PARTY_TELEPORT] = _townHandler.Handle_ENUM_CMDPACKET_PARTY_TELEPORT;
+            d[(ushort)CmdPacketType.PARTY_TELEPORT_CONFIRM] =
+                _townHandler.Handle_ENUM_CMDPACKET_PARTY_TELEPORT_CONFIRM;
         }
 
         private void RegisterSettingsHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)

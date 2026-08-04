@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers
 {
-    public sealed class TownHandler
+    public sealed partial class TownHandler
     {
         private static readonly TimeSpan PositionPersistThrottle = TimeSpan.FromSeconds(5);
 
