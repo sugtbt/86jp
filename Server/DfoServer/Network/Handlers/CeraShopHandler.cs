@@ -63,9 +63,11 @@ namespace DfoServer.Network.Handlers
                 var attrValue = idx < request.AttributeValues.Count ? request.AttributeValues[idx] : (byte)0;
                 var itemOptions = idx < request.ItemOptions.Count ? request.ItemOptions[idx] : null;
 
-                var (dcOk, dcResult) = await Game.Premium.PremiumService.TryBuyDevilContractSlot(
+                var (dcOk, dcResult) = await Game.Premium.PremiumService.TryBuyDevilContract(
                     session,
                     commodityNo,
+                    request.PaymentMode,
+                    request.CouponSelected,
                     _sqliteSelectCharacterDataSource);
                 if (dcOk)
                 {

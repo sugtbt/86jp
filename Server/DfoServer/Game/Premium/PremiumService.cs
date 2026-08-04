@@ -18,8 +18,36 @@ namespace DfoServer.Game.Premium
 
         public static bool IsContractItem(int itemTemplateId)
         {
-            return PremiumCatalog.Load().TryGetValue(itemTemplateId, out var pt, out var dd)
-                && pt > 0 && dd > 0;
+            return TryResolveContractItem(itemTemplateId, out _, out _);
+        }
+
+        internal static bool TryResolveContractItem(
+            int itemTemplateId,
+            out int premiumType,
+            out int durationDays)
+        {
+            premiumType = 0;
+            durationDays = 0;
+            if (itemTemplateId <= 0)
+                return false;
+
+            if (PremiumCatalog.Load().TryGetValue(itemTemplateId, out premiumType, out durationDays)
+                && premiumType > 0
+                && durationDays > 0)
+                return true;
+
+            if (DevilContractCatalog.Load().TryResolveServiceItem(
+                    itemTemplateId,
+                    out var slotIndex,
+                    out durationDays))
+            {
+                premiumType = DevilContractCatalog.SlotToPremiumType(slotIndex);
+                return true;
+            }
+
+            premiumType = 0;
+            durationDays = 0;
+            return false;
         }
 
         public static async Task ActivateAndNotify(
@@ -48,9 +76,7 @@ namespace DfoServer.Game.Premium
                         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                         foreach (var (itemTemplateId, count) in items)
                         {
-                            if (!PremiumCatalog.Load().TryGetValue(itemTemplateId, out var premiumType, out var durationDays))
-                                continue;
-                            if (premiumType <= 0 || durationDays <= 0)
+                            if (!TryResolveContractItem(itemTemplateId, out var premiumType, out var durationDays))
                                 continue;
 
                             var effectiveCount = Math.Max(1, count);
@@ -116,79 +142,100 @@ namespace DfoServer.Game.Premium
             }
         }
 
-        public static async Task<(bool success, InventoryMutationResult result)> TryBuyDevilContractSlot(
+        public static async Task<(bool success, InventoryMutationResult result)> TryBuyDevilContract(
             EnhancedClientSession session,
             int commodityNo,
+            int paymentMode,
+            bool couponSelected,
             ISelectCharacterDataSource dataSource = null)
         {
             var accountId = session?.Account?.AccountId ?? 0;
-            if (accountId <= 0)
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (accountId <= 0 || characterId <= 0 || paymentMode != 0 || couponSelected)
                 return (false, null);
 
             var catalog = DevilContractCatalog.Load();
-            if (!catalog.TryGetSlot(commodityNo, out var slotIndex, out var durationDays, out var ceraPrice))
+            if (!catalog.TryGetPurchase(commodityNo, out var purchase)
+                || !catalog.TryResolveServiceGrants(purchase, out var grants))
                 return (false, null);
 
-            var connStr = Infrastructure.SqliteDatabaseBootstrap.Initialize(
-                Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var duration = (long)durationDays * 86400;
-            var premiumType = DevilContractCatalog.SlotToPremiumType(slotIndex);
+            DevilContractPurchaseApplication application = null;
+            if (!InventoryCeraShopRuntimeService.TrySpendCeraPaymentAndApplyDbAction(
+                    null,
+                    characterId,
+                    purchase.ItemTemplateId,
+                    purchase.CeraPrice,
+                    (connection, transaction) => TryActivateDevilContractServices(
+                        connection,
+                        transaction,
+                        accountId,
+                        grants,
+                        now,
+                        out application),
+                    out var payment))
+                return (false, null);
 
-            int updatedCera, tokenCera, happyTokenCera;
-            long remaining;
-            using (var conn = new SqliteConnection(connStr))
-            {
-                conn.Open();
-
-                int cid = 0;
-                using (var q = conn.CreateCommand())
-                {
-                    q.CommandText = "SELECT character_id FROM characters WHERE account_id=@aid LIMIT 1;";
-                    q.Parameters.AddWithValue("@aid", accountId);
-                    var val = q.ExecuteScalar();
-                    if (val != null && val != DBNull.Value)
-                        cid = Convert.ToInt32(val);
-                }
-                if (cid <= 0) return (false, null);
-
-                using (var tx = conn.BeginTransaction())
-                {
-                    var wallet = CurrencyService.LoadWallet(conn, tx, cid);
-                    if (!CurrencyService.TrySpendCera(conn, tx, cid, ceraPrice))
-                    {
-                        FileLogger.Log($"[PremiumService] Devil slot {slotIndex} rejected: cera {wallet.Cera} < {ceraPrice}");
-                        return (false, null);
-                    }
-                    updatedCera = wallet.Cera - ceraPrice;
-                    tokenCera = wallet.TokenCera;
-                    happyTokenCera = wallet.HappyTokenCera;
-
-                    var newExpire = UpsertPremiumExpire(conn, tx, accountId, premiumType, now, duration);
-                    remaining = newExpire - now;
-                    tx.Commit();
-                }
-
-                FileLogger.Log($"[PremiumService] Devil slot {slotIndex} activated: account={accountId} days={durationDays} cera={updatedCera}");
-            }
+            FileLogger.Log($"[PremiumService] Devil Contract service package activated: account={accountId} item=0x{purchase.ItemTemplateId:X8} services={application.Activations.Count}");
 
             if (session != null)
             {
-                var body = BuildCeraSpecialItemNotification(premiumType, remaining);
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0042, body));
+                foreach (var activation in application.Activations)
+                {
+                    var body = BuildCeraSpecialItemNotification(activation.PremiumType, activation.RemainingSeconds);
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0042, body));
+                }
                 await SendPremiumServiceRefresh(session, accountId, dataSource);
             }
 
             var result = new InventoryMutationResult
             {
                 ConsumedOnPurchase = true,
-                UpdatedCoin = updatedCera,
-                UpdatedTokenCera = tokenCera,
-                UpdatedHappyTokenCera = happyTokenCera,
+                UpdatedCoin = payment.NewCera,
+                UpdatedTokenCera = payment.NewTokenCera,
+                UpdatedHappyTokenCera = payment.NewHappyTokenCera,
                 RequestedCount = 1,
                 AppliedCount = 1,
             };
             return (true, result);
+        }
+
+        internal static bool TryActivateDevilContractServices(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int accountId,
+            IReadOnlyList<DevilContractServiceGrant> grants,
+            long now,
+            out DevilContractPurchaseApplication application)
+        {
+            application = null;
+            if (connection == null
+                || transaction == null
+                || accountId <= 0
+                || grants == null
+                || grants.Count == 0)
+                return false;
+
+            application = new DevilContractPurchaseApplication();
+            foreach (var grant in grants)
+            {
+                if (grant == null
+                    || grant.SlotIndex < 0
+                    || grant.SlotIndex >= DevilContractCatalog.SlotCount
+                    || grant.DurationDays <= 0)
+                    return false;
+
+                var duration = (long)grant.DurationDays * 86400;
+                var premiumType = DevilContractCatalog.SlotToPremiumType(grant.SlotIndex);
+                var newExpire = UpsertPremiumExpire(connection, transaction, accountId, premiumType, now, duration);
+                application.Activations.Add(new DevilContractActivation
+                {
+                    PremiumType = premiumType,
+                    RemainingSeconds = newExpire - now,
+                });
+            }
+
+            return true;
         }
 
         public static byte[] BuildPremiumServiceData(
@@ -205,13 +252,13 @@ namespace DfoServer.Game.Premium
                     cmd.CommandText = "SELECT premium_type, end_time FROM account_premiums WHERE account_id=@aid AND premium_type>=@lo AND premium_type<@hi;";
                     cmd.Parameters.AddWithValue("@aid", accountId);
                     cmd.Parameters.AddWithValue("@lo", DevilContractCatalog.SlotPremiumTypeBase);
-                    cmd.Parameters.AddWithValue("@hi", DevilContractCatalog.SlotPremiumTypeBase + 8);
+                    cmd.Parameters.AddWithValue("@hi", DevilContractCatalog.SlotPremiumTypeBase + DevilContractCatalog.SlotCount);
                     using (var reader = cmd.ExecuteReader())
                     {
                         while (reader.Read())
                         {
                             var slot = DevilContractCatalog.PremiumTypeToSlot(reader.GetInt32(0));
-                            if (slot < 0 || slot >= 8) continue;
+                            if (slot < 0 || slot >= DevilContractCatalog.SlotCount) continue;
                             var expire = reader.GetInt64(1);
                             var expireOffset = PremiumServiceEntryExpireBase + slot * PremiumServiceEntryStride;
                             Buffer.BlockCopy(BitConverter.GetBytes((int)Math.Min(expire, int.MaxValue)), 0, data, expireOffset, 4);
@@ -336,5 +383,17 @@ DO UPDATE SET end_time = @expire, updated_at = CURRENT_TIMESTAMP;";
 
             Buffer.BlockCopy(BitConverter.GetBytes(value), 0, data, offset, 4);
         }
+    }
+
+    internal sealed class DevilContractPurchaseApplication
+    {
+        public List<DevilContractActivation> Activations { get; } = new List<DevilContractActivation>();
+    }
+
+    internal sealed class DevilContractActivation
+    {
+        public int PremiumType { get; set; }
+
+        public long RemainingSeconds { get; set; }
     }
 }

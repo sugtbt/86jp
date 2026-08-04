@@ -1,8 +1,11 @@
 using System;
 using System.IO;
+using System.Linq;
 using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Premium;
 using DfoServer.Game.Shop;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Parsers.CeraShop;
 using Microsoft.Data.Sqlite;
@@ -64,6 +67,8 @@ namespace DfoServer.SelfTests
             Check("PVF coupon type is accepted", InventoryCeraShopRuntimeService.IsPurchaseCoupon(10007350));
             Check("ordinary item is rejected as coupon", !InventoryCeraShopRuntimeService.IsPurchaseCoupon(10000006));
             Check("happy-token gift box grants account currency atomically without an inventory item", CheckHappyTokenCeraGiftBox());
+            Check("60-day Devil Contract package activates all services without an inventory item", CheckDevilContractPackage());
+            Check("mixed packages route all premium services without inventory slots", CheckMixedContractRewardRouting());
 
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;
@@ -275,6 +280,180 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
                             characterId,
                             InventoryListType.Main,
                             sourceSlot) == null;
+                }
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                foreach (var path in new[] { databasePath, databasePath + "-wal", databasePath + "-shm" })
+                {
+                    try
+                    {
+                        if (File.Exists(path))
+                            File.Delete(path);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+
+        private static bool CheckMixedContractRewardRouting()
+        {
+            const int mixedPackageProductId = 104008;
+            const int mixedPackageItemId = 2682994;
+            const int includedPremiumItemId = 2660411;
+            const int devilServiceItemId = 2681934;
+
+            if (!CeraShopProductCatalog.TryResolve(mixedPackageProductId, out var product)
+                || product == null
+                || product.ItemTemplateId != mixedPackageItemId)
+                return false;
+
+            var mixedPackage = StackableItemProvider.Load(mixedPackageItemId);
+            if (mixedPackage == null
+                || !mixedPackage.PackageRewards.Any(reward => reward?.ItemId == includedPremiumItemId)
+                || !mixedPackage.PackageRewards.Any(reward => reward != null && reward.ItemId != includedPremiumItemId))
+                return false;
+
+            if (!PremiumService.TryResolveContractItem(includedPremiumItemId, out var includedType, out var includedDays)
+                || includedType != 84
+                || includedDays != 15
+                || !PremiumService.TryResolveContractItem(devilServiceItemId, out var devilType, out var devilDays)
+                || devilType != DevilContractCatalog.SlotToPremiumType(0)
+                || devilDays != 30)
+                return false;
+
+            var inventory = new InventoryService(903031, 903032);
+            if (!InventoryRewardGrantService.TryPlanBatch(
+                    inventory,
+                    new[]
+                    {
+                        InventoryRewardGrantRequest.Create(
+                            includedPremiumItemId,
+                            1,
+                            ItemCreateReason.MallPurchase),
+                        InventoryRewardGrantRequest.Create(
+                            devilServiceItemId,
+                            1,
+                            ItemCreateReason.MallPurchase),
+                    },
+                    out var plan)
+                || plan == null
+                || !plan.Success
+                || plan.Entries.Count != 2)
+                return false;
+
+            return plan.Entries.All(entry => entry.Kind == InventoryRewardGrantKind.Premium);
+        }
+
+        private static bool CheckDevilContractPackage()
+        {
+            const int accountId = 903021;
+            const int characterId = 903022;
+            const int commodityNo = 100625;
+            const int expectedItemId = 2682006;
+            const int expectedCeraPrice = 3880;
+            const int expectedDurationDays = 60;
+            const int initialCera = 100;
+            const int initialTokenCera = 5000;
+            const long now = 1720000000;
+            var databasePath = Path.Combine(
+                Path.GetTempPath(),
+                "cerashop-devil-contract-" + Guid.NewGuid().ToString("N") + ".db");
+
+            try
+            {
+                var catalog = DevilContractCatalog.Parse(PvfArchiveAccessor.ReadText("etc/cerashop.etc"));
+                if (!catalog.TryGetPurchase(commodityNo, out var purchase)
+                    || !purchase.IsPackage
+                    || purchase.ItemTemplateId != expectedItemId
+                    || purchase.CeraPrice != expectedCeraPrice
+                    || purchase.DurationDays != expectedDurationDays)
+                    return false;
+                if (!catalog.TryResolveServiceGrants(purchase, out var grants)
+                    || grants.Count != DevilContractCatalog.SlotCount)
+                    return false;
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    using (var transaction = connection.BeginTransaction())
+                    {
+                        using (var command = connection.CreateCommand())
+                        {
+                            command.Transaction = transaction;
+                            command.CommandText = @"
+INSERT INTO accounts(account_id, m_id, password_hash, cera, token_cera)
+VALUES(@accountId, 'cerashop-devil-contract-selftest', '', @cera, @tokenCera);
+INSERT INTO characters(character_id, account_id, name)
+VALUES(@characterId, @accountId, 'cerashop-devil-contract');";
+                            command.Parameters.AddWithValue("@accountId", accountId);
+                            command.Parameters.AddWithValue("@characterId", characterId);
+                            command.Parameters.AddWithValue("@cera", initialCera);
+                            command.Parameters.AddWithValue("@tokenCera", initialTokenCera);
+                            command.ExecuteNonQuery();
+                        }
+                        transaction.Commit();
+                    }
+
+                    DevilContractPurchaseApplication application = null;
+                    if (!InventoryCeraShopRuntimeService.TrySpendCeraPaymentAndApplyDbAction(
+                            connectionString,
+                            characterId,
+                            purchase.ItemTemplateId,
+                            purchase.CeraPrice,
+                            (paymentConnection, paymentTransaction) =>
+                                PremiumService.TryActivateDevilContractServices(
+                                    paymentConnection,
+                                    paymentTransaction,
+                                    accountId,
+                                    grants,
+                                    now,
+                                    out application),
+                            out var payment)
+                        || payment.NewCera != initialCera
+                        || payment.NewTokenCera != initialTokenCera - expectedCeraPrice
+                        || application.Activations.Count != DevilContractCatalog.SlotCount)
+                        return false;
+
+                    for (var slotIndex = 0; slotIndex < DevilContractCatalog.SlotCount; slotIndex++)
+                    {
+                        var activation = application.Activations[slotIndex];
+                        if (activation.PremiumType != DevilContractCatalog.SlotToPremiumType(slotIndex)
+                            || activation.RemainingSeconds != expectedDurationDays * 86400L)
+                            return false;
+                    }
+
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+SELECT premium_type, end_time
+FROM account_premiums
+WHERE account_id = @accountId
+ORDER BY premium_type;";
+                        command.Parameters.AddWithValue("@accountId", accountId);
+                        using (var reader = command.ExecuteReader())
+                        {
+                            for (var slotIndex = 0; slotIndex < DevilContractCatalog.SlotCount; slotIndex++)
+                            {
+                                if (!reader.Read()
+                                    || reader.GetInt32(0) != DevilContractCatalog.SlotToPremiumType(slotIndex)
+                                    || reader.GetInt64(1) != now + expectedDurationDays * 86400L)
+                                    return false;
+                            }
+
+                            if (reader.Read())
+                                return false;
+                        }
+                    }
+
+                    var wallet = CurrencyService.LoadWallet(connection, null, characterId);
+                    return wallet.Cera == initialCera
+                        && wallet.TokenCera == initialTokenCera - expectedCeraPrice;
                 }
             }
             finally

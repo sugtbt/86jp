@@ -903,42 +903,16 @@ namespace DfoServer.Game.Inventory
             out CeraShopPaymentPlan plan)
         {
             plan = default;
-            try
-            {
-                var connectionString = SqliteDatabaseBootstrap.Initialize(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath);
-                using (var connection = new SqliteConnection(connectionString))
-                {
-                    connection.Open();
-                    using (var transaction = connection.BeginTransaction())
-                    {
-                        var wallet = CurrencyService.LoadWallet(connection, transaction, inventory.CharacterId);
-                        wallet.Gold = inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart);
-                        plan = ComputePayment(wallet, goldCost, ceraCost, mode);
-                        if (!plan.Ok)
-                            return false;
-
-                        if (plan.SpentHappyTokenCera > 0
-                            && !CurrencyService.TrySpendHappyTokenCera(connection, transaction, inventory.CharacterId, plan.SpentHappyTokenCera))
-                            return false;
-                        if (plan.SpentTokenCera > 0
-                            && !CurrencyService.TrySpendTokenCera(connection, transaction, inventory.CharacterId, plan.SpentTokenCera))
-                            return false;
-                        if (plan.SpentCera > 0
-                            && !CurrencyService.TrySpendCera(connection, transaction, inventory.CharacterId, plan.SpentCera))
-                            return false;
-
-                        transaction.Commit();
-                        return true;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[CeraShopRuntime] payment failed cid={inventory?.CharacterId ?? 0} gold={goldCost} cera={ceraCost}: {ex.Message}");
-                return false;
-            }
+            return inventory != null
+                && TrySpendPaymentAndApplyDbAction(
+                    inventory.CharacterId,
+                    inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart),
+                    null,
+                    goldCost,
+                    ceraCost,
+                    mode,
+                    null,
+                    out plan);
         }
 
         private static bool TrySpendPaymentAndApplyDbAction(
@@ -950,26 +924,78 @@ namespace DfoServer.Game.Inventory
             out CeraShopPaymentPlan plan)
         {
             plan = default;
+            return inventory != null
+                && TrySpendPaymentAndApplyDbAction(
+                    inventory.CharacterId,
+                    inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart),
+                    null,
+                    goldCost,
+                    ceraCost,
+                    mode,
+                    action,
+                    out plan);
+        }
+
+        internal static bool TrySpendCeraPaymentAndApplyDbAction(
+            string connectionString,
+            int characterId,
+            int itemTemplateId,
+            int ceraCost,
+            Func<SqliteConnection, SqliteTransaction, bool> action,
+            out CeraShopPaymentResult result)
+        {
+            result = null;
+            if (characterId <= 0 || itemTemplateId <= 0 || ceraCost < 0)
+                return false;
+
+            if (!TrySpendPaymentAndApplyDbAction(
+                    characterId,
+                    0,
+                    connectionString,
+                    0,
+                    ceraCost,
+                    ResolveCeraPayMode(itemTemplateId),
+                    action,
+                    out var payment))
+                return false;
+
+            result = new CeraShopPaymentResult
+            {
+                NewCera = payment.NewCera,
+                NewTokenCera = payment.NewTokenCera,
+                NewHappyTokenCera = payment.NewHappyTokenCera,
+            };
+            return true;
+        }
+
+        private static bool TrySpendPaymentAndApplyDbAction(
+            int characterId,
+            int currentGold,
+            string connectionString,
+            int goldCost,
+            int ceraCost,
+            CeraPayMode mode,
+            Func<SqliteConnection, SqliteTransaction, bool> action,
+            out CeraShopPaymentPlan plan)
+        {
+            plan = default;
             try
             {
-                var connectionString = SqliteDatabaseBootstrap.Initialize(
-                    ServerPaths.DatabasePath,
-                    ServerPaths.SchemaFilePath);
-                using (var connection = new SqliteConnection(connectionString))
+                var resolvedConnectionString = connectionString
+                    ?? SqliteDatabaseBootstrap.Initialize(
+                        ServerPaths.DatabasePath,
+                        ServerPaths.SchemaFilePath);
+                using (var connection = new SqliteConnection(resolvedConnectionString))
                 {
                     connection.Open();
                     using (var transaction = connection.BeginTransaction())
                     {
-                        var wallet = CurrencyService.LoadWallet(connection, transaction, inventory.CharacterId);
-                        wallet.Gold = inventory.CountMainItem(InventoryService.MainVirtualCurrencySlotStart);
+                        var wallet = CurrencyService.LoadWallet(connection, transaction, characterId);
+                        wallet.Gold = currentGold;
                         plan = ComputePayment(wallet, goldCost, ceraCost, mode);
-                        if (!plan.Ok)
-                            return false;
-
-                        if (action != null && !action(connection, transaction))
-                            return false;
-
-                        if (!ApplyCeraPayment(connection, transaction, inventory.CharacterId, plan))
+                        if (!plan.Ok
+                            || (action != null && !action(connection, transaction))
+                            || !ApplyCeraPayment(connection, transaction, characterId, plan))
                             return false;
 
                         transaction.Commit();
@@ -979,7 +1005,7 @@ namespace DfoServer.Game.Inventory
             }
             catch (Exception ex)
             {
-                FileLogger.Log($"[CeraShopRuntime] special purchase payment failed cid={inventory?.CharacterId ?? 0} gold={goldCost} cera={ceraCost}: {ex.Message}");
+                FileLogger.Log($"[CeraShopRuntime] payment action failed cid={characterId} gold={goldCost} cera={ceraCost}: {ex.Message}");
                 return false;
             }
         }
@@ -1234,5 +1260,14 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
+    }
+
+    internal sealed class CeraShopPaymentResult
+    {
+        public int NewCera { get; set; }
+
+        public int NewTokenCera { get; set; }
+
+        public int NewHappyTokenCera { get; set; }
     }
 }

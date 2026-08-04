@@ -67,9 +67,11 @@ namespace DfoServer.Game.Shop
             ParseStandardSection(content, "regular package", 11, entries);
             // [community package]: 与 [package] 同为 stride=11(价格在 col4), 收录婚庆/社区礼包
             // (如 结婚戒指礼包 102317/102318)。缺此解析同 [regular package] 老 bug: TryResolve product not found → 购买失败。
-            // 注: [charac premium package](魔王契约30/60天套餐)刻意不解析 —— 其礼盒自动开出的
-            // 8 个契约子物品没有激活链(死道具), 在激活链补全前保持"不可购买"以免玩家花点券买废品。
+            // 角色服务商品通常由专用服务路径处理；保留目录项以便混合礼包回落到通用奖励链。
             ParseStandardSection(content, "community package", 11, entries);
+            // 角色服务段使用独立字段布局；保留普通目录项可避免混合服务礼包回落时丢失奖励。
+            ParseSelectableCharacterPremiumSection(content, entries);
+            ParseCharacterPremiumPackageSection(content, entries);
             ParseAvatarSection(content, entries);
 
             var data = new CatalogData
@@ -167,6 +169,56 @@ namespace DfoServer.Game.Shop
                     Count = count,
                     CoinPrice = Math.Max(0, coinPrice),
                     Section = "avatar",
+                };
+            }
+        }
+
+        private static void ParseSelectableCharacterPremiumSection(
+            string content,
+            Dictionary<int, CeraShopProductEntry> entries)
+        {
+            var tokens = TokenizeSection(content, "selectable character premium");
+            for (var i = 0; i + 8 < tokens.Count; i += 9)
+            {
+                if (!TryParseInt(tokens[i], out var productId) || productId <= 0
+                    || !TryParseInt(tokens[i + 1], out var itemTemplateId) || itemTemplateId <= 0)
+                    continue;
+
+                TryParseInt(tokens[i + 3], out var durationDays);
+                TryParseInt(tokens[i + 5], out var coinPrice);
+                entries[productId] = new CeraShopProductEntry
+                {
+                    ProductId = productId,
+                    ItemTemplateId = itemTemplateId,
+                    Count = 1,
+                    CoinPrice = Math.Max(0, coinPrice),
+                    Section = "selectable character premium",
+                    DurationDays = Math.Max(0, durationDays),
+                };
+            }
+        }
+
+        private static void ParseCharacterPremiumPackageSection(
+            string content,
+            Dictionary<int, CeraShopProductEntry> entries)
+        {
+            var tokens = TokenizeSection(content, "charac premium package");
+            for (var i = 0; i + 8 < tokens.Count; i += 9)
+            {
+                if (!TryParseInt(tokens[i], out var productId) || productId <= 0
+                    || !TryParseInt(tokens[i + 1], out var itemTemplateId) || itemTemplateId <= 0)
+                    continue;
+
+                TryParseInt(tokens[i + 2], out var coinPrice);
+                TryParseInt(tokens[i + 7], out var durationDays);
+                entries[productId] = new CeraShopProductEntry
+                {
+                    ProductId = productId,
+                    ItemTemplateId = itemTemplateId,
+                    Count = 1,
+                    CoinPrice = Math.Max(0, coinPrice),
+                    Section = "charac premium package",
+                    DurationDays = Math.Max(0, durationDays),
                 };
             }
         }
