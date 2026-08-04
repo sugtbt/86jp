@@ -455,7 +455,7 @@ PRAGMA user_version=40;";
                         Scalar(connection, "SELECT COUNT(*) FROM mailbox_messages;") == 1
                         && Scalar(connection, "SELECT COUNT(*) FROM mailbox_recipients;") == 1
                         && Scalar(connection, "SELECT COUNT(*) FROM mailbox_attachments;") == 1
-                        && Scalar(connection, "PRAGMA user_version;") == 50
+                        && Scalar(connection, "PRAGMA user_version;") == 52
                         && Scalar(connection, "SELECT COUNT(*) FROM pragma_foreign_key_check;") == 0);
                 }
             }

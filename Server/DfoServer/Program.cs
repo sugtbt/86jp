@@ -2,7 +2,9 @@ using DfoServer.Network;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace DfoServer
 {
@@ -44,6 +46,7 @@ namespace DfoServer
             ("--selftest-dungeon-npc-item-drop", SelfTests.DungeonNpcItemDropSelfTest.Run),
             ("--selftest-quest-dungeon-drop", SelfTests.QuestDungeonDropSelfTest.Run),
             ("--selftest-character-option", SelfTests.CharacterOptionSelfTest.Run),
+            ("--selftest-seed-character-protocol", SelfTests.SeedCharacterProtocolSelfTest.Run),
             ("--selftest-expert-contract-skill", SelfTests.ExpertContractSkillSelfTest.Run),
             ("--selftest-expert-job-store", SelfTests.ExpertJobStoreSelfTest.Run),
             ("--selftest-expert-job-giveup", SelfTests.ExpertJobGiveupSelfTest.Run),
@@ -76,6 +79,13 @@ namespace DfoServer
             ("--selftest-honor-level", SelfTests.HonorLevelSelfTest.Run),
             ("--selftest-character-experience-progression", SelfTests.CharacterExperienceProgressionSelfTest.Run),
             ("--selftest-party", SelfTests.PartySelfTest.Run),
+            ("--selftest-party-command-isolation", SelfTests.PartyCommandIsolationSelfTest.Run),
+            ("--selftest-party-udp-relay-core", SelfTests.PartyUdpRelayCoreSelfTest.Run),
+            ("--selftest-other-user-info", SelfTests.OtherUserInfoSelfTest.Run),
+            ("--selftest-free-duel-channel", SelfTests.FreeDuelChannelSelfTest.Run),
+            ("--selftest-free-duel-room-core", SelfTests.FreeDuelRoomCoreSelfTest.Run),
+            ("--selftest-free-duel-selection-wiring", SelfTests.FreeDuelSelectionWiringSelfTest.Run),
+            ("--selftest-pvp-skill-isolation", SelfTests.PvpSkillIsolationSelfTest.Run),
             ("--selftest-dungeon-combat-party", SelfTests.DungeonCombatPartySelfTest.Run),
             ("--selftest-udp-relay", SelfTests.UdpRelaySelfTest.Run),
             ("--selftest-growth-capsule", SelfTests.GrowthCapsuleSelfTest.Run),
@@ -189,6 +199,60 @@ namespace DfoServer
             }
         }
 
+        private static PartyUdpRelay CreatePartyUdpRelay(string scope)
+        {
+            var isPvp = string.Equals(
+                scope,
+                "pvp",
+                StringComparison.OrdinalIgnoreCase);
+            var enabled = isPvp
+                ? GameNetworkConfig.PvpUdpRelayEnabled
+                : GameNetworkConfig.UdpRelayEnabled;
+            var gateName = isPvp ? "DFO_PVP_UDP_RELAY" : "DFO_UDP_RELAY";
+            FileLogger.Log(
+                $"[PartyUdpRelay scope={scope}] startup gate " +
+                $"{gateName}={(enabled ? 1 : 0)}");
+            if (!enabled)
+                return null;
+
+            if (GameNetworkConfig.ProxyMode)
+            {
+                FileLogger.Log(
+                    $"[PartyUdpRelay scope={scope}] disabled: " +
+                    "proxy mode is not supported");
+                return null;
+            }
+
+            if (!GameNetworkConfig.UdpRelayPublicIpConfigured ||
+                !System.Net.IPAddress.TryParse(
+                    GameNetworkConfig.UdpRelayPublicIp,
+                    out var publicIp) ||
+                publicIp.AddressFamily !=
+                    System.Net.Sockets.AddressFamily.InterNetwork ||
+                System.Net.IPAddress.IsLoopback(publicIp) ||
+                publicIp.Equals(System.Net.IPAddress.Any) ||
+                publicIp.Equals(System.Net.IPAddress.Broadcast))
+            {
+                FileLogger.Log(
+                    $"[PartyUdpRelay scope={scope}] disabled: set a " +
+                    "non-loopback numeric IPv4 address with " +
+                    "DFO_UDP_RELAY_PUBLIC_IP");
+                return null;
+            }
+
+            var portBase = isPvp
+                ? GameNetworkConfig.PvpUdpRelayPortBase
+                : GameNetworkConfig.UdpRelayPortBase;
+            var portCount = isPvp
+                ? GameNetworkConfig.PvpUdpRelayPortCount
+                : GameNetworkConfig.UdpRelayPortCount;
+            return new PartyUdpRelay(
+                publicIp.ToString(),
+                portBase,
+                portCount,
+                scope);
+        }
+
         static void Main(string[] args)
         {
             args ??= Array.Empty<string>();
@@ -227,6 +291,7 @@ namespace DfoServer
             }
 
             GameNetworkConfig.Configure(args);
+            GameNetworkConfig.ValidateRelayConfiguration();
 
             PacketFileLogger.Initialize();
             if (GameNetworkConfig.PacketCaptureEnabled)
@@ -289,13 +354,34 @@ namespace DfoServer
             var sessionDirectory = new Game.Session.SessionDirectory();
 
             int channelPort = GameNetworkConfig.ProxyMode ? 7002 : 7001;
-            int gamePort = GameNetworkConfig.ProxyMode ? 10012 : 10011;
+            var gameChannels = GameNetworkConfig.GetGameChannels();
+            var gamePort = GameNetworkConfig.FindGameChannel(
+                GameNetworkConfig.NormalChannelIndex).ListenerGamePort;
+            var gameListenerPorts = gameChannels
+                .Select(channel => channel.ListenerGamePort)
+                .Distinct()
+                .ToArray();
+
+            using var udpRelay = CreatePartyUdpRelay("party");
+            using var pvpUdpRelay = CreatePartyUdpRelay("pvp");
+            using var gameProtocolHandler = new GameProtocolHandler(
+                sessionDirectory,
+                packet => Task.WhenAll(
+                    gameListenerPorts.Select(
+                        port => server.BroadcastToPortAsync(port, packet))),
+                udpRelay,
+                pvpUdpRelay);
 
             var portConfigs = new Dictionary<int, (IProtocolHandler handler, IPacketHeader structure)>
             {
-                { channelPort, (new ChannelProtocolHandler(), new ChannelPacketHeader()) },
-                { gamePort, (new GameProtocolHandler(sessionDirectory, packet => server.BroadcastToPortAsync(gamePort, packet)), new GamePacketHeader()) }
+                { channelPort, (new ChannelProtocolHandler(), new ChannelPacketHeader()) }
             };
+            foreach (var channel in gameChannels)
+            {
+                portConfigs.Add(
+                    channel.ListenerGamePort,
+                    (gameProtocolHandler, new GamePacketHeader()));
+            }
 
             server.Start(portConfigs);
 
@@ -307,6 +393,12 @@ namespace DfoServer
 
             Console.WriteLine("Multi-structure TCP server started!");
             Console.WriteLine($"Advertised server IP: {GameNetworkConfig.ServerIp} (ports 7001 channel, 10011 game)");
+            if (GameNetworkConfig.FreeDuelListenerEnabled)
+            {
+                Console.WriteLine(
+                    $"[FreeDuel] CH.{GameNetworkConfig.FreeDuelChannelIndex} " +
+                    $"listener bound on TCP {GameNetworkConfig.FreeDuelGamePort}.");
+            }
             var interactiveConsole = Environment.UserInteractive && !Console.IsInputRedirected;
             Console.WriteLine(interactiveConsole
                 ? "Press 's' for statistics, 'q' to quit."

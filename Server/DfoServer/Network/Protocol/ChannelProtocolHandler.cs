@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using DfoServer.Infrastructure;
 
@@ -13,7 +14,7 @@ namespace DfoServer.Network
     {
         public override string ProtocolName => "ChannelProtocol";
 
-        public string ScriptVersion => "59";
+        public string ScriptVersion => "66";
 
         public string AesEncryptionKey => DateTime.Now.ToString("yyyyMMdd") + "000006";
 
@@ -46,12 +47,11 @@ namespace DfoServer.Network
             SC_ASK_CHANNEL_INFO_NEW = 0x12,
         }
 
-        private class ServerInfo
+        internal sealed class ServerInfo
         {
+            public int ChannelId { get; set; }
             public string ChannelName { get; set; }
             public int MaxUserNum { get; set; }
-            public int CurUserNum { get; set; }
-            public string ServerIP { get; set; }
             public int Port { get; set; }
         }
 
@@ -152,25 +152,159 @@ namespace DfoServer.Network
 
         private async Task HandleCS_ASK_CHANNEL_INFO_NEW(EnhancedClientSession session, byte[] packet)
         {
-            var ch11 = Encoding.ASCII.GetBytes("#ch.11");
-            var srvi = Encoding.ASCII.GetBytes(TestServerIP);
-            var port = TestServerPort;
+            var channels = LoadChannels(
+                json: null,
+                includeFreeDuel: GameNetworkConfig.FreeDuelListenerEnabled);
+            var plaintext = BuildChannelListPlaintext(channels);
+            var data = EncryptTool.EncryptData(plaintext, AesEncryptionKey);
+            await SendResponsePacket(session, PACKETS.SC_ASK_CHANNEL_INFO_NEW, data);
+        }
+
+        internal byte[] BuildChannelListPlaintext(
+            IReadOnlyList<ServerInfo> channels)
+        {
+            if (channels == null)
+                throw new ArgumentNullException(nameof(channels));
 
             var list = new List<byte>();
-            list.AddRange(new byte[2]);                 
-            list.AddRange(BitConverter.GetBytes(1));    
+            list.AddRange(new byte[2]);
+            list.AddRange(BitConverter.GetBytes(channels.Count));
+            foreach (var channel in channels)
+            {
+                WriteFixedField(list, channel.ChannelName, 20);
+                list.AddRange(BitConverter.GetBytes(channel.MaxUserNum));
+                list.AddRange(BitConverter.GetBytes(0));
+                WriteFixedField(list, TestServerIP, 16);
+                list.AddRange(BitConverter.GetBytes(channel.Port));
+            }
 
-            list.AddRange(ch11);                        
-            list.AddRange(new byte[20 - ch11.Length]);  
-            list.AddRange(BitConverter.GetBytes(500));  
-            list.AddRange(BitConverter.GetBytes(0));    
+            return list.ToArray();
+        }
 
-            list.AddRange(srvi);                        
-            list.AddRange(new byte[16 - srvi.Length]);  
-            list.AddRange(BitConverter.GetBytes(port)); 
+        internal static List<ServerInfo> LoadChannels(
+            string json,
+            bool includeFreeDuel)
+        {
+            var result = new List<ServerInfo>();
+            var channelIds = new HashSet<int>();
+            if (!string.IsNullOrWhiteSpace(json))
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(json);
+                    if (document.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var element in document.RootElement.EnumerateArray())
+                        {
+                            if (element.ValueKind != JsonValueKind.Object)
+                                continue;
 
-            var data = EncryptTool.EncryptData(list.ToArray(), AesEncryptionKey);
-            await SendResponsePacket(session, PACKETS.SC_ASK_CHANNEL_INFO_NEW, data);
+                            var channelId = ReadChannelId(element);
+                            if (channelId < byte.MinValue ||
+                                channelId > byte.MaxValue ||
+                                (!includeFreeDuel &&
+                                 GameNetworkConfig.IsFreeDuelChannel(channelId)) ||
+                                !channelIds.Add(channelId))
+                            {
+                                continue;
+                            }
+
+                            var name = element.TryGetProperty("name", out var nameValue) &&
+                                       nameValue.ValueKind == JsonValueKind.String &&
+                                       !string.IsNullOrWhiteSpace(nameValue.GetString())
+                                ? nameValue.GetString()
+                                : $"#ch.{channelId}";
+                            var maxUser = ReadMaxUser(element);
+                            result.Add(
+                                new ServerInfo
+                                {
+                                    ChannelId = channelId,
+                                    ChannelName = name,
+                                    MaxUserNum = maxUser,
+                                    Port = ResolveSelectorPort(channelId)
+                                });
+                        }
+                    }
+                }
+                catch (JsonException ex)
+                {
+                    FileLogger.Log(
+                        $"[{nameof(ChannelProtocolHandler)}] invalid channel list: " +
+                        ex.Message);
+                    result.Clear();
+                    channelIds.Clear();
+                }
+            }
+
+            if (result.Count == 0)
+            {
+                result.Add(CreateDefaultChannel(GameNetworkConfig.NormalChannelIndex));
+                channelIds.Add(GameNetworkConfig.NormalChannelIndex);
+            }
+
+            if (includeFreeDuel &&
+                channelIds.Add(GameNetworkConfig.FreeDuelChannelIndex))
+            {
+                result.Add(CreateDefaultChannel(GameNetworkConfig.FreeDuelChannelIndex));
+            }
+
+            return result;
+        }
+
+        private static int ReadChannelId(JsonElement element)
+        {
+            if (element.TryGetProperty("id", out var id))
+            {
+                if (id.ValueKind == JsonValueKind.Number &&
+                    id.TryGetInt32(out var numericId))
+                    return numericId;
+                if (id.ValueKind == JsonValueKind.String &&
+                    int.TryParse(id.GetString(), out var stringId))
+                    return stringId;
+            }
+
+            return GameNetworkConfig.NormalChannelIndex;
+        }
+
+        private static int ReadMaxUser(JsonElement element)
+        {
+            if (!element.TryGetProperty("maxUser", out var maxUser))
+                return 500;
+            if (maxUser.ValueKind == JsonValueKind.Number &&
+                maxUser.TryGetInt32(out var numeric))
+                return Math.Max(0, numeric);
+            if (maxUser.ValueKind == JsonValueKind.String &&
+                int.TryParse(maxUser.GetString(), out var text))
+                return Math.Max(0, text);
+            return 500;
+        }
+
+        private static ServerInfo CreateDefaultChannel(int channelId)
+            => new ServerInfo
+            {
+                ChannelId = channelId,
+                ChannelName = $"#ch.{channelId}",
+                MaxUserNum = 500,
+                Port = ResolveSelectorPort(channelId)
+            };
+
+        private static int ResolveSelectorPort(int channelId)
+        {
+            var channel = GameNetworkConfig.FindGameChannel(channelId)
+                          ?? GameNetworkConfig.FindGameChannel(
+                              GameNetworkConfig.NormalChannelIndex);
+            return channel.PublicGamePort;
+        }
+
+        private static void WriteFixedField(
+            List<byte> target,
+            string value,
+            int size)
+        {
+            var bytes = Encoding.ASCII.GetBytes(value ?? string.Empty);
+            target.AddRange(bytes.Take(size));
+            if (bytes.Length < size)
+                target.AddRange(new byte[size - bytes.Length]);
         }
 
         private async Task HandleCS_CHECK_SCRIPT_VERSION(EnhancedClientSession session, byte[] packet)

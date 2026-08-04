@@ -32,11 +32,21 @@ namespace DfoServer.Network.Handlers
 
         public async Task Handle_ClientFirstConnected(EnhancedClientSession session)
         {
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0001, LoginPacketBuilder.BuildInitialLoginNotice()));
+            if (!EnsureListenerAdmission(session, "connect"))
+                return;
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x0001,
+                LoginPacketBuilder.BuildInitialLoginNotice(
+                    session.ListenerPort)));
         }
 
         public async Task Handle_ENUM_CMDPACKET_LOGIN(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
+            if (!EnsureListenerAdmission(session, "login"))
+                return;
+
             try
             {
                 var mId = DefaultLoginMid;
@@ -70,12 +80,40 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0001, LoginPacketBuilder.BuildLoginSuccess()));
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                0x0001,
+                LoginPacketBuilder.BuildLoginSuccess(
+                    session.ListenerPort)));
             await SendAccountSettingsOnLoginAsync(session);
             foreach (var packet in AuctionServiceNotificationBuilder.BuildOpenPackets())
                 await session.SendPacketAsync(packet);
             await _honorLevel.SendInfoAsync(session, ProtocolName, null);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x01A1, CommonPacketBodyBuilder.BuildZeroBytes(1)));
+        }
+
+        internal static bool IsListenerAdmissionAllowed(
+            int listenerPort,
+            bool freeDuelChannelEnabled)
+            => !GameNetworkConfig.IsFreeDuelListener(listenerPort)
+               || freeDuelChannelEnabled;
+
+        private bool EnsureListenerAdmission(
+            EnhancedClientSession session,
+            string stage)
+        {
+            if (IsListenerAdmissionAllowed(
+                    session.ListenerPort,
+                    GameNetworkConfig.FreeDuelListenerEnabled))
+            {
+                return true;
+            }
+
+            FileLogger.Log(
+                $"[{ProtocolName}] FREE_DUEL REJECTED: " +
+                $"stage={stage} listener={session.ListenerPort}");
+            session.Close();
+            return false;
         }
 
         private async Task SendAccountSettingsOnLoginAsync(EnhancedClientSession session)

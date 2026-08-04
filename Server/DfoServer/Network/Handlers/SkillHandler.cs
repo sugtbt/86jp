@@ -13,7 +13,9 @@ namespace DfoServer.Network.Handlers
         private readonly ICharacterRepository _characterRepository;
         private readonly InventoryRefreshSender _refresh;
 
-        public SkillHandler(ICharacterRepository characterRepository, InventoryRefreshSender refresh)
+        public SkillHandler(
+            ICharacterRepository characterRepository,
+            InventoryRefreshSender refresh)
         {
             _characterRepository = characterRepository;
             _refresh = refresh;
@@ -36,11 +38,20 @@ namespace DfoServer.Network.Handlers
 
             try
             {
-                var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
-                    Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
                 foreach (var (page, skillId, commandBytes) in records)
                 {
-                    int rows = repo.UpdateSkillCommand(cid, skillId, commandBytes);
+                    int rows;
+                    if (GameNetworkConfig.IsFreeDuelListener(session.ListenerPort))
+                    {
+                        rows = CreatePvpSkillRepository()
+                            .UpdateSkillCommand(cid, skillId, commandBytes);
+                    }
+                    else
+                    {
+                        var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
+                            Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
+                        rows = repo.UpdateSkillCommand(cid, skillId, commandBytes);
+                    }
                     FileLogger.Log(
                         $"[SkillHandler] CHANGE_SKILL_COMMAND char={cid} page={page} skill={skillId} " +
                         $"cmd={BitConverter.ToString(commandBytes)} rows={rows}");
@@ -61,9 +72,17 @@ namespace DfoServer.Network.Handlers
 
             try
             {
-                var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
-                    Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
-                int cleared = repo.ClearAllSkillCommands(cid);
+                int cleared;
+                if (GameNetworkConfig.IsFreeDuelListener(session.ListenerPort))
+                {
+                    cleared = CreatePvpSkillRepository().ClearAllSkillCommands(cid);
+                }
+                else
+                {
+                    var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
+                        Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
+                    cleared = repo.ClearAllSkillCommands(cid);
+                }
                 FileLogger.Log($"[SkillHandler] RESET_ALL_SKILL_COMMANDS char={cid} cleared={cleared}");
             }
             catch (Exception ex)
@@ -84,15 +103,22 @@ namespace DfoServer.Network.Handlers
                 try
                 {
                     int page = body[0] == 1 ? 1 : 0;
-                    var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
-                        Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
-                    if (session.Player?.Job == 9)
+                    if (GameNetworkConfig.IsFreeDuelListener(session.ListenerPort))
                     {
-                        CreateDarkKnightComboSkillService(repo).SwapDarkKnightSkillSlot(cid, page, body[1], body[2]);
+                        CreatePvpSkillRepository().SwapSkillSlot(
+                            cid,
+                            page,
+                            body[1],
+                            body[2]);
                     }
                     else
                     {
-                        repo.SwapSkillSlot(cid, page, body[1], body[2]);
+                        var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
+                            Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
+                        if (session.Player?.Job == 9)
+                            CreateDarkKnightComboSkillService(repo).SwapDarkKnightSkillSlot(cid, page, body[1], body[2]);
+                        else
+                            repo.SwapSkillSlot(cid, page, body[1], body[2]);
                     }
                 }
                 catch (Exception ex) { FileLogger.Log($"[SkillHandler] CHANGE_SKILLSLOT persist failed: {ex.Message}"); }
@@ -238,68 +264,102 @@ namespace DfoServer.Network.Handlers
             {
                 try
                 {
-                    var subtypeRepository = new Game.CharacterData.SqliteSubtype1Repository(
-                        Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
-                    var storedSkillTree = subtypeRepository.LoadSkillTreeIndex(cid)
-                        ?? Game.Skills.SkillTreeExpansionState.LockedWireValue;
-                    if (!Game.Skills.SkillTreeExpansionState.IsUnlocked(storedSkillTree)
-                        && requestSkillTree == 1)
+                    var isPvpSkillChannel =
+                        GameNetworkConfig.IsFreeDuelListener(session.ListenerPort);
+                    if (!isPvpSkillChannel)
                     {
-                        FileLogger.Log($"[SkillHandler] BUY_SKILL rejected: expansion locked char={cid} requestedTree={requestSkillTree}");
-                        var rejected = new Game.Skills.BuySkillResult
+                        var subtypeRepository = new Game.CharacterData.SqliteSubtype1Repository(
+                            Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
+                        var storedSkillTree = subtypeRepository.LoadSkillTreeIndex(cid)
+                            ?? Game.Skills.SkillTreeExpansionState.LockedWireValue;
+                        if (!Game.Skills.SkillTreeExpansionState.IsUnlocked(storedSkillTree)
+                            && requestSkillTree == 1)
                         {
-                            Success = false,
-                            SkillTree = requestSkillTree,
-                            ErrorCode = 3,
-                        };
-                        await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                            0x01, 0x001D, BuySkillAckBuilder.Build(rejected)));
-                        return;
+                            FileLogger.Log($"[SkillHandler] BUY_SKILL rejected: expansion locked char={cid} requestedTree={requestSkillTree}");
+                            var rejected = new Game.Skills.BuySkillResult
+                            {
+                                Success = false,
+                                SkillTree = requestSkillTree,
+                                ErrorCode = 3,
+                            };
+                            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                                0x01, 0x001D, BuySkillAckBuilder.Build(rejected)));
+                            return;
+                        }
+
+                        if (!Game.Skills.SkillTreeExpansionState.IsUnlocked(storedSkillTree))
+                            skillTree = 0;
                     }
 
-                    if (!Game.Skills.SkillTreeExpansionState.IsUnlocked(storedSkillTree))
-                        skillTree = 0;
-
-                    var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
-                        Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
                     var charRepo = new Game.Characters.SqliteCharacterRepository(
                         Infrastructure.ServerPaths.DatabasePath, Infrastructure.ServerPaths.SchemaFilePath);
                     var rec = charRepo.GetById(cid);
                     // Account 缺失时传 0，避免误用账号 1 的契约效果。
                     Game.Skills.BuySkillResult result;
-                    if (InventoryContext.TryGetLease(cid, out var lease) && lease.IsOwnedBy(session.SessionId))
+                    if (isPvpSkillChannel)
                     {
-                        lock (lease.SyncRoot)
-                            result = Game.Skills.BuySkillService.ExecuteWithRefundConsumable(
-                                lease.Inventory,
-                                repo,
-                                cid,
-                                session.Account?.AccountId ?? 0,
-                                job,
-                                skillTree,
-                                entries,
-                                rec?.BonusSp ?? 0,
-                                rec?.Level ?? (byte)1,
-                                rec?.BonusTp ?? 0,
-                                rec?.GrowType ?? 0);
+                        result = Game.Skills.BuySkillService.ExecutePvp(
+                            CreatePvpSkillRepository(),
+                            cid,
+                            session.Account?.AccountId ?? 0,
+                            job,
+                            skillTree,
+                            entries,
+                            rec?.BonusSp ?? 0,
+                            rec?.Level ?? (byte)1,
+                            rec?.BonusTp ?? 0,
+                            rec?.GrowType ?? 0);
                     }
                     else
                     {
-                        FileLogger.Log($"[SkillHandler] BUY_SKILL rejected: online inventory missing char={cid}");
-                        result = new Game.Skills.BuySkillResult
+                        var repo = new Game.CharacterData.SqliteCharacterProgressRepository(
+                            Infrastructure.ServerPaths.DatabasePath,
+                            Infrastructure.ServerPaths.SchemaFilePath);
+                        if (InventoryContext.TryGetLease(cid, out var lease) &&
+                            lease.IsOwnedBy(session.SessionId))
                         {
-                            Success = false,
-                            SkillTree = skillTree,
-                            ErrorCode = 3,
-                        };
+                            lock (lease.SyncRoot)
+                            {
+                                result = Game.Skills.BuySkillService
+                                    .ExecuteWithRefundConsumable(
+                                        lease.Inventory,
+                                        repo,
+                                        cid,
+                                        session.Account?.AccountId ?? 0,
+                                        job,
+                                        skillTree,
+                                        entries,
+                                        rec?.BonusSp ?? 0,
+                                        rec?.Level ?? (byte)1,
+                                        rec?.BonusTp ?? 0,
+                                        rec?.GrowType ?? 0);
+                            }
+                        }
+                        else
+                        {
+                            FileLogger.Log(
+                                $"[SkillHandler] BUY_SKILL rejected: " +
+                                $"online inventory missing char={cid}");
+                            result = new Game.Skills.BuySkillResult
+                            {
+                                Success = false,
+                                SkillTree = skillTree,
+                                ErrorCode = 3,
+                            };
+                        }
                     }
 
                     var ack = BuySkillAckBuilder.Build(result);
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x001D, ack));
-                    if (result != null && result.Success && result.ConsumedForgetRiverWater && result.ConsumedForgetRiverWaterItem != null)
+                    if (result != null &&
+                        result.Success &&
+                        result.ConsumedForgetRiverWater &&
+                        result.ConsumedForgetRiverWaterItem != null)
                     {
-                        await _refresh.SendUpdateItemList(session, result.ConsumedForgetRiverWaterItem.ListType, result.ConsumedForgetRiverWaterItem.SlotIndex);
-                        FileLogger.Log($"[SkillHandler] BUY_SKILL refund consumed forget-river water slot={result.ConsumedForgetRiverWaterSlot} remaining={result.ConsumedForgetRiverWaterItem.RemainingStackCount}");
+                        await _refresh.SendUpdateItemList(
+                            session,
+                            result.ConsumedForgetRiverWaterItem.ListType,
+                            result.ConsumedForgetRiverWaterItem.SlotIndex);
                     }
                 }
                 catch (Exception ex) { FileLogger.Log($"[SkillHandler] BUY_SKILL failed: {ex}"); }
@@ -321,7 +381,20 @@ namespace DfoServer.Network.Handlers
                 var accountId = session.Account?.AccountId ?? 1;
                 dataSource.PrepareForSkillSynchronization(cid, accountId);
                 var snapshot = dataSource.Load(cid, accountId);
-                var skillBytes = SkillInfoBodyBuilder.BuildFrom(snapshot.InitializationSnapshot.SkillInfo);
+                var skillInfo = snapshot.InitializationSnapshot.SkillInfo;
+                if (GameNetworkConfig.IsFreeDuelListener(session.ListenerPort))
+                {
+                    var character = _characterRepository.GetById(cid);
+                    if (character != null)
+                    {
+                        skillInfo = CreatePvpSkillRepository().LoadOrInitialize(
+                            cid,
+                            character.Job,
+                            character.Level,
+                            character.GrowType);
+                    }
+                }
+                var skillBytes = SkillInfoBodyBuilder.BuildFrom(skillInfo);
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0013, skillBytes));
 
                 FileLogger.Log($"[SkillHandler] SKILL_INIT refresh char={cid}");
@@ -458,6 +531,13 @@ namespace DfoServer.Network.Handlers
                 new Game.CharacterData.SqliteDarkKnightComboSkillRepository(
                     Infrastructure.ServerPaths.DatabasePath,
                     Infrastructure.ServerPaths.SchemaFilePath));
+        }
+
+        private static Game.Skills.SqlitePvpSkillRepository CreatePvpSkillRepository()
+        {
+            return new Game.Skills.SqlitePvpSkillRepository(
+                Infrastructure.ServerPaths.DatabasePath,
+                Infrastructure.ServerPaths.SchemaFilePath);
         }
 
 

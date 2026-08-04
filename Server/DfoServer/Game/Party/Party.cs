@@ -147,5 +147,49 @@ namespace DfoServer.Game.Party
             list.Sort((a, b) => a.SlotIndex.CompareTo(b.SlotIndex));
             return list;
         }
+
+        // Called by PartyManager while holding its lock. Packet builders consume
+        // this detached copy so a concurrent join/leave cannot produce a roster
+        // from one generation and relay ports from another.
+        internal Party CreateSnapshot()
+        {
+            var snapshot = new Party(PartyId)
+            {
+                LeaderUserId = LeaderUserId,
+                PartyName = PartyName,
+                SettingA = SettingA,
+                SettingB = SettingB,
+                SettingC = SettingC,
+                TitleIndex = TitleIndex,
+                TitleBytes = TitleBytes == null
+                    ? System.Array.Empty<byte>()
+                    : (byte[])TitleBytes.Clone(),
+                UserMax = UserMax,
+                DungIndex = DungIndex,
+                DungDiffi = DungDiffi,
+                IsSinglePlay = IsSinglePlay,
+            };
+
+            foreach (var member in _members)
+            {
+                snapshot._members.Add(new PartyMember
+                {
+                    UserId = member.UserId,
+                    CharacterId = member.CharacterId,
+                    SessionId = member.SessionId,
+                    Name = member.Name,
+                    Level = member.Level,
+                    Job = member.Job,
+                    SlotIndex = member.SlotIndex,
+                    IpBytes = member.IpBytes == null
+                        ? null
+                        : (byte[])member.IpBytes.Clone(),
+                    P2pPort = member.P2pPort,
+                    AccId = member.AccId,
+                });
+            }
+
+            return snapshot;
+        }
     }
 }

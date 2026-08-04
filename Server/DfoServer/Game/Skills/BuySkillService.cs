@@ -41,7 +41,19 @@ namespace DfoServer.Game.Skills
             int bonusSp = 0, byte level = 1, int bonusTp = 0, byte growType = 0)
         {
             Characters.CharacterStatComputer.DecodeGrowType(growType, out var firstGrow, out var secondGrow);
-            var plan = BuildExecutionPlan(repo, cid, accountId, job, skillTree, entries, bonusSp, level, bonusTp, firstGrow, secondGrow);
+            var plan = BuildExecutionPlan(
+                repo.LoadSkills(cid),
+                repo.ConnectionString,
+                accountId,
+                job,
+                skillTree,
+                entries,
+                bonusSp,
+                level,
+                bonusTp,
+                firstGrow,
+                secondGrow,
+                unlimitedPoints: false);
             if (plan.Result.Success)
                 repo.SaveSkillProgress(cid, plan.Snapshot);
             return plan.Result;
@@ -60,8 +72,23 @@ namespace DfoServer.Game.Skills
             int bonusTp = 0,
             byte growType = 0)
         {
-            Characters.CharacterStatComputer.DecodeGrowType(growType, out var firstGrow, out var secondGrow);
-            var plan = BuildExecutionPlan(repo, cid, accountId, job, skillTree, entries, bonusSp, level, bonusTp, firstGrow, secondGrow);
+            Characters.CharacterStatComputer.DecodeGrowType(
+                growType,
+                out var firstGrow,
+                out var secondGrow);
+            var plan = BuildExecutionPlan(
+                repo.LoadSkills(cid),
+                repo.ConnectionString,
+                accountId,
+                job,
+                skillTree,
+                entries,
+                bonusSp,
+                level,
+                bonusTp,
+                firstGrow,
+                secondGrow,
+                unlimitedPoints: false);
             if (!plan.Result.Success)
                 return plan.Result;
 
@@ -71,12 +98,12 @@ namespace DfoServer.Game.Skills
                 return plan.Result;
             }
 
-            if (inventory == null
-                || !inventory.TryConsumeMainItem(
+            if (inventory == null ||
+                !inventory.TryConsumeMainItem(
                     SkillResetConsumableService.ForgetRiverWaterItemTemplateId,
                     1,
-                    out var consumed)
-                || !consumed.Success)
+                    out var consumed) ||
+                !consumed.Success)
             {
                 plan.Result.Success = false;
                 plan.Result.ErrorCode = 3;
@@ -84,7 +111,6 @@ namespace DfoServer.Game.Skills
             }
 
             repo.SaveSkillProgress(cid, plan.Snapshot);
-
             plan.Result.ConsumedForgetRiverWater = true;
             plan.Result.ConsumedForgetRiverWaterSlot = consumed.SlotIndex;
             plan.Result.ConsumedForgetRiverWaterItem = new InventoryMutationResult
@@ -95,8 +121,49 @@ namespace DfoServer.Game.Skills
                 RemainingStackCount = consumed.RemainingCount,
                 InstanceValue = consumed.RemainingCount,
                 RequestedCount = 1,
-                AppliedCount = (short)Math.Min(short.MaxValue, consumed.ConsumedCount),
+                AppliedCount = (short)Math.Min(
+                    short.MaxValue,
+                    consumed.ConsumedCount),
             };
+            return plan.Result;
+        }
+
+        public static BuySkillResult ExecutePvp(
+            SqlitePvpSkillRepository repo,
+            int cid,
+            int accountId,
+            int job,
+            int skillTree,
+            IList<BuySkillEntry> entries,
+            int bonusSp = 0,
+            byte level = 1,
+            int bonusTp = 0,
+            byte growType = 0)
+        {
+            Characters.CharacterStatComputer.DecodeGrowType(
+                growType,
+                out var firstGrow,
+                out var secondGrow);
+            var snapshot = repo.LoadOrInitialize(
+                cid,
+                (byte)job,
+                level,
+                growType);
+            var plan = BuildExecutionPlan(
+                snapshot,
+                repo.ConnectionString,
+                accountId,
+                job,
+                skillTree,
+                entries,
+                bonusSp,
+                level,
+                bonusTp,
+                firstGrow,
+                secondGrow,
+                unlimitedPoints: true);
+            if (plan.Result.Success)
+                repo.Save(cid, plan.Snapshot);
             return plan.Result;
         }
 
@@ -107,10 +174,20 @@ namespace DfoServer.Game.Skills
             public bool HasEffectiveRefund;
         }
 
-        private static BuySkillExecutionPlan BuildExecutionPlan(SqliteCharacterProgressRepository repo, int cid, int accountId, int job, int skillTree, IList<BuySkillEntry> entries,
-            int bonusSp, byte level, int bonusTp, int firstGrow, int secondGrow)
+        private static BuySkillExecutionPlan BuildExecutionPlan(
+            SkillInfoSnapshot snapshot,
+            string connectionString,
+            int accountId,
+            int job,
+            int skillTree,
+            IList<BuySkillEntry> entries,
+            int bonusSp,
+            byte level,
+            int bonusTp,
+            int firstGrow,
+            int secondGrow,
+            bool unlimitedPoints)
         {
-            var snapshot = repo.LoadSkills(cid);
             int pageIdx = skillTree == 1 ? 1 : 0;
             while (snapshot.Pages.Count <= pageIdx)
                 snapshot.Pages.Add(new SkillInfoPageSnapshot());
@@ -127,7 +204,6 @@ namespace DfoServer.Game.Skills
 
             var result = new BuySkillResult { Success = true, SkillTree = (byte)skillTree };
             var hasEffectiveRefund = false;
-
             var occupied = new HashSet<int>();
             foreach (var e in page.Entries) occupied.Add(e.Slot);
 
@@ -156,7 +232,7 @@ namespace DfoServer.Game.Skills
                     if (sd.RequiredLevel > 0)
                     {
                         if (effectiveLevel < 0)
-                            effectiveLevel = level + Premium.PremiumEffectProvider.GetCombinedEffects(repo.ConnectionString, accountId).OverSkillLevel;
+                            effectiveLevel = level + Premium.PremiumEffectProvider.GetCombinedEffects(connectionString, accountId).OverSkillLevel;
                         if (newLevel > sd.GetMaxLearnableLevel(effectiveLevel, firstGrow, secondGrow))
                         {
                             result.Success = false;
@@ -212,14 +288,20 @@ namespace DfoServer.Game.Skills
                     if (sd.IsTpSkill)
                     {
                         int tpCost = sd.TpCostFor(curLevel, newLevel);
-                        if (remainTp < tpCost) { result.Success = false; result.ErrorCode = 2; return new BuySkillExecutionPlan { Result = result, Snapshot = snapshot }; }
-                        remainTp -= tpCost;
+                        if (!unlimitedPoints)
+                        {
+                            if (remainTp < tpCost) { result.Success = false; result.ErrorCode = 2; return new BuySkillExecutionPlan { Result = result, Snapshot = snapshot }; }
+                            remainTp -= tpCost;
+                        }
                     }
                     else
                     {
                         int cost = sd.SpCostFor(curLevel, newLevel);
-                        if (remainSp < cost) { result.Success = false; result.ErrorCode = 2; return new BuySkillExecutionPlan { Result = result, Snapshot = snapshot }; }
-                        remainSp -= cost;
+                        if (!unlimitedPoints)
+                        {
+                            if (remainSp < cost) { result.Success = false; result.ErrorCode = 2; return new BuySkillExecutionPlan { Result = result, Snapshot = snapshot }; }
+                            remainSp -= cost;
+                        }
                     }
 
                     if (existing != null)
@@ -254,13 +336,12 @@ namespace DfoServer.Game.Skills
                     if (newLevel < baseLevel) newLevel = baseLevel;
                     if (newLevel >= curLevel) continue;
                     hasEffectiveRefund = true;
-
                     // 退点 100% 返还费用表原值。
-                    if (sd.IsTpSkill)
+                    if (!unlimitedPoints && sd.IsTpSkill)
                     {
                         remainTp += sd.TpCostFor(newLevel, curLevel);
                     }
-                    else
+                    else if (!unlimitedPoints)
                     {
                         remainSp += sd.SpCostFor(newLevel, curLevel);
                     }
@@ -285,12 +366,19 @@ namespace DfoServer.Game.Skills
                 }
             }
 
-            result.RemainSp = ToUInt16(remainSp);
-            result.RemainTp = ToUInt16(remainTp);
+            result.RemainSp = unlimitedPoints ? ushort.MaxValue : ToUInt16(remainSp);
+            result.RemainTp = unlimitedPoints ? ushort.MaxValue : ToUInt16(remainTp);
             // 写协议镜像: 保存前将两页 SP/TP 派生值写入 snapshot 的 HeaderValue/Tail,
             // 使 SaveSkillsCore 持久化的镜像值与 Ledger 派生一致。
-            var finalPoints = SkillStateService.ResolvePointState(snapshot, (byte)job, level, bonusSp, bonusTp, firstGrow, secondGrow);
-            SkillStateService.ApplyProtocolMirrors(snapshot, finalPoints);
+            if (unlimitedPoints)
+            {
+                SqlitePvpSkillRepository.ApplyUnlimitedPointMirrors(snapshot);
+            }
+            else
+            {
+                var finalPoints = SkillStateService.ResolvePointState(snapshot, (byte)job, level, bonusSp, bonusTp, firstGrow, secondGrow);
+                SkillStateService.ApplyProtocolMirrors(snapshot, finalPoints);
+            }
             return new BuySkillExecutionPlan
             {
                 Result = result,

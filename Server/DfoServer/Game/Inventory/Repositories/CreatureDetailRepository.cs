@@ -28,7 +28,8 @@ SELECT character_id,
        tail_flag,
        extra_json
 FROM character_creatures
-WHERE character_id = @cid;";
+WHERE character_id = @cid
+ORDER BY sort_order;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 using (var reader = command.ExecuteReader())
                 {

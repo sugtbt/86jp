@@ -71,10 +71,12 @@ namespace DfoServer.Network.Handlers
         }
 
         // 按 UserId 找在线会话(他人外观拉取用)。
-        private EnhancedClientSession FindOnlineByUserId(ushort uid)
+        internal static EnhancedClientSession FindOnlineByUserId(
+            Game.Session.ISessionDirectory sessions,
+            ushort uid)
         {
-            if (_sessions == null) return null;
-            foreach (var s in _sessions.GetAllGameSessions())
+            if (sessions == null) return null;
+            foreach (var s in sessions.GetAllGameSessions())
                 if (s?.Player != null && s.Player.CharacterId > 0 && s.Player.UserId == uid)
                     return s;
             return null;
@@ -218,7 +220,11 @@ namespace DfoServer.Network.Handlers
                     var inventory = TryLoadInventoryForLease(
                         record.CharacterId,
                         ResolveAccountId(session, record));
-                    session.Player.HydrateFrom(record);
+                    session.Player.HydrateFrom(
+                        record,
+                        GameChannelSpawnPolicy.Resolve(
+                            session.ListenerPort,
+                            record.TownId));
                     TryRegisterInventoryLease(session, record, inventory);
 
                     try
@@ -293,7 +299,33 @@ namespace DfoServer.Network.Handlers
                     ownerAcctId);
             }
 
-            foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(_selectCharacterDataSource, ownerCharId, ownerAcctId))
+            SkillInfoSnapshot pvpSkillOverride = null;
+            if (GameNetworkConfig.IsFreeDuelListener(session.ListenerPort))
+            {
+                var skillOwner = _characterRepository.GetById(ownerCharId);
+                if (skillOwner != null)
+                {
+                    var pvpSkills = new Game.Skills.SqlitePvpSkillRepository(
+                        Infrastructure.ServerPaths.DatabasePath,
+                        Infrastructure.ServerPaths.SchemaFilePath);
+                    pvpSkillOverride = pvpSkills.LoadOrInitialize(
+                        ownerCharId,
+                        skillOwner.Job,
+                        skillOwner.Level,
+                        skillOwner.GrowType);
+                    FileLogger.Log(
+                        $"[{ProtocolName}] Loaded independent PvP skills " +
+                        $"character_id={ownerCharId} " +
+                        $"entries={pvpSkillOverride.Pages[0].Entries.Count}+" +
+                        $"{pvpSkillOverride.Pages[1].Entries.Count}");
+                }
+            }
+
+            foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(
+                         _selectCharacterDataSource,
+                         ownerCharId,
+                         ownerAcctId,
+                         pvpSkillOverride))
                 await session.SendPacketAsync(packet);
 
             var visibilityBits = session.Player.Subtype0Tail?.UserStateBits ?? (byte)3;
@@ -331,7 +363,7 @@ namespace DfoServer.Network.Handlers
                     byte mode = body[2];
                     if (mode != 0x02 && reqUid != 0xFFFF && reqUid != session.Player.UserId)
                     {
-                        var target = FindOnlineByUserId(reqUid);
+                        var target = FindOnlineByUserId(_sessions, reqUid);
                         if (target != null)
                         {
                             // ⚠️ 待真机验证: inspect(mode=3)可能需要【完整明细 subtype-1】而不只精简外观 subtype-0。
