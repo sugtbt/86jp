@@ -66,6 +66,16 @@ namespace DfoServer.Network.Handlers
                 if (consumed.SlotIndex >= 0 && !refresh.Contains(consumed.SlotIndex))
                     refresh.Add(consumed.SlotIndex);
             }
+            if (result.ResultSlotIndex == result.SourceSlotIndex)
+            {
+                // A final-state update alone does not make the 86JP client
+                // replace an equipment template already cached in this slot.
+                // Project the removal before the final-state item update.
+                await _refresh.SendEmptyUpdateItemList(
+                    session,
+                    InventoryListType.Main,
+                    result.SourceSlotIndex);
+            }
             await _refresh.SendUpdateItemList(session, InventoryListType.Main, refresh);
 
             // The client resolves this slot immediately for the result popup.
