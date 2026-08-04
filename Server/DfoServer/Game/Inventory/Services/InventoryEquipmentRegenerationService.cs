@@ -89,12 +89,11 @@ namespace DfoServer.Game.Inventory
             // The candidate pool only contains sealing templates, but compound
             // output preserves whether the consumed equipment was sealed or opened.
             newCore.SealFlag = source.SealFlag;
-            if (!TryPlanMutation(
-                    inventory,
-                    request.SourceSlotIndex,
-                    requirements,
-                    newCore,
-                    out var insertPlan))
+            // Plan while the source still occupies its slot. The 86JP client
+            // expects the compound result to arrive as a newly-added item in a
+            // different slot so it can refresh the popup and acquisition toast.
+            if (!InventoryInsertService.TryPlanInsertByDefaultRule(inventory, newCore, 1, out var insertPlan)
+                || insertPlan == null || !insertPlan.Success)
                 return false;
 
             if (!InventoryCreateService.TryCreateDetails(
@@ -149,43 +148,6 @@ namespace DfoServer.Game.Inventory
                 });
             result.ErrorCode = 0;
             return true;
-        }
-
-        private static bool TryPlanMutation(
-            InventoryService inventory,
-            short sourceSlotIndex,
-            IReadOnlyList<InventoryMaterialRequirement> requirements,
-            ItemCore newCore,
-            out InventoryInsertPlan insertPlan)
-        {
-            insertPlan = null;
-            var preview = InventoryCompoundPlanning.CloneInventory(inventory);
-            var previewConsumed = new List<InventoryMaterialConsumptionEntry>();
-            if (!InventoryMaterialConsumptionService.TryConsume(preview, requirements, previewConsumed)
-                || !InventoryDeleteService.TryRemoveSlot(
-                    preview,
-                    InventoryListType.Main,
-                    sourceSlotIndex,
-                    out var previewDelete)
-                || !previewDelete.Success)
-            {
-                return false;
-            }
-
-            var previewCore = newCore.Copy();
-            return InventoryInsertService.TryPlanInsertByDefaultRule(
-                    preview,
-                    previewCore,
-                    1,
-                    out insertPlan)
-                && insertPlan != null
-                && insertPlan.Success
-                && InventoryInsertService.TryApplyInsertPlan(
-                    preview,
-                    previewCore,
-                    insertPlan,
-                    out var previewInsert)
-                && previewInsert.Success;
         }
 
         private static ushort ResolveRequestedPart(
