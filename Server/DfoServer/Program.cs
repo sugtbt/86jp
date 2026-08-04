@@ -82,6 +82,7 @@ namespace DfoServer
             ("--selftest-crane-minigame", SelfTests.CraneMiniGameSelfTest.Run),
             ("--selftest-mailbox", SelfTests.MailboxSelfTest.Run),
             ("--selftest-mercenary", SelfTests.MercenarySelfTest.Run),
+            ("--selftest-equipment-regeneration-config", SelfTests.EquipmentRegenerationConfigSelfTest.Run),
         };
 
         // 顺序跑全部自测, 输出汇总表; 任一失败(或抛异常)退出码为 1。
@@ -256,6 +257,7 @@ namespace DfoServer
                 FileLogger.Log(
                     $"[Startup] ITEM_METADATA_WARMUP totalMs={itemMetadataWarmupTimer.Elapsed.TotalMilliseconds:F3}");
                 Game.Dungeon.ClearRewardGenerator.WarmUp();
+                Game.Inventory.EquipmentRegenerationCandidateCatalog.Warmup();
                 GameWorld.IndependentDropDefinitionCatalog.WarmUp();
                 Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();

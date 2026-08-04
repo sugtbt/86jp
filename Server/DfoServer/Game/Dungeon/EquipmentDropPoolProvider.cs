@@ -1,7 +1,7 @@
 using PvfLib;
 using System;
 using System.Collections.Generic;
-using System.IO;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.Dungeon
 {
@@ -49,9 +49,8 @@ namespace DfoServer.Game.Dungeon
             _avatarPool = new Dictionary<long, List<(int Id, int Weight)>>();
             try
             {
-                var equipmentListText = GameWorld.PvfArchiveAccessor.ReadText("equipment/equipment.lst");
-                var equipmentList = LstFile.Parse(equipmentListText);
-                if (equipmentList == null || equipmentList.Entries.Count == 0)
+                var equipmentDefinitions = EquipmentDefinitionCatalog.GetAll();
+                if (equipmentDefinitions.Count == 0)
                 {
                     FileLogger.Log("[EquipmentDropPoolProvider] equipment.lst empty/not found");
                     return pool;
@@ -59,28 +58,18 @@ namespace DfoServer.Game.Dungeon
 
                 var added = 0;
                 var errors = 0;
-                for (var i = 0; i < equipmentList.Entries.Count; i++)
+                for (var i = 0; i < equipmentDefinitions.Count; i++)
                 {
-                    var entry = equipmentList.Entries[i];
-                    if (entry == null || string.IsNullOrWhiteSpace(entry.FilePath))
+                    var equipment = equipmentDefinitions[i];
+                    if (equipment == null)
                         continue;
 
-                    try
-                    {
-                        var equipment = EquipmentFile.Parse(GameWorld.PvfArchiveAccessor.ReadText(Path.Combine("equipment", entry.FilePath)));
-                        if (TryAddEquipment(
-                                pool,
-                                _normalPool,
-                                _avatarPool,
-                                entry.Id,
-                                entry.FilePath,
-                                equipment))
-                            added++;
-                    }
-                    catch
-                    {
-                        errors++;
-                    }
+                    if (TryAddEquipment(
+                            pool,
+                            _normalPool,
+                            _avatarPool,
+                            equipment))
+                        added++;
                 }
 
                 FileLogger.Log(
@@ -100,11 +89,9 @@ namespace DfoServer.Game.Dungeon
             Dictionary<long, List<(int Id, int Weight)>> pool,
             Dictionary<long, List<(int Id, int Weight)>> normalPool,
             Dictionary<long, List<(int Id, int Weight)>> avatarPool,
-            int itemId,
-            string filePath,
-            EquipmentFile equipment)
+            EquipmentDefinition equipment)
         {
-            if (itemId <= 0 || equipment == null)
+            if (equipment == null || equipment.ItemTemplateId <= 0)
                 return false;
 
             var rarity = equipment.Rarity;
@@ -115,11 +102,11 @@ namespace DfoServer.Game.Dungeon
                 return false;
 
             var key = (long)grade * 10 + rarity;
-            AddToPool(pool, key, itemId, creationRate);
-            var categoryPool = IsAvatar(filePath, equipment)
+            AddToPool(pool, key, equipment.ItemTemplateId, creationRate);
+            var categoryPool = IsAvatar(equipment)
                 ? avatarPool
                 : normalPool;
-            AddToPool(categoryPool, key, itemId, creationRate);
+            AddToPool(categoryPool, key, equipment.ItemTemplateId, creationRate);
             return true;
         }
 
@@ -137,9 +124,9 @@ namespace DfoServer.Game.Dungeon
             list.Add((itemId, weight));
         }
 
-        private static bool IsAvatar(string filePath, EquipmentFile equipment)
+        private static bool IsAvatar(EquipmentDefinition equipment)
         {
-            var normalizedPath = "/" + (filePath ?? string.Empty)
+            var normalizedPath = "/" + (equipment.FilePath ?? string.Empty)
                 .Replace('\\', '/')
                 .Trim('/');
             return normalizedPath.IndexOf(
