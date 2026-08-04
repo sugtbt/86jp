@@ -141,7 +141,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 killEvent,
                 request.LocalIndex,
                 session.Player.UserId,
-                DungeonKillOrigin.LocalReport));
+                DungeonKillOrigin.LocalReport,
+                request.IsCapture
+                    ? DungeonActorDeathKind.Captured
+                    : DungeonActorDeathKind.Defeated));
         }
         internal async Task HandleBossDieCheck(
             EnhancedClientSession session,

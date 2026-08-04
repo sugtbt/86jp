@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
+using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Quests;
@@ -46,7 +47,10 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             CheckCompletionRefresh(ref failures);
+            CheckJobCompletionRefresh(ref failures);
+            CheckExpertJobCompletionRefresh(ref failures);
             CheckTimeGateSameSlotProjection(ref failures);
+            CheckJobAndExpertJobSuccessors(ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
@@ -113,21 +117,224 @@ namespace DfoServer.SelfTests
             }
         }
 
+        private static void CheckJobCompletionRefresh(ref int failures)
+        {
+            const ushort jobQuestId = 7810;
+            const ushort successorQuestId = 4427;
+            var databasePath = CreateFixtureDatabase(
+                "quest-job-chain-completion.db",
+                level: 21,
+                growType: 0);
+            var connectionString = SqliteDatabaseBootstrap.Initialize(
+                databasePath,
+                ServerPaths.SchemaFilePath);
+            QuestService.SaveActiveQuests(
+                connectionString,
+                CharacterId,
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = jobQuestId,
+                        TriggerValue = 0,
+                    },
+                });
+
+            var sessionId = Guid.NewGuid();
+            InventoryContext.Register(
+                sessionId,
+                new InventoryService(CharacterId, AccountId));
+            try
+            {
+                var sender = new RecordingSender();
+                sender.Player.Level = 21;
+                var manager = new QuestManager(sender, connectionString);
+                manager.HandleFinishQuestAsync(
+                        0x0022,
+                        BuildWireFinishBody(jobQuestId),
+                        sessionId)
+                    .GetAwaiter()
+                    .GetResult();
+
+                Check("job completion ACK projects grow type 3",
+                    TryReadFinishChain(
+                        sender.LastAckBody,
+                        out var chainType,
+                        out var growNumber)
+                    && chainType == 1
+                    && growNumber == 3,
+                    ref failures);
+                Check("job completion updates session grow type before quest refresh",
+                    sender.Player.GrowType == 3,
+                    ref failures);
+                Check("job completion refresh exposes successor 4427",
+                    sender.Calls.Count > 0
+                    && sender.Calls[sender.Calls.Count - 1] == "NOTI:0015"
+                    && ParseQuestIds(sender.LastAcceptableQuestBody)
+                        .Contains(successorQuestId),
+                    ref failures);
+            }
+            finally
+            {
+                InventoryContext.Unregister(sessionId, CharacterId);
+            }
+        }
+
+        private static void CheckExpertJobCompletionRefresh(ref int failures)
+        {
+            const ushort expertJobQuestId = 2702;
+            const ushort successorQuestId = 11007;
+            const int requiredItemId = 3037;
+            const int requiredItemCount = 100;
+            var databasePath = CreateFixtureDatabase(
+                "quest-expert-job-chain-completion.db",
+                level: 21,
+                growType: 2);
+            var connectionString = SqliteDatabaseBootstrap.Initialize(
+                databasePath,
+                ServerPaths.SchemaFilePath);
+            QuestService.SaveActiveQuests(
+                connectionString,
+                CharacterId,
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = expertJobQuestId,
+                        TriggerValue = 0,
+                    },
+                });
+
+            var sessionId = Guid.NewGuid();
+            var inventory = new InventoryService(CharacterId, AccountId);
+            InventoryContext.Register(sessionId, inventory);
+            try
+            {
+                var inserted = InventoryRewardGrantService.TryCreateAndInsert(
+                    inventory,
+                    requiredItemId,
+                    ItemCreateReason.QuestReward,
+                    requiredItemCount,
+                    out var grant);
+                Check("expert-job completion fixture inserts required material",
+                    inserted && grant.Success,
+                    ref failures);
+
+                var sender = new RecordingSender();
+                sender.Player.Level = 21;
+                sender.Player.GrowType = 2;
+                var manager = new QuestManager(sender, connectionString);
+                manager.HandleFinishQuestAsync(
+                        0x0022,
+                        BuildWireFinishBody(expertJobQuestId),
+                        sessionId)
+                    .GetAwaiter()
+                    .GetResult();
+
+                Check("expert-job completion ACK projects expert type 1",
+                    TryReadFinishChain(
+                        sender.LastAckBody,
+                        out var chainType,
+                        out var growNumber)
+                    && chainType == 20
+                    && growNumber == 1,
+                    ref failures);
+                Check("expert-job completion projects expert state before quest refresh",
+                    sender.Calls.Contains("NOTI:00CD")
+                    && sender.Player.Subtype0Tail != null
+                    && sender.Player.Subtype0Tail.ExpertJobType == 1,
+                    ref failures);
+                Check("expert-job completion refresh exposes successor 11007",
+                    sender.Calls.Count > 0
+                    && sender.Calls[sender.Calls.Count - 1] == "NOTI:0015"
+                    && ParseQuestIds(sender.LastAcceptableQuestBody)
+                        .Contains(successorQuestId),
+                    ref failures);
+            }
+            finally
+            {
+                InventoryContext.Unregister(sessionId, CharacterId);
+            }
+        }
+
         private static HashSet<ushort> BuildQuestIds(params ushort[] clearedQuestIds)
+            => BuildQuestIds(
+                level: 86,
+                job: 0,
+                growType: 0,
+                clearedQuestIds);
+
+        private static HashSet<ushort> BuildQuestIds(
+            int level,
+            int job,
+            int growType,
+            params ushort[] clearedQuestIds)
         {
             var clearedFlags = new Dictionary<int, int>();
             foreach (var questId in clearedQuestIds)
                 clearedFlags[questId] = 1;
 
             var body = QuestListBodyBuilder.BuildBody(
-                level: 86,
-                job: 0,
-                growType: 0,
+                level,
+                job,
+                growType,
                 clearedFlags);
             if (body == null || body.Length < 3)
                 throw new InvalidOperationException("Quest list body is truncated.");
 
             return ParseQuestIds(body);
+        }
+
+        private static void CheckJobAndExpertJobSuccessors(ref int failures)
+        {
+            var jobSuccessors = BuildQuestIds(
+                level: 21,
+                job: 0,
+                growType: 3,
+                7810);
+            Check("clearing berserker job quest exposes PVF successor 4427",
+                jobSuccessors.Contains(4427),
+                ref failures);
+
+            var enchanterSuccessors = BuildQuestIds(
+                level: 21,
+                job: 0,
+                growType: 0,
+                2702);
+            Check("clearing enchanter quest 2702 exposes PVF successor 11007",
+                enchanterSuccessors.Contains(11007),
+                ref failures);
+
+            var alchemistSuccessors = BuildQuestIds(
+                level: 21,
+                job: 0,
+                growType: 0,
+                2708);
+            Check("clearing alchemist quest 2708 exposes PVF successor 11013",
+                alchemistSuccessors.Contains(11013),
+                ref failures);
+
+            var dollControllerSuccessors = BuildQuestIds(
+                level: 21,
+                job: 0,
+                growType: 0,
+                2712);
+            Check("clearing doll-controller quest 2712 exposes PVF successor 11016",
+                dollControllerSuccessors.Contains(11016),
+                ref failures);
+
+            var disjointSuccessors = BuildQuestIds(
+                level: 21,
+                job: 0,
+                growType: 0,
+                2710);
+            Check("disjointer quest 2710 does not invent a missing PVF successor",
+                !disjointSuccessors.Contains(11007)
+                && !disjointSuccessors.Contains(11013)
+                && !disjointSuccessors.Contains(11016),
+                ref failures);
         }
 
         private static HashSet<ushort> ParseQuestIds(byte[] body)
@@ -143,6 +350,27 @@ namespace DfoServer.SelfTests
             for (var index = 0; index < count; index++)
                 result.Add(BitConverter.ToUInt16(body, 3 + index * 2));
             return result;
+        }
+
+        private static bool TryReadFinishChain(
+            byte[] body,
+            out byte chainType,
+            out byte growNumber)
+        {
+            chainType = 0;
+            growNumber = 0;
+            if (body == null || body.Length < 14 || body[0] != 1)
+                return false;
+
+            var offset = 12;
+            var consumedCount = body[offset++];
+            offset += consumedCount * 7;
+            if (offset + 1 >= body.Length)
+                return false;
+
+            chainType = body[offset++];
+            growNumber = body[offset];
+            return true;
         }
 
         private static byte[] BuildWireFinishBody(ushort questId)
@@ -248,7 +476,26 @@ namespace DfoServer.SelfTests
                 ref failures);
         }
 
-        private static void SeedCharacter(string databasePath)
+        private static string CreateFixtureDatabase(
+            string fileName,
+            byte level,
+            byte growType)
+        {
+            var tempDir = Path.Combine(Path.GetTempPath(), "DfoServerSelfTests");
+            Directory.CreateDirectory(tempDir);
+            var databasePath = Path.Combine(tempDir, fileName);
+            DeleteDatabase(databasePath);
+            SqliteDatabaseBootstrap.Initialize(
+                databasePath,
+                ServerPaths.SchemaFilePath);
+            SeedCharacter(databasePath, level, growType);
+            return databasePath;
+        }
+
+        private static void SeedCharacter(
+            string databasePath,
+            byte level = 86,
+            byte growType = 0)
         {
             var connectionString = SqliteDatabaseBootstrap.Initialize(
                 databasePath,
@@ -275,9 +522,11 @@ VALUES (@aid, 'quest-chain-selftest', '');";
                 AccountId = AccountId,
                 Name = Encoding.UTF8.GetBytes("quest-chain-selftest"),
                 Job = 0,
-                GrowType = 0,
-                Level = 86,
+                GrowType = growType,
+                Level = level,
             });
+            new SqliteSubtype1Repository(databasePath, ServerPaths.SchemaFilePath)
+                .UpdateSkillTreeIndex(CharacterId, 0);
         }
 
         private static void DeleteDatabase(string databasePath)

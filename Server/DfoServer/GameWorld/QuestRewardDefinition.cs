@@ -29,6 +29,21 @@ namespace DfoServer.GameWorld
         Optional,
     }
 
+    internal readonly struct QuestGoldRewardProjection
+    {
+        internal QuestGoldRewardProjection(
+            uint fixedAmount,
+            bool hasFormulaMarker)
+        {
+            FixedAmount = fixedAmount;
+            HasFormulaMarker = hasFormulaMarker;
+        }
+
+        internal uint FixedAmount { get; }
+        internal bool HasFormulaMarker { get; }
+        internal bool HasFixedAmount => FixedAmount > 0;
+    }
+
     internal sealed class QuestRewardDefinition
     {
         private readonly IReadOnlyList<QuestRewardItemRule> _fixedItems;
@@ -105,12 +120,14 @@ namespace DfoServer.GameWorld
             int playerJob,
             int playerGrowType,
             out List<QuestRewardItem> items,
-            out bool hasGoldMarker,
+            out QuestGoldRewardProjection goldReward,
             out int rewardParameter,
             out string error)
         {
             items = new List<QuestRewardItem>();
-            hasGoldMarker = false;
+            var hasGoldMarker = false;
+            ulong fixedGoldAmount = 0;
+            goldReward = default;
             rewardParameter = RewardParameter;
             error = string.Empty;
 
@@ -127,6 +144,15 @@ namespace DfoServer.GameWorld
                 if (rule.ItemId == 0)
                 {
                     hasGoldMarker = true;
+                    if (GoldMultiple <= 0 && rule.Count > 0)
+                    {
+                        fixedGoldAmount += (uint)rule.Count;
+                        if (fixedGoldAmount > uint.MaxValue)
+                        {
+                            error = "fixed gold reward exceeds uint32";
+                            return false;
+                        }
+                    }
                     continue;
                 }
                 if (rule.Matches(playerJob, playerGrowType))
@@ -164,6 +190,9 @@ namespace DfoServer.GameWorld
                     .TargetCreatureId;
             }
 
+            goldReward = new QuestGoldRewardProjection(
+                (uint)fixedGoldAmount,
+                hasGoldMarker);
             return true;
         }
 

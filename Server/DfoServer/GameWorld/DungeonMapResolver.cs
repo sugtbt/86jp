@@ -220,8 +220,7 @@ namespace DfoServer.GameWorld
                     $"[DungeonMapResolver] QUEST_COMPANION_START_UNRESOLVED: " +
                     $"dungeon={dungeonId} maze={mazeIndex} " +
                     $"quest={companionQuestId} apc={companionApcId} " +
-                    $"room=({x},{y})");
-                return -1;
+                    $"room=({x},{y}) fallback=maze_affinity");
             }
 
             // For non-quest start/boss rooms without an explicit maze-local match,
@@ -894,7 +893,19 @@ namespace DfoServer.GameWorld
             }
 
             if (candidates.Count == 1)
+            {
                 mapId = candidates[0];
+                return true;
+            }
+
+            var startAreaCandidates = new List<int>();
+            foreach (var candidate in candidates)
+            {
+                if (HasDungeonStartArea(maplst, candidate))
+                    startAreaCandidates.Add(candidate);
+            }
+            if (startAreaCandidates.Count == 1)
+                mapId = startAreaCandidates[0];
             return true;
         }
 

@@ -84,6 +84,8 @@ namespace DfoServer.Game.Dungeon
             new DungeonRunSettlementData();
         internal DungeonRunQuestBridgeState QuestBridge { get; } =
             new DungeonRunQuestBridgeState();
+        internal DungeonCaptureDropJournal CaptureDrops =>
+            QuestBridge.CaptureDrops;
         internal DungeonMechanismRuntimeSet Mechanisms { get; } =
             new DungeonMechanismRuntimeSet();
 

@@ -171,6 +171,19 @@ namespace DfoServer.Game.Dungeon
             return _drops.TryPickup(run, sceneSlot, session);
         }
 
+        internal bool TryRegisterGroundDrop(
+            DungeonRun run,
+            int itemTemplateId,
+            int count,
+            out DropInfo drop)
+        {
+            return _drops.TryRegisterTemplateDrop(
+                run,
+                itemTemplateId,
+                count,
+                out drop);
+        }
+
         internal bool TryGrantItems(
             InventoryLease lease,
             IReadOnlyList<DungeonItemGrantRequest> requests,

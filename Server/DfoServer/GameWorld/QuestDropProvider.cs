@@ -109,6 +109,97 @@ namespace DfoServer.GameWorld
             return results.Count > 0 ? results : null;
         }
 
+        public static List<QuestDropCandidate> CheckMonsterCaptureDrop(
+            ICollection<int> activeQuestIds,
+            IReadOnlyList<MonsterCaptureItemDefinition> captureItems)
+        {
+            if (activeQuestIds == null
+                || activeQuestIds.Count == 0
+                || captureItems == null
+                || captureItems.Count == 0)
+            {
+                return null;
+            }
+
+            var captureItemIds = new HashSet<int>();
+            foreach (var item in captureItems)
+            {
+                if (item.ItemId > 0)
+                    captureItemIds.Add(item.ItemId);
+            }
+
+            var questByItem = new Dictionary<int, int>();
+            var requiredByItem = new Dictionary<int, int>();
+            foreach (var questId in activeQuestIds)
+            {
+                try
+                {
+                    var seekingItems = QuestData.GetSeekingConsumeItems(questId);
+                    if (seekingItems == null)
+                        continue;
+
+                    foreach (var seeking in seekingItems)
+                    {
+                        if (seeking.ItemId <= 0
+                            || seeking.Count <= 0
+                            || !captureItemIds.Contains(seeking.ItemId))
+                        {
+                            continue;
+                        }
+
+                        var required = GetSeekingRequiredCount(
+                            questId,
+                            seeking.ItemId);
+                        if (required <= 0)
+                            continue;
+                        if (!requiredByItem.TryGetValue(
+                                seeking.ItemId,
+                                out var currentRequired)
+                            || required > currentRequired)
+                        {
+                            requiredByItem[seeking.ItemId] = required;
+                        }
+                        if (!questByItem.TryGetValue(
+                                seeking.ItemId,
+                                out var currentQuestId)
+                            || questId < currentQuestId)
+                        {
+                            questByItem[seeking.ItemId] = questId;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        $"[QuestDropProvider] ERROR: capture seeking match failed, "
+                        + $"quest {questId} skipped: {ex.Message}");
+                }
+            }
+
+            var result = new List<QuestDropCandidate>();
+            foreach (var item in captureItems)
+            {
+                if (!requiredByItem.TryGetValue(item.ItemId, out var required)
+                    || !questByItem.TryGetValue(item.ItemId, out var questId))
+                {
+                    continue;
+                }
+
+                result.Add(new QuestDropCandidate
+                {
+                    QuestId = questId,
+                    ItemId = item.ItemId,
+                    Count = item.Count,
+                    DropRate = item.DropRate,
+                    MaxStack = required,
+                    SeekingRequiredCount = required,
+                    PreferQuestInventory = true,
+                });
+            }
+
+            return result.Count > 0 ? result : null;
+        }
+
         public static List<QuestDropCandidate> CheckClearReward(
             ICollection<int> activeQuestIds,
             int dungeonIndex,

@@ -16,6 +16,8 @@ namespace DfoServer.SelfTests
         private const int QuestConnectedDungeonId = 155;
         private const int QuestConnectedStartMapId = 35801;
         private const int QuestConnectedBossMapId = 14198;
+        private const ushort BlackEarthObjectiveQuestId = 7731;
+        private const int BlackEarthObjectiveMapId = 39118;
 
         public static int Run()
         {
@@ -207,6 +209,36 @@ INSERT OR IGNORE INTO characters (character_id, account_id, name) VALUES (189001
                     questConnected.ActivationId,
                     clearEventId,
                     "clear-map") == 1,
+                ref failures);
+
+            Check("Black Earth objective quest matches its intermediate MAP",
+                GameWorld.QuestData.MatchesClearMapTarget(
+                    BlackEarthObjectiveQuestId,
+                    dungeonId: 0,
+                    mapId: BlackEarthObjectiveMapId),
+                ref failures);
+            QuestService.SaveActiveQuests(connStr, CharacterId, new List<ActiveQuest>
+            {
+                new ActiveQuest
+                {
+                    Slot = 0,
+                    QuestId = BlackEarthObjectiveQuestId,
+                    TriggerValue = 1,
+                },
+            });
+            changed = QuestService.SyncClearMapQuestProgressCore(
+                connStr,
+                CharacterId,
+                dungeonId: 0,
+                mapId: BlackEarthObjectiveMapId,
+                matchesClearMapQuest: (questId, dungeonId, mapId) =>
+                    GameWorld.QuestData.MatchesClearMapTarget(
+                        questId,
+                        dungeonId,
+                        mapId));
+            Check("Black Earth intermediate MAP clear completes the real quest",
+                changed == 1
+                && LoadTrigger(connStr, BlackEarthObjectiveQuestId) == 0,
                 ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");

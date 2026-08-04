@@ -24,12 +24,18 @@ namespace DfoServer.Network.Parsers.Dungeon
     {
         public ushort LocalIndex { get; }
         public ushort UserId { get; }
+        public bool IsCapture { get; }
         public bool IsPassiveObject { get; }
 
-        public DieMonsterRequest(ushort localIndex, ushort userId, bool isPassiveObject)
+        public DieMonsterRequest(
+            ushort localIndex,
+            ushort userId,
+            bool isCapture,
+            bool isPassiveObject)
         {
             LocalIndex = localIndex;
             UserId = userId;
+            IsCapture = isCapture;
             IsPassiveObject = isPassiveObject;
         }
 
@@ -42,15 +48,22 @@ namespace DfoServer.Network.Parsers.Dungeon
             ushort userId = body.Length >= 4 ? BitConverter.ToUInt16(body, 2) : (ushort)0;
 
             
+            bool isCapture = false;
             bool isPassive = false;
             if (body.Length > 20)
             {
                 int atkCount = body[20];
                 int flagOffset = 21 + atkCount * 10 + 6;
+                if (flagOffset - 1 < body.Length)
+                    isCapture = body[flagOffset - 1] != 0;
                 if (flagOffset < body.Length)
                     isPassive = body[flagOffset] == 1;
             }
-            return new DieMonsterRequest(localIndex, userId, isPassive);
+            return new DieMonsterRequest(
+                localIndex,
+                userId,
+                isCapture,
+                isPassive);
         }
     }
 }

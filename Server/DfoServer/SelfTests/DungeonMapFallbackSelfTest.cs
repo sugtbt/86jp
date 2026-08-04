@@ -78,6 +78,23 @@ namespace DfoServer.SelfTests
                     && projectedSpecialPassiveActors.TrueForAll(actor => actor.Flag0 == 1),
                     ref failures);
 
+                var monsterTeamMap = MapFile.Parse(
+                    "[monster]\n" +
+                    "57022 1 0 100 200 0 1 1 `[fixed]` `[normal]` " +
+                    "57054 1 0 300 200 0 1 1 `[fixed]` `[normal]`\n" +
+                    "[monster team]\n" +
+                    "100 0\n");
+                var projectedMonsterTeams =
+                    DfoServer.GameWorld.DungeonActorTemplateProjector.Project(
+                        monsterTeamMap,
+                        dungeonBasicLevel: 70,
+                        mapId: 39118);
+                Check("MAP monster team projects only team 100 as room-blocking",
+                    projectedMonsterTeams.Count == 2
+                    && projectedMonsterTeams[0].IsBlocking
+                    && !projectedMonsterTeams[1].IsBlocking,
+                    ref failures);
+
                 var eventPositionMap = MapFile.Parse(
                     "[event monster position]\n" +
                     "10 20 0 30 40 1\n");
@@ -1866,6 +1883,37 @@ namespace DfoServer.SelfTests
                 Check(
                     "Antwerp and train cleared doing-only quests return to ordinary mazes",
                     clearedSelectionsAreOrdinary,
+                    ref failures);
+
+                var ardenCompanionMaze = DungeonData.GetDungeonFile(93).Mazes[4];
+                var ardenCompanionStart =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 93,
+                        x: 0xFF,
+                        y: 0xFF,
+                        mazeIndex: 4,
+                        bossPos: ardenCompanionMaze.BossMap);
+                Check(
+                    "Arden companion quest falls back to a valid APC start MAP",
+                    ardenCompanionStart.Index == 12506
+                    && CountActor(ardenCompanionStart.Monsters, 11516) == 1,
+                    ref failures);
+
+                var blackEarthQuestRoom =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 182,
+                        x: 2,
+                        y: 0,
+                        mazeIndex: 1,
+                        bossPos: new[] { 0, 0 });
+                Check(
+                    "Black Earth objective MAP keeps hostile actor blocking and story actor non-blocking",
+                    blackEarthQuestRoom.Index == 39118
+                    && blackEarthQuestRoom.Monsters.Count == 2
+                    && blackEarthQuestRoom.Monsters[0].Code == 57022
+                    && blackEarthQuestRoom.Monsters[0].IsBlocking
+                    && blackEarthQuestRoom.Monsters[1].Code == 57054
+                    && !blackEarthQuestRoom.Monsters[1].IsBlocking,
                     ref failures);
 
                 string trainDifficultyDiagnostic = null;

@@ -49,6 +49,11 @@ namespace DfoServer.SelfTests
         private const int BloodAltarMapId = 16351;
         private const int BloodAltarMonsterCode = 56004;
         private const int BloodAltarQuestItemId = 4363;
+        private const ushort MasaccioCaptureQuestId = 2257;
+        private const int MasaccioCaptureDungeonId = 87;
+        private const int MasaccioCaptureMonsterCode = 56010;
+        private const int MasaccioCaptureItemId = 3315;
+        private const int MasaccioScannerItemId = 6056;
 
         public static int Run()
         {
@@ -238,6 +243,62 @@ namespace DfoServer.SelfTests
                     fixture.LoadKillerQuestTrigger(OrdinaryKillQuestId) == 2,
                     ref failures);
 
+                fixture.PrepareCaptureQuestKill();
+                var captureRun = fixture.Killer.Session.Player.CurrentRun;
+                fixture.CaptureMonster();
+                var captureSlot = FindGroundItemSlot(
+                    captureRun,
+                    MasaccioCaptureItemId);
+                Check(
+                    "capture-authorized monster creates one configured ground item",
+                    captureSlot > 0
+                        && CountGroundItem(captureRun, MasaccioCaptureItemId) == 1
+                        && fixture.CountKillerItem(MasaccioCaptureItemId) == 0
+                        && fixture.LoadKillerQuestTrigger(
+                            MasaccioCaptureQuestId) == 1,
+                    ref failures);
+                Check(
+                    "capture item is isolated from the party member",
+                    CountGroundItem(
+                        fixture.Member.Session.Player.CurrentRun,
+                        MasaccioCaptureItemId) == 0
+                        && fixture.CountMemberItem(MasaccioCaptureItemId) == 0,
+                    ref failures);
+                fixture.CaptureMonster();
+                Check(
+                    "duplicate capture death does not register another ground item",
+                    CountGroundItem(captureRun, MasaccioCaptureItemId) == 1,
+                    ref failures);
+                fixture.PickupGroundItem((ushort)captureSlot);
+                Check(
+                    "captured item pickup updates inventory and seeking progress",
+                    CountGroundItem(captureRun, MasaccioCaptureItemId) == 0
+                        && fixture.CountKillerItem(MasaccioCaptureItemId) == 1
+                        && fixture.LoadKillerQuestTrigger(
+                            MasaccioCaptureQuestId) == 0,
+                    ref failures);
+
+                fixture.PrepareCaptureQuestKill(activeQuest: false);
+                var noQuestCaptureRun = fixture.Killer.Session.Player.CurrentRun;
+                fixture.CaptureMonster();
+                Check(
+                    "capture without an active seeking quest is a no-op",
+                    CountGroundItem(
+                        noQuestCaptureRun,
+                        MasaccioCaptureItemId) == 0,
+                    ref failures);
+
+                fixture.PrepareCaptureQuestKill(replaceActivation: true);
+                var staleActivationCaptureRun =
+                    fixture.Killer.Session.Player.CurrentRun;
+                fixture.CaptureMonster();
+                Check(
+                    "capture with a stale quest activation is a no-op",
+                    CountGroundItem(
+                        staleActivationCaptureRun,
+                        MasaccioCaptureItemId) == 0,
+                    ref failures);
+
                 fixture.PrepareNightAssaultQuestKill();
                 fixture.KillMonster();
                 Check("Night Assault quest 2188 advances from its canonical PVF actor",
@@ -356,6 +417,53 @@ namespace DfoServer.SelfTests
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static int CountGroundItem(DungeonRun run, int itemId)
+        {
+            if (run == null || itemId <= 0)
+                return 0;
+
+            var count = 0;
+            lock (run.SyncRoot)
+            {
+                foreach (var drop in run.Drops.Values)
+                {
+                    if (drop.IsGold
+                        || drop.TemplateId != unchecked((uint)itemId))
+                    {
+                        continue;
+                    }
+
+                    var stack = drop.StackCount > int.MaxValue
+                        ? int.MaxValue
+                        : (int)drop.StackCount;
+                    count = count > int.MaxValue - Math.Max(1, stack)
+                        ? int.MaxValue
+                        : count + Math.Max(1, stack);
+                }
+            }
+            return count;
+        }
+
+        private static ushort FindGroundItemSlot(DungeonRun run, int itemId)
+        {
+            if (run == null || itemId <= 0)
+                return 0;
+
+            lock (run.SyncRoot)
+            {
+                foreach (var pair in run.Drops)
+                {
+                    var drop = pair.Value;
+                    if (!drop.IsGold
+                        && drop.TemplateId == unchecked((uint)itemId))
+                    {
+                        return pair.Key;
+                    }
+                }
+            }
+            return 0;
         }
 
         private static void Check(string name, bool ok, ref int failures)
@@ -609,6 +717,96 @@ namespace DfoServer.SelfTests
                 runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(active);
                 _killer.Session.Player.CurrentRun = runs.Killer;
                 _member.Session.Player.CurrentRun = runs.Member;
+            }
+
+            public void PrepareCaptureQuestKill(
+                bool activeQuest = true,
+                bool replaceActivation = false)
+            {
+                _killer.ReadAvailableTypes();
+                _member.ReadAvailableTypes();
+                List<ActiveQuest> killerActive;
+                List<ActiveQuest> memberActive;
+                if (activeQuest)
+                {
+                    killerActive = SaveActiveQuest(
+                        KillerCharacterId,
+                        MasaccioCaptureQuestId,
+                        triggerValue: 1);
+                    memberActive = SaveActiveQuest(
+                        MemberCharacterId,
+                        MasaccioCaptureQuestId,
+                        triggerValue: 1);
+
+                    if (!InventoryRewardGrantService.TryCreateAndInsert(
+                            InventoryContext.Get(KillerCharacterId),
+                            MasaccioScannerItemId,
+                            ItemCreateReason.QuestReward,
+                            1,
+                            out var killerTool)
+                        || !killerTool.Success
+                        || !InventoryRewardGrantService.TryCreateAndInsert(
+                            InventoryContext.Get(MemberCharacterId),
+                            MasaccioScannerItemId,
+                            ItemCreateReason.QuestReward,
+                            1,
+                            out var memberTool)
+                        || !memberTool.Success)
+                    {
+                        throw new InvalidOperationException(
+                            "Unable to seed SC-13 capture tools.");
+                    }
+                }
+                else
+                {
+                    QuestService.SaveActiveQuests(
+                        _connectionString,
+                        KillerCharacterId,
+                        new List<ActiveQuest>());
+                    QuestService.SaveActiveQuests(
+                        _connectionString,
+                        MemberCharacterId,
+                        new List<ActiveQuest>());
+                    killerActive = QuestService.LoadActiveQuests(
+                        _connectionString,
+                        KillerCharacterId);
+                    memberActive = QuestService.LoadActiveQuests(
+                        _connectionString,
+                        MemberCharacterId);
+                }
+
+                var monsters = new List<GameWorld.Dungeon.MonsterSumInfo>
+                {
+                    new GameWorld.Dungeon.MonsterSumInfo
+                    {
+                        Code = MasaccioCaptureMonsterCode,
+                        CaptureItems = MonsterCaptureDefinitionCatalog.GetItems(
+                            MasaccioCaptureMonsterCode),
+                        Level = 65,
+                        Type = 0,
+                        IsBlocking = true,
+                        PacketIndex = MonsterSequence,
+                    },
+                };
+                var runs = CreateSharedRuns(
+                    monsterType: 0,
+                    monsterCode: 0,
+                    dungeonId: MasaccioCaptureDungeonId,
+                    difficulty: 0,
+                    mapId: 10087,
+                    roomMonsters: monsters);
+                runs.Killer.QuestSnapshot = QuestRunSnapshot.Capture(killerActive);
+                runs.Member.QuestSnapshot = QuestRunSnapshot.Capture(memberActive);
+                _killer.Session.Player.CurrentRun = runs.Killer;
+                _member.Session.Player.CurrentRun = runs.Member;
+
+                if (replaceActivation)
+                {
+                    SaveActiveQuest(
+                        KillerCharacterId,
+                        MasaccioCaptureQuestId,
+                        triggerValue: 1);
+                }
             }
 
             public void PrepareNightAssaultQuestKill()
@@ -898,6 +1096,33 @@ WHERE character_id=@characterId AND event_kind=@eventKind;";
                     .GetResult();
             }
 
+            public void CaptureMonster(ushort sequenceId = MonsterSequence)
+            {
+                var body = new byte[28];
+                BitConverter.GetBytes(sequenceId).CopyTo(body, 0);
+                BitConverter.GetBytes((ushort)KillerCharacterId).CopyTo(body, 2);
+                body[20] = 0;
+                body[26] = 1;
+                _handler.Handle_ENUM_CMDPACKET_DIE_MONSTER(
+                        _killer.Session,
+                        new GamePacketHeader(),
+                        body)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
+            public void PickupGroundItem(ushort sceneSlot)
+            {
+                var body = new byte[2];
+                BitConverter.GetBytes(sceneSlot).CopyTo(body, 0);
+                _handler.Handle_ENUM_CMDPACKET_GET_ITEM(
+                        _killer.Session,
+                        new GamePacketHeader(),
+                        body)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
             private static DungeonRun CreateRun(
                 DeathTowerSession tower,
                 byte monsterType,
@@ -1006,13 +1231,14 @@ WHERE character_id=@characterId AND event_kind=@eventKind;";
                 return (CreateParticipant(1), CreateParticipant(1));
             }
 
-            private List<ActiveQuest> SaveKillerActiveQuest(
+            private List<ActiveQuest> SaveActiveQuest(
+                int characterId,
                 ushort questId,
                 uint triggerValue)
             {
                 QuestService.SaveActiveQuests(
                     _connectionString,
-                    KillerCharacterId,
+                    characterId,
                     new List<ActiveQuest>
                     {
                         new ActiveQuest
@@ -1024,8 +1250,22 @@ WHERE character_id=@characterId AND event_kind=@eventKind;";
                     });
                 return QuestService.LoadActiveQuests(
                     _connectionString,
-                    KillerCharacterId);
+                    characterId);
             }
+
+            private List<ActiveQuest> SaveKillerActiveQuest(
+                ushort questId,
+                uint triggerValue)
+            {
+                return SaveActiveQuest(
+                    KillerCharacterId,
+                    questId,
+                    triggerValue);
+            }
+
+            public int CountMemberItem(int itemId)
+                => InventoryContext.Get(MemberCharacterId)?.CountMainItem(itemId)
+                    ?? 0;
 
             private static PartyMember ToPartyMember(ConnectedSession connected)
             {

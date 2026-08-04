@@ -27,8 +27,11 @@ namespace DfoServer.GameWorld
             int mapId)
         {
             var result = new List<Dungeon.MonsterSumInfo>();
-            foreach (var item in mapFile.Monsters)
+            for (var monsterIndex = 0;
+                 monsterIndex < mapFile.Monsters.Count;
+                 monsterIndex++)
             {
+                var item = mapFile.Monsters[monsterIndex];
                 if (!item.MonsterId.HasValue || item.MonsterId.Value <= 0)
                 {
                     FileLogger.Log(
@@ -55,9 +58,11 @@ namespace DfoServer.GameWorld
                 result.Add(new Dungeon.MonsterSumInfo
                 {
                     Code = item.MonsterId.Value,
+                    CaptureItems = MonsterCaptureDefinitionCatalog.GetItems(
+                        item.MonsterId.Value),
                     Type = monsterType,
                     Level = monsterLevel,
-                    IsBlocking = true,
+                    IsBlocking = IsBlockingMonster(mapFile, monsterIndex),
                     X = item.X.GetValueOrDefault(),
                     Y = item.Y.GetValueOrDefault(),
                     Z = item.Z.GetValueOrDefault(),
@@ -108,6 +113,19 @@ namespace DfoServer.GameWorld
             return result;
         }
 
+        private static bool IsBlockingMonster(MapFile mapFile, int monsterIndex)
+        {
+            var teams = mapFile?.MonsterTeam;
+            if (teams == null
+                || monsterIndex < 0
+                || monsterIndex >= teams.Length)
+            {
+                return true;
+            }
+
+            return teams[monsterIndex] == (int)ApcFaction.Monster;
+        }
+
         internal static List<Dungeon.MonsterSumInfo> ProjectConditional(
             IReadOnlyList<MonsterInfo> monsters,
             byte dungeonBasicLevel,
@@ -143,6 +161,8 @@ namespace DfoServer.GameWorld
                 result.Add(new Dungeon.MonsterSumInfo
                 {
                     Code = item.MonsterId.Value,
+                    CaptureItems = MonsterCaptureDefinitionCatalog.GetItems(
+                        item.MonsterId.Value),
                     Type = monsterType,
                     Level = level,
                     X = item.X.GetValueOrDefault(),
@@ -255,6 +275,8 @@ namespace DfoServer.GameWorld
                     actors.Add(new Dungeon.MonsterSumInfo
                     {
                         Code = spawn.Code,
+                        CaptureItems = MonsterCaptureDefinitionCatalog.GetItems(
+                            spawn.Code),
                         Type = 0,
                         Level = spawn.Level > 0
                             ? (byte)Math.Min(spawn.Level, byte.MaxValue)

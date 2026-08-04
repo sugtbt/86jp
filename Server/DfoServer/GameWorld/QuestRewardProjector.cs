@@ -77,7 +77,7 @@ namespace DfoServer.GameWorld
                         playerJob,
                         playerGrowType,
                         out var items,
-                        out var hasGoldMarker,
+                        out var goldReward,
                         out var rewardParameter,
                         out var projectionError))
                 {
@@ -93,14 +93,21 @@ namespace DfoServer.GameWorld
                         definition.IgnoreLevelForExperience);
 
                 uint gold = 0;
-                if (definition.ChainType == 0
-                    && (hasGoldMarker || definition.GoldMultiple > 0))
+                if (definition.ChainType == 0)
                 {
-                    gold = Parameters.Value.ComputeGoldReward(
-                        playerLevel,
-                        definition.QuestMinLevel,
-                        definition.GoldMultiple,
-                        definition.IgnoreLevelForExperience);
+                    if (goldReward.HasFixedAmount)
+                    {
+                        gold = goldReward.FixedAmount;
+                    }
+                    else if (goldReward.HasFormulaMarker
+                             || definition.GoldMultiple > 0)
+                    {
+                        gold = Parameters.Value.ComputeGoldReward(
+                            playerLevel,
+                            definition.QuestMinLevel,
+                            definition.GoldMultiple,
+                            definition.IgnoreLevelForExperience);
+                    }
                 }
 
                 return QuestRewardResolution.Valid(

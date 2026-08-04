@@ -24,6 +24,9 @@ namespace DfoServer.GameWorld
         {
             public int Code { get; set; }
 
+            public IReadOnlyList<MonsterCaptureItemDefinition> CaptureItems
+            { get; set; }
+
             public byte Level { get; set; }
 
             // START_MAP 对象类型。0..3 为怪物，5..8 为 APC/AICharacter，9 为特殊被动对象路径。

@@ -4,6 +4,13 @@ using System.Text.RegularExpressions;
 
 namespace PvfLib
 {
+    public sealed class MonsterCatchItemInfo
+    {
+        public int ItemId { get; set; }
+        public int Count { get; set; }
+        public int DropRate { get; set; }
+    }
+
     
     
     
@@ -114,6 +121,8 @@ namespace PvfLib
         public string AttackInfo { get; set; }
         
         public string Item { get; set; }
+        public List<MonsterCatchItemInfo> CatchItems { get; set; }
+            = new List<MonsterCatchItemInfo>();
 
         #endregion
         #region 解析
@@ -212,10 +221,43 @@ namespace PvfLib
                     case "die effect": mob.DieEffect = data; break;
                     case "attack info": mob.AttackInfo = data; break;
                     case "item": mob.Item = data; break;
+                    case "catch item":
+                        ParseCatchItems(node, content, mob.CatchItems);
+                        break;
                 }
             }
 
             return mob;
+        }
+
+        private static void ParseCatchItems(
+            ScriptNode node,
+            string content,
+            ICollection<MonsterCatchItemInfo> result)
+        {
+            if (node == null || result == null)
+                return;
+
+            var numbers = new List<int>();
+            foreach (var dataItem in node.DataItems)
+            {
+                var raw = dataItem.GetContent(content) ?? string.Empty;
+                foreach (Match match in Regex.Matches(raw, @"-?\d+"))
+                {
+                    if (int.TryParse(match.Value, out var value))
+                        numbers.Add(value);
+                }
+            }
+
+            for (var index = 0; index + 2 < numbers.Count; index += 3)
+            {
+                result.Add(new MonsterCatchItemInfo
+                {
+                    ItemId = numbers[index],
+                    Count = numbers[index + 1],
+                    DropRate = numbers[index + 2],
+                });
+            }
         }
 
         private static void AddBacktickValues(

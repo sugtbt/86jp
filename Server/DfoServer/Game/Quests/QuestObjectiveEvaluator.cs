@@ -25,6 +25,21 @@ namespace DfoServer.Game.Quests
                         request.TriggerType);
                     if (authority == QuestClientTriggerDisposition.Reject)
                         return result;
+                    if (authority == QuestClientTriggerDisposition.Recompute)
+                    {
+                        var recomputed = EvaluateSeekingItems(
+                            quest,
+                            request,
+                            current);
+                        if (recomputed.Matched && recomputed.Changes.Count == 0)
+                        {
+                            recomputed.AddChange(
+                                quest.QuestId,
+                                current,
+                                current);
+                        }
+                        return recomputed;
+                    }
                     if (authority == QuestClientTriggerDisposition.EchoOnly)
                     {
                         result.Matched = true;

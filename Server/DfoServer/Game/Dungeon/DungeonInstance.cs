@@ -99,18 +99,26 @@ namespace DfoServer.Game.Dungeon
         public int BossKillCount { get; }
     }
 
+    public enum DungeonActorDeathKind
+    {
+        Defeated = 0,
+        Captured = 1,
+    }
+
     public sealed class DungeonActorDeathFact
     {
         internal DungeonActorDeathFact(
             DungeonEventEnvelope source,
             ushort sequenceId,
             int actorCode,
-            byte actorType)
+            byte actorType,
+            DungeonActorDeathKind deathKind)
         {
             Source = source ?? throw new ArgumentNullException(nameof(source));
             SequenceId = sequenceId;
             ActorCode = actorCode;
             ActorType = actorType;
+            DeathKind = deathKind;
         }
 
         public DungeonEventEnvelope Source { get; }
@@ -118,6 +126,7 @@ namespace DfoServer.Game.Dungeon
         public ushort SequenceId { get; }
         public int ActorCode { get; }
         public byte ActorType { get; }
+        public DungeonActorDeathKind DeathKind { get; }
     }
 
     internal readonly struct DungeonRoomActorDeathApplication
@@ -256,7 +265,8 @@ namespace DfoServer.Game.Dungeon
             DungeonEventEnvelope source,
             ushort sequenceId,
             int actorCode,
-            byte actorType)
+            byte actorType,
+            DungeonActorDeathKind deathKind = DungeonActorDeathKind.Defeated)
         {
             if (!MatchesSource(source) || sequenceId == 0)
                 return default;
@@ -277,7 +287,8 @@ namespace DfoServer.Game.Dungeon
                     source,
                     sequenceId,
                     actorCode,
-                    actorType);
+                    actorType,
+                    deathKind);
                 _actorDeaths.Add(sequenceId, fact);
                 return new DungeonRoomActorDeathApplication(
                     accepted: true,
@@ -320,7 +331,8 @@ namespace DfoServer.Game.Dungeon
                         source,
                         sequenceId: 0,
                         actor.ObjectCode,
-                        SpecialPassiveObjectActorType);
+                        SpecialPassiveObjectActorType,
+                        DungeonActorDeathKind.Defeated);
                     _mapOwnedActorDeaths.Add(index, fact);
                     return new DungeonRoomActorDeathApplication(
                         accepted: true,

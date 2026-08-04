@@ -74,6 +74,164 @@ namespace DfoServer.Game.Quests
                         monsterCode));
         }
 
+        public IReadOnlyList<DropInfo> CheckMonsterCaptureDrop(
+            EnhancedClientSession session,
+            DungeonRun expectedRun,
+            DungeonEventEnvelope source,
+            DfoServer.GameWorld.Dungeon.MonsterSumInfo monster)
+        {
+            var empty = Array.Empty<DropInfo>();
+            var characterId = session?.Player?.CharacterId ?? 0;
+            if (expectedRun == null
+                || expectedRun.Tower != null
+                || monster.Code <= 0
+                || monster.CaptureItems == null
+                || monster.CaptureItems.Count == 0
+                || source == null
+                || source.SourcePlayerId != characterId
+                || !MatchesExpectedRun(
+                    session?.Player?.CurrentRun,
+                    expectedRun,
+                    characterId,
+                    source,
+                    requireRoomIdentity: true)
+                || !expectedRun.RewardPolicy.AllowsQuestDrops)
+            {
+                return empty;
+            }
+
+            if (!expectedRun.CaptureDrops.TryBegin(
+                    source.SourceEventId,
+                    out var reservation,
+                    out var committedDrops))
+            {
+                return committedDrops ?? empty;
+            }
+
+            try
+            {
+                if (!TryLoadEligibleQuestIds(
+                        session,
+                        expectedRun,
+                        $"capture-monster={monster.Code}",
+                        out var activeQuestIds))
+                {
+                    expectedRun.CaptureDrops.TryFail(reservation);
+                    return empty;
+                }
+
+                var candidates = QuestDropProvider.CheckMonsterCaptureDrop(
+                    activeQuestIds,
+                    monster.CaptureItems);
+                if (candidates == null || candidates.Count == 0)
+                {
+                    expectedRun.CaptureDrops.TryCommit(reservation, empty);
+                    return empty;
+                }
+
+                if (!InventoryContext.TryGetOwnedLease(
+                        session.SessionId,
+                        characterId,
+                        out var lease))
+                {
+                    expectedRun.CaptureDrops.TryFail(reservation);
+                    return empty;
+                }
+
+                var heldCounts = new Dictionary<int, int>();
+                lock (lease.SyncRoot)
+                {
+                    if (!InventoryContext.IsCurrentLease(
+                            lease,
+                            session.SessionId,
+                            characterId))
+                    {
+                        expectedRun.CaptureDrops.TryFail(reservation);
+                        return empty;
+                    }
+
+                    foreach (var candidate in candidates)
+                    {
+                        if (!heldCounts.ContainsKey(candidate.ItemId))
+                        {
+                            heldCounts[candidate.ItemId] =
+                                lease.Inventory.CountMainItem(candidate.ItemId);
+                        }
+                    }
+                }
+
+                if (!MatchesExpectedRun(
+                        session.Player.CurrentRun,
+                        expectedRun,
+                        characterId,
+                        source,
+                        requireRoomIdentity: true))
+                {
+                    expectedRun.CaptureDrops.TryFail(reservation);
+                    return empty;
+                }
+
+                var generated = new List<DropInfo>();
+                var projectedCounts = new Dictionary<int, int>();
+                foreach (var candidate in candidates)
+                {
+                    heldCounts.TryGetValue(candidate.ItemId, out var held);
+                    projectedCounts.TryGetValue(
+                        candidate.ItemId,
+                        out var projected);
+                    var pending = CountPendingGroundItems(
+                        expectedRun,
+                        candidate.ItemId);
+                    var current = SaturatingAdd(
+                        SaturatingAdd(held, pending),
+                        projected);
+                    var count = ClampDropCount(
+                        candidate,
+                        current,
+                        _rollDrop(candidate, current));
+                    if (count <= 0)
+                        continue;
+
+                    if (!_itemAcquisition.TryRegisterGroundDrop(
+                            expectedRun,
+                            candidate.ItemId,
+                            count,
+                            out var drop))
+                    {
+                        FileLogger.Log(
+                            $"[{ProtocolLogName}] QUEST_CAPTURE_DROP: " +
+                            $"registration failed monster={monster.Code} " +
+                            $"item={candidate.ItemId} count={count}");
+                        continue;
+                    }
+
+                    generated.Add(drop);
+                    projectedCounts[candidate.ItemId] =
+                        SaturatingAdd(projected, count);
+                }
+
+                if (!expectedRun.CaptureDrops.TryCommit(
+                        reservation,
+                        generated))
+                {
+                    throw new InvalidOperationException(
+                        "capture drop reservation was lost before commit");
+                }
+
+                return generated.Count == 0
+                    ? empty
+                    : generated.AsReadOnly();
+            }
+            catch (Exception ex)
+            {
+                expectedRun.CaptureDrops.TryFail(reservation);
+                FileLogger.Log(
+                    $"[{ProtocolLogName}] QUEST_CAPTURE_DROP: " +
+                    $"monster={monster.Code} error={ex.Message}");
+                return empty;
+            }
+        }
+
         public Task CheckPassiveObjectDrop(
             EnhancedClientSession session,
             DungeonRun expectedRun,
@@ -661,9 +819,25 @@ namespace DfoServer.Game.Quests
             DungeonRun run,
             string source)
         {
+            return TryLoadEligibleQuestIds(
+                session,
+                run,
+                source,
+                out var eligible)
+                ? eligible
+                : null;
+        }
+
+        private bool TryLoadEligibleQuestIds(
+            EnhancedClientSession session,
+            DungeonRun run,
+            string source,
+            out HashSet<int> eligible)
+        {
+            eligible = null;
             var snapshot = run?.QuestSnapshot ?? QuestRunSnapshot.Empty;
             if (snapshot.Count == 0)
-                return null;
+                return true;
 
             try
             {
@@ -674,13 +848,44 @@ namespace DfoServer.Game.Quests
                 var quests = QuestService.LoadActiveQuests(
                     connStr,
                     session.Player.CharacterId);
-                return FilterEligibleQuestActivations(snapshot, quests);
+                eligible = FilterEligibleQuestActivations(snapshot, quests);
+                return true;
             }
             catch (Exception ex)
             {
                 FileLogger.Log($"[{ProtocolLogName}] QUEST_DROP ERROR: active quest load failed, drop check skipped: {source}: {ex.Message}");
-                return null;
+                return false;
             }
+        }
+
+        private static int CountPendingGroundItems(
+            DungeonRun run,
+            int itemId)
+        {
+            var total = 0;
+            lock (run.SyncRoot)
+            {
+                foreach (var drop in run.Drops.Values)
+                {
+                    if (drop.IsGold
+                        || drop.TemplateId != unchecked((uint)itemId))
+                    {
+                        continue;
+                    }
+
+                    var count = drop.StackCount > int.MaxValue
+                        ? int.MaxValue
+                        : (int)drop.StackCount;
+                    total = SaturatingAdd(total, Math.Max(1, count));
+                }
+            }
+            return total;
+        }
+
+        private static int SaturatingAdd(int left, int right)
+        {
+            var sum = (long)Math.Max(0, left) + Math.Max(0, right);
+            return sum > int.MaxValue ? int.MaxValue : (int)sum;
         }
 
         private static void LogStaleEvent(

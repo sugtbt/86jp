@@ -6,6 +6,107 @@ using System.Threading;
 
 namespace DfoServer.Game.Dungeon
 {
+    internal readonly struct DungeonCaptureDropReservation
+    {
+        internal DungeonCaptureDropReservation(Guid sourceEventId, Guid leaseId)
+        {
+            SourceEventId = sourceEventId;
+            LeaseId = leaseId;
+        }
+
+        internal Guid SourceEventId { get; }
+        internal Guid LeaseId { get; }
+        internal bool IsValid => SourceEventId != Guid.Empty && LeaseId != Guid.Empty;
+    }
+
+    internal sealed class DungeonCaptureDropJournal
+    {
+        private sealed class Entry
+        {
+            internal Guid LeaseId;
+            internal IReadOnlyList<DropInfo> Drops;
+            internal bool Committed;
+        }
+
+        private readonly object _syncRoot = new object();
+        private readonly Dictionary<Guid, Entry> _entries =
+            new Dictionary<Guid, Entry>();
+
+        internal bool TryBegin(
+            Guid sourceEventId,
+            out DungeonCaptureDropReservation reservation,
+            out IReadOnlyList<DropInfo> committedDrops)
+        {
+            lock (_syncRoot)
+            {
+                if (sourceEventId == Guid.Empty)
+                {
+                    reservation = default;
+                    committedDrops = null;
+                    return false;
+                }
+
+                if (_entries.TryGetValue(sourceEventId, out var existing))
+                {
+                    reservation = default;
+                    committedDrops = existing.Committed
+                        ? existing.Drops
+                        : null;
+                    return false;
+                }
+
+                var leaseId = Guid.NewGuid();
+                _entries[sourceEventId] = new Entry { LeaseId = leaseId };
+                reservation = new DungeonCaptureDropReservation(
+                    sourceEventId,
+                    leaseId);
+                committedDrops = null;
+                return true;
+            }
+        }
+
+        internal bool TryCommit(
+            DungeonCaptureDropReservation reservation,
+            IReadOnlyList<DropInfo> drops)
+        {
+            lock (_syncRoot)
+            {
+                if (!TryGetOwned(reservation, out var entry))
+                    return false;
+
+                entry.Drops = drops == null || drops.Count == 0
+                    ? Array.Empty<DropInfo>()
+                    : new List<DropInfo>(drops).AsReadOnly();
+                entry.Committed = true;
+                entry.LeaseId = Guid.Empty;
+                return true;
+            }
+        }
+
+        internal bool TryFail(DungeonCaptureDropReservation reservation)
+        {
+            lock (_syncRoot)
+            {
+                if (!TryGetOwned(reservation, out _))
+                    return false;
+
+                _entries.Remove(reservation.SourceEventId);
+                return true;
+            }
+        }
+
+        private bool TryGetOwned(
+            DungeonCaptureDropReservation reservation,
+            out Entry entry)
+        {
+            entry = null;
+            return reservation.IsValid
+                && _entries.TryGetValue(reservation.SourceEventId, out entry)
+                && !entry.Committed
+                && entry.LeaseId == reservation.LeaseId;
+        }
+    }
+
     internal sealed class DungeonRunSelectionState
     {
         internal int MazeIndex { get; set; } = -1;
@@ -101,6 +202,8 @@ namespace DfoServer.Game.Dungeon
             new HashSet<QuestActivationId>();
 
         internal QuestRunSnapshot Snapshot { get; set; } = QuestRunSnapshot.Empty;
+        internal DungeonCaptureDropJournal CaptureDrops { get; }
+            = new DungeonCaptureDropJournal();
 
         internal bool TryMarkClearMapSynced(int dungeonId, int mapId)
             => _syncedClearMapTargets.Add((dungeonId, mapId));

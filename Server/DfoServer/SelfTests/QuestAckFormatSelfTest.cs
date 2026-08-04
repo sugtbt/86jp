@@ -20,6 +20,9 @@ namespace DfoServer.SelfTests
     {
         private const int CharacterId = 136001;
         private const int AccountId = 136001;
+        private const int FixedGoldCharacterId = 136002;
+        private const ushort FixedGoldQuestId = 2261;
+        private const uint FixedGoldReward = 100000;
 
         // 使用固定任务样本:
         // 2042(交信任务, 完成发放事件道具 10089292), 前置 2041。
@@ -27,6 +30,9 @@ namespace DfoServer.SelfTests
         private const ushort PrerequisiteQuestId = 2041;
         private const ushort ThievesCityQuestId = 2066;
         private const int ThievesCityQuestItemId = 10089306;
+        private const ushort MasaTargetQuestId = 2257;
+        private const int MasaScannerItemId = 6056;
+        private const int MasaRecordItemId = 3315;
 
         public static int Run()
         {
@@ -50,6 +56,15 @@ namespace DfoServer.SelfTests
                 GrowType = 0,
                 Level = 49,
             });
+            characterRepository.Create(new CharacterRecord
+            {
+                CharacterId = FixedGoldCharacterId,
+                AccountId = AccountId,
+                Name = Encoding.UTF8.GetBytes("quest-fixed-gold-test"),
+                Job = 0,
+                GrowType = 0,
+                Level = 65,
+            });
 
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
@@ -59,6 +74,13 @@ namespace DfoServer.SelfTests
             InventoryContext.Register(
                 sessionId,
                 inventory);
+            var fixedGoldSessionId = Guid.NewGuid();
+            var fixedGoldInventory = new InventoryService(
+                FixedGoldCharacterId,
+                AccountId);
+            InventoryContext.Register(
+                fixedGoldSessionId,
+                fixedGoldInventory);
 
             // --- 接取: 前置未完成 -> 失败 ACK ---
             var acceptFail = QuestAckBuilder.BuildAccept(questService.HandleAcceptQuest(CharacterId, BuildAcceptBody(LetterQuestId), AccountId));
@@ -131,8 +153,21 @@ namespace DfoServer.SelfTests
                 sessionId,
                 inventory,
                 ref failures);
+            VerifyActivationItemGiveupProjection(
+                connStr,
+                sessionId,
+                inventory,
+                ref failures);
+            VerifyFixedGoldCompletion(
+                questService,
+                connStr,
+                fixedGoldInventory,
+                ref failures);
 
             InventoryContext.Unregister(sessionId, CharacterId);
+            InventoryContext.Unregister(
+                fixedGoldSessionId,
+                FixedGoldCharacterId);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
@@ -200,6 +235,7 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
             const ushort sharedQuestB = 3;
             const int questItemId = 500001;
             const int ordinaryMaterialId = 500002;
+            const int activationToolId = 500003;
             var active = new List<ActiveQuest>
             {
                 new ActiveQuest { QuestId = abandonedQuestId },
@@ -211,11 +247,15 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
                 [abandonedQuestId] = new[]
                 {
                     new GameWorld.QuestRewardItem { ItemId = questItemId, Count = 4 },
-                    new GameWorld.QuestRewardItem { ItemId = ordinaryMaterialId, Count = 3 },
+                    new GameWorld.QuestRewardItem { ItemId = activationToolId, Count = 1 },
                 },
                 [sharedQuestA] = new[]
                 {
                     new GameWorld.QuestRewardItem { ItemId = questItemId, Count = 10 },
+                },
+                [sharedQuestB] = new[]
+                {
+                    new GameWorld.QuestRewardItem { ItemId = activationToolId, Count = 2 },
                 },
             };
             var seeking = new Dictionary<ushort, IReadOnlyCollection<GameWorld.QuestRewardItem>>
@@ -246,13 +286,24 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
                 itemId => itemId == questItemId);
             Check(
                 "giveup policy keeps the largest shared quest requirement",
-                plan.Count == 1
-                    && plan[0].ItemId == questItemId
-                    && plan[0].RetainCount == 12,
+                FindRetainCount(plan, questItemId) == 12,
+                ref failures);
+            Check(
+                "giveup policy reclaims activation tools regardless of item family",
+                FindRetainCount(plan, activationToolId) == 2,
                 ref failures);
             Check(
                 "giveup policy excludes ordinary materials",
                 !ContainsPlanItem(plan, ordinaryMaterialId),
+                ref failures);
+
+            var realPlan = QuestGiveupItemRecoveryPolicy.Build(
+                new[] { new ActiveQuest { QuestId = MasaTargetQuestId } },
+                MasaTargetQuestId);
+            Check(
+                "real depend-give throw item is owned by its quest activation",
+                ContainsPlanItem(realPlan, MasaScannerItemId)
+                && !ContainsPlanItem(realPlan, MasaRecordItemId),
                 ref failures);
         }
 
@@ -310,6 +361,152 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
                 "01-12-08",
                 sender.LastCommandBody,
                 ref failures);
+        }
+
+        private static void VerifyActivationItemGiveupProjection(
+            string connectionString,
+            Guid sessionId,
+            InventoryService inventory,
+            ref int failures)
+        {
+            QuestService.SaveActiveQuests(
+                connectionString,
+                CharacterId,
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = MasaTargetQuestId,
+                        TriggerValue = 1,
+                    },
+                });
+            var toolInserted = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                MasaScannerItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var toolGrant);
+            var materialInserted = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                MasaRecordItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var materialGrant);
+            Check(
+                "depend-give non-quest tool fixture is inserted",
+                toolInserted
+                && toolGrant.Success
+                && materialInserted
+                && materialGrant.Success,
+                ref failures);
+
+            var sender = new RecordingSender(CharacterId, AccountId);
+            var manager = new QuestManager(sender, connectionString);
+            var body = new byte[4];
+            BitConverter.GetBytes(MasaTargetQuestId).CopyTo(body, 2);
+            manager.HandleGiveupQuestAsync(0x0020, body, sessionId)
+                .GetAwaiter()
+                .GetResult();
+
+            Check(
+                "giveup reclaims depend-give tool but retains ordinary seeking material",
+                inventory.CountMainItem(MasaScannerItemId) == 0
+                && inventory.CountMainItem(MasaRecordItemId) == 1,
+                ref failures);
+            Check(
+                "depend-give tool removal projects inventory before command ack",
+                sender.Events.Count == 2
+                && sender.Events[0] == "noti:000E"
+                && sender.Events[1] == "cmd:0020",
+                ref failures);
+        }
+
+        private static void VerifyFixedGoldCompletion(
+            QuestService questService,
+            string connectionString,
+            InventoryService inventory,
+            ref int failures)
+        {
+            var fixedReward = GameWorld.QuestData.ResolveReward(
+                FixedGoldQuestId,
+                hasRewardSelection: false,
+                rewardSelectIdx: -1,
+                playerLevel: 65,
+                playerJob: 0,
+                playerGrowType: 0);
+            Check(
+                "fixed quest gold projects PVF amount",
+                fixedReward.IsValid
+                    && fixedReward.Reward.Gold == FixedGoldReward,
+                ref failures);
+
+            var formulaReward = GameWorld.QuestData.ResolveReward(
+                1778,
+                hasRewardSelection: false,
+                rewardSelectIdx: -1,
+                playerLevel: 5,
+                playerJob: 0,
+                playerGrowType: 0);
+            Check(
+                "zero gold marker retains level formula",
+                formulaReward.IsValid
+                    && formulaReward.Reward.Gold == 216,
+                ref failures);
+
+            QuestService.SaveActiveQuests(
+                connectionString,
+                FixedGoldCharacterId,
+                new List<ActiveQuest>
+                {
+                    new ActiveQuest
+                    {
+                        Slot = 0,
+                        QuestId = FixedGoldQuestId,
+                        TriggerValue = 0,
+                    },
+                });
+
+            var beforeGold = inventory.GetMainVirtualCount(0)?.Count ?? 0;
+            var finish = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                FixedGoldCharacterId,
+                BuildFinishBody(FixedGoldQuestId));
+            var ack = QuestAckBuilder.BuildFinish(finish);
+            var ackGold = ack != null && ack.Length >= 12
+                ? BitConverter.ToUInt32(ack, 8)
+                : 0;
+            Check(
+                "fixed quest gold completion updates balance and finish ACK",
+                finish.Success
+                    && finish.Gold == FixedGoldReward
+                    && ackGold == FixedGoldReward
+                    && inventory.GetMainVirtualCount(0)?.Count
+                        == beforeGold + (int)FixedGoldReward,
+                ref failures);
+
+            var repeated = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                FixedGoldCharacterId,
+                BuildFinishBody(FixedGoldQuestId));
+            Check(
+                "fixed quest gold completion is not replayed",
+                !repeated.Success
+                    && (inventory.GetMainVirtualCount(0)?.Count ?? 0)
+                        == beforeGold + (int)FixedGoldReward,
+                ref failures);
+        }
+
+        private static int FindRetainCount(
+            IReadOnlyList<QuestGiveupItemRecoveryEntry> plan,
+            int itemId)
+        {
+            if (plan == null)
+                return -1;
+            foreach (var entry in plan)
+                if (entry.ItemId == itemId)
+                    return entry.RetainCount;
+            return -1;
         }
 
         private static bool ContainsPlanItem(

@@ -37,8 +37,11 @@ namespace DfoServer.Game.Quests
             if (isQuestItem == null)
                 throw new ArgumentNullException(nameof(isQuestItem));
 
-            var candidateItemIds = new HashSet<int>();
-            AddItemIds(candidateItemIds, getEventItems(abandonedQuestId));
+            var activationItemIds = new HashSet<int>();
+            AddItemIds(
+                activationItemIds,
+                getEventItems(abandonedQuestId));
+            var candidateItemIds = new HashSet<int>(activationItemIds);
             AddItemIds(
                 candidateItemIds,
                 getSeekingItems(abandonedQuestId));
@@ -46,7 +49,8 @@ namespace DfoServer.Game.Quests
             var result = new List<QuestGiveupItemRecoveryEntry>();
             foreach (var itemId in candidateItemIds)
             {
-                if (!isQuestItem(itemId))
+                if (!activationItemIds.Contains(itemId)
+                    && !isQuestItem(itemId))
                     continue;
 
                 var retainCount = 0;

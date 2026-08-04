@@ -423,6 +423,13 @@ namespace DfoServer.Game.Quests
                     itemFilter.Add(current.CostItemTemplateId);
                 if (current.GoldSpent)
                     itemFilter.Add(0);
+                if (current.MainVirtualCountChanged
+                    && InventoryService.TryResolveMainVirtualItemId(
+                        current.SlotIndex,
+                        out var virtualItemId))
+                {
+                    itemFilter.Add(virtualItemId);
+                }
 
                 foreach (var extra in current.ExtraResults)
                 {

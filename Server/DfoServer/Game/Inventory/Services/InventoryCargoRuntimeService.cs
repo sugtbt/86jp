@@ -21,11 +21,15 @@ namespace DfoServer.Game.Inventory
             InventoryService inventory,
             int amount,
             out int newCharGold,
-            out int newCargoGold)
+            out int newCargoGold,
+            out InventoryMutationResult mutation)
         {
             newCharGold = 0;
             newCargoGold = 0;
-            if (inventory == null || amount <= 0)
+            mutation = null;
+            if (inventory == null
+                || amount <= 0
+                || inventory.AccountCargo.Money > int.MaxValue - amount)
                 return false;
 
             if (!inventory.TryConsumeMainItem(0, amount, out var consumeResult) || !consumeResult.Success)
@@ -34,6 +38,7 @@ namespace DfoServer.Game.Inventory
             inventory.AccountCargo.Money += amount;
             newCharGold = consumeResult.RemainingCount;
             newCargoGold = inventory.AccountCargo.Money;
+            mutation = BuildMainVirtualCountMutation(0, newCharGold);
             return true;
         }
 
@@ -41,20 +46,25 @@ namespace DfoServer.Game.Inventory
             InventoryService inventory,
             int amount,
             out int newCharGold,
-            out int newCargoGold)
+            out int newCargoGold,
+            out InventoryMutationResult mutation)
         {
             newCharGold = 0;
             newCargoGold = 0;
+            mutation = null;
             if (inventory == null || amount <= 0 || inventory.AccountCargo.Money < amount)
                 return false;
 
             var currentGold = inventory.CountMainItem(0);
+            if (currentGold > int.MaxValue - amount)
+                return false;
             if (!inventory.SetMainVirtualCount(0, currentGold + amount))
                 return false;
 
             inventory.AccountCargo.Money -= amount;
             newCharGold = currentGold + amount;
             newCargoGold = inventory.AccountCargo.Money;
+            mutation = BuildMainVirtualCountMutation(0, newCharGold);
             return true;
         }
 
@@ -509,15 +519,27 @@ namespace DfoServer.Game.Inventory
 
         private static InventoryMutationResult BuildGoldCostResult(int updatedGold)
         {
+            var result = BuildMainVirtualCountMutation(0, updatedGold);
+            result.GoldSpent = true;
+            return result;
+        }
+
+        private static InventoryMutationResult BuildMainVirtualCountMutation(
+            short slotIndex,
+            int updatedCount)
+        {
+            InventoryService.TryResolveMainVirtualItemId(
+                slotIndex,
+                out var itemId);
             return new InventoryMutationResult
             {
                 ListType = InventoryListType.Main,
-                SlotIndex = 0,
-                ItemTemplateId = 0,
-                RemainingStackCount = updatedGold,
-                InstanceValue = updatedGold,
-                UpdatedGold = updatedGold,
-                GoldSpent = true,
+                SlotIndex = slotIndex,
+                ItemTemplateId = itemId,
+                RemainingStackCount = updatedCount,
+                InstanceValue = updatedCount,
+                UpdatedGold = slotIndex == 0 ? updatedCount : 0,
+                MainVirtualCountChanged = true,
             };
         }
 

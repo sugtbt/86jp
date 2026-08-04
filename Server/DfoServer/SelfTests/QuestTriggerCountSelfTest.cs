@@ -34,6 +34,7 @@ namespace DfoServer.SelfTests
         private const ushort BossMonsterQuestId = 6;
         private const ushort SeekingPurchaseQuestId = 10;
         private const ushort SeekingSingleItemQuestId = 13092;
+        private const ushort SeekingGoldQuestId = 2266;
         private const int SeekingSingleItemId = 10088630;
         private const ushort SyntheticQuestId = 65000;
 
@@ -313,6 +314,13 @@ namespace DfoServer.SelfTests
                 .GetResult();
             failures += CheckPhysicalSeekingMutationProjectionAsync(
                     connStr,
+                    inventoryLease,
+                    inventory)
+                .GetAwaiter()
+                .GetResult();
+            failures += CheckVirtualGoldSeekingProjectionAsync(
+                    connStr,
+                    questService,
                     inventoryLease,
                     inventory)
                 .GetAwaiter()
@@ -1201,6 +1209,142 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && !staleMatched
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
                     && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+            return failures;
+        }
+
+        private static async Task<int> CheckVirtualGoldSeekingProjectionAsync(
+            string connStr,
+            QuestService questService,
+            InventoryLease inventoryLease,
+            InventoryService inventory)
+        {
+            const int initialGold = 192030;
+            const int transferGold = 1000000;
+            var failures = 0;
+            var seekingItems = GameWorld.QuestData.GetSeekingConsumeItems(
+                SeekingGoldQuestId);
+            Check("2266 preserves its virtual gold seeking requirement",
+                seekingItems.Count == 1
+                    && seekingItems[0].ItemId == 0
+                    && seekingItems[0].Count == transferGold,
+                ref failures);
+
+            inventory.SetMainVirtualCount(0, initialGold);
+            SaveActiveQuest(connStr, SeekingGoldQuestId, 511);
+            var insufficientRefresh = questService.HandleSetTrigger(
+                CharacterId,
+                BuildSetTriggerBody(SeekingGoldQuestId));
+            Check("server recompute keeps an insufficient gold quest incomplete",
+                insufficientRefresh.Success
+                    && insufficientRefresh.PreviousTriggerValue == 511
+                    && insufficientRefresh.TriggerValue == 511
+                    && LoadTrigger(connStr, SeekingGoldQuestId) == 511,
+                ref failures);
+
+            inventory.SetMainVirtualCount(0, initialGold + transferGold);
+            var authoritativeRefreshBody = BuildSetTriggerBody(SeekingGoldQuestId);
+            authoritativeRefreshBody[3] = 1;
+            var sufficientRefresh = questService.HandleSetTrigger(
+                CharacterId,
+                authoritativeRefreshBody);
+            Check("client SET_TRIGGER recomputes gold from the owned lease",
+                sufficientRefresh.Success
+                    && sufficientRefresh.PreviousTriggerValue == 511
+                    && sufficientRefresh.TriggerValue == 0
+                    && LoadTrigger(connStr, SeekingGoldQuestId) == 0,
+                ref failures);
+
+            inventory.SetMainVirtualCount(0, initialGold);
+            inventory.AccountCargo.Money = transferGold;
+            SaveActiveQuest(connStr, SeekingGoldQuestId, 511);
+            var sender = new RecordingSender();
+            var manager = new QuestManager(sender, connStr);
+            var withdrew = InventoryCargoRuntimeService.TryWithdrawCargoGold(
+                inventory,
+                transferGold,
+                out var withdrawnCharacterGold,
+                out var withdrawnCargoGold,
+                out var withdrawMutation);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                withdrawMutation);
+            Check("cargo withdrawal completes the gold seeking quest",
+                withdrew
+                    && withdrawMutation?.MainVirtualCountChanged == true
+                    && withdrawnCharacterGold == initialGold + transferGold
+                    && withdrawnCargoGold == 0
+                    && LoadTrigger(connStr, SeekingGoldQuestId) == 0
+                    && sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                withdrawMutation);
+            Check("replayed gold mutation does not rebuild the quest list",
+                LoadTrigger(connStr, SeekingGoldQuestId) == 0
+                    && sender.CountCalls("NOTI:023F") == 1,
+                ref failures);
+
+            var deposited = InventoryCargoRuntimeService.TryDepositCargoGold(
+                inventory,
+                transferGold,
+                out var depositedCharacterGold,
+                out var depositedCargoGold,
+                out var depositMutation);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                depositMutation);
+            Check("cargo deposit reopens the gold seeking quest",
+                deposited
+                    && depositMutation?.MainVirtualCountChanged == true
+                    && depositedCharacterGold == initialGold
+                    && depositedCargoGold == transferGold
+                    && LoadTrigger(connStr, SeekingGoldQuestId) == 511
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+
+            var rejected = InventoryCargoRuntimeService.TryWithdrawCargoGold(
+                inventory,
+                transferGold + 1,
+                out _,
+                out _,
+                out var rejectedMutation);
+            await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                inventoryLease,
+                rejectedMutation);
+            Check("failed cargo transfer has no quest projection",
+                !rejected
+                    && rejectedMutation == null
+                    && LoadTrigger(connStr, SeekingGoldQuestId) == 511
+                    && sender.CountCalls("NOTI:023F") == 2,
+                ref failures);
+
+            inventory.SetMainVirtualCount(0, initialGold + transferGold);
+            SaveActiveQuest(connStr, SeekingGoldQuestId, 0);
+            var beforeFinishGold = inventory.CountMainItem(0);
+            var finish = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                QuestSelfTestCommandAdapter.BuildFinishBody(SeekingGoldQuestId));
+            var afterFinishGold = inventory.CountMainItem(0);
+            Check("finishing 2266 atomically consumes one million gold",
+                finish.Success
+                    && finish.ConsumedEntries.Exists(entry =>
+                        entry.SlotIndex == 0
+                        && entry.ConsumedCount == transferGold)
+                    && afterFinishGold
+                        == beforeFinishGold - transferGold + finish.Gold,
+                ref failures);
+
+            var beforeReplayGold = inventory.CountMainItem(0);
+            var repeatedFinish = QuestSelfTestCommandAdapter.HandleFinish(
+                questService,
+                CharacterId,
+                QuestSelfTestCommandAdapter.BuildFinishBody(SeekingGoldQuestId));
+            Check("repeated 2266 completion cannot consume gold twice",
+                !repeatedFinish.Success
+                    && inventory.CountMainItem(0) == beforeReplayGold,
                 ref failures);
             return failures;
         }

@@ -6,6 +6,8 @@ using DfoServer.Game.Dungeon;
 using DfoServer.Game.Quests;
 using DfoServer.GameWorld;
 using DfoServer.Network.Handlers.Dungeon;
+using DfoServer.Network.Parsers.Dungeon;
+using PvfLib;
 
 namespace DfoServer.SelfTests
 {
@@ -21,6 +23,9 @@ namespace DfoServer.SelfTests
         private const int BlackChurchQuestItemId = 4755;
         private const ushort ThievesCityQuestId = 2066;
         private const int ThievesCityQuestItemId = 10089306;
+        private const ushort MasaccioCaptureQuestId = 2257;
+        private const int MasaccioCaptureMonsterCode = 56010;
+        private const int MasaccioCaptureItemId = 3315;
 
         public static int Run()
         {
@@ -28,12 +33,96 @@ namespace DfoServer.SelfTests
             var failures = 0;
 
             VerifyConfiguredDrops(ref failures);
+            VerifyMonsterCaptureConfiguration(ref failures);
             VerifyItemMetadataWarmupAndCache(ref failures);
             VerifyUnifiedItemAcquisition(ref failures);
             VerifyNotificationBatcher(ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void VerifyMonsterCaptureConfiguration(ref int failures)
+        {
+            var synthetic = MonsterFile.Parse(
+                "[catch item]\n"
+                + "3315 1 100\n"
+                + "[/catch item]\n");
+            Check(
+                "MOB parser reads catch item as item/count/rate",
+                synthetic.CatchItems.Count == 1
+                    && synthetic.CatchItems[0].ItemId == MasaccioCaptureItemId
+                    && synthetic.CatchItems[0].Count == 1
+                    && synthetic.CatchItems[0].DropRate == 100,
+                ref failures);
+
+            var requestBody = new byte[28];
+            requestBody[20] = 0;
+            requestBody[26] = 1;
+            var captureRequest = DieMonsterRequest.Parse(requestBody);
+            Check(
+                "DIE_MONSTER reads capture flag after zero attack records",
+                captureRequest.IsCapture && !captureRequest.IsPassiveObject,
+                ref failures);
+
+            requestBody = new byte[48];
+            requestBody[20] = 2;
+            requestBody[46] = 1;
+            requestBody[47] = 1;
+            captureRequest = DieMonsterRequest.Parse(requestBody);
+            Check(
+                "DIE_MONSTER keeps capture and passive flags after variable attack records",
+                captureRequest.IsCapture && captureRequest.IsPassiveObject,
+                ref failures);
+
+            var definition = MonsterCaptureDefinitionCatalog.GetItems(
+                MasaccioCaptureMonsterCode);
+            Check(
+                "real Masaccio MOB exposes its capture definition",
+                definition.Count == 1
+                    && definition[0].ItemId == MasaccioCaptureItemId
+                    && definition[0].Count == 1
+                    && definition[0].DropRate == 100,
+                ref failures);
+
+            var seeking = QuestData.GetSeekingConsumeItems(
+                MasaccioCaptureQuestId);
+            var hasRecordCapsule = false;
+            foreach (var item in seeking)
+            {
+                if (item.ItemId == MasaccioCaptureItemId
+                    && item.Count == 1)
+                {
+                    hasRecordCapsule = true;
+                    break;
+                }
+            }
+            Check(
+                "real quest 2257 seeks the captured record capsule",
+                hasRecordCapsule,
+                ref failures);
+
+            var candidates = QuestDropProvider.CheckMonsterCaptureDrop(
+                new[] { (int)MasaccioCaptureQuestId },
+                definition);
+            Check(
+                "real quest 2257 matches only the configured capture item",
+                candidates != null
+                    && candidates.Count == 1
+                    && candidates[0].QuestId == MasaccioCaptureQuestId
+                    && candidates[0].ItemId == MasaccioCaptureItemId
+                    && candidates[0].Count == 1
+                    && candidates[0].DropRate == 100
+                    && candidates[0].SeekingRequiredCount == 1
+                    && candidates[0].PreferQuestInventory,
+                ref failures);
+
+            Check(
+                "capture definition without an active quest is a no-op",
+                QuestDropProvider.CheckMonsterCaptureDrop(
+                    Array.Empty<int>(),
+                    definition) == null,
+                ref failures);
         }
 
         private static void VerifyItemMetadataWarmupAndCache(ref int failures)

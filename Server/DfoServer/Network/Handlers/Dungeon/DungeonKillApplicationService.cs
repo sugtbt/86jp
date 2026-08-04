@@ -24,13 +24,15 @@ namespace DfoServer.Network.Handlers.Dungeon
             DungeonEventEnvelope envelope,
             ushort sequenceId,
             ushort sourceUserId,
-            DungeonKillOrigin origin)
+            DungeonKillOrigin origin,
+            DungeonActorDeathKind deathKind = DungeonActorDeathKind.Defeated)
         {
             Session = session ?? throw new ArgumentNullException(nameof(session));
             Envelope = envelope ?? throw new ArgumentNullException(nameof(envelope));
             SequenceId = sequenceId;
             SourceUserId = sourceUserId;
             Origin = origin;
+            DeathKind = deathKind;
         }
 
         internal EnhancedClientSession Session { get; }
@@ -38,6 +40,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal ushort SequenceId { get; }
         internal ushort SourceUserId { get; }
         internal DungeonKillOrigin Origin { get; }
+        internal DungeonActorDeathKind DeathKind { get; }
         internal bool IsLocalReport => Origin == DungeonKillOrigin.LocalReport;
     }
 
@@ -333,7 +336,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         context.Envelope,
                         context.SequenceId,
                         monster.Value.Code,
-                        monster.Value.Type);
+                        monster.Value.Type,
+                        context.DeathKind);
                 }
                 if (!worldDeath.Accepted)
                 {
@@ -407,6 +411,17 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"cid={session.Player.CharacterId} seq={context.SequenceId} " +
                     $"local={roomLocalIndex} tracked={outOfRangeRoomState.MonsterCount} " +
                     $"killed={run.RoomKilledSeqIds.Count}");
+            }
+
+            if (monster != null
+                && context.DeathKind == DungeonActorDeathKind.Captured)
+            {
+                var captureDrops = _services.QuestDrops.CheckMonsterCaptureDrop(
+                    session,
+                    run,
+                    context.Envelope,
+                    monster.Value);
+                drops = MergeDrops(drops, captureDrops);
             }
 
             await SendMonsterDieAsync(session, context, drops);
@@ -541,7 +556,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         projectedSettlementSource,
                         context.SequenceId,
                         context.SourceUserId,
-                        context.Origin),
+                        context.Origin,
+                        context.DeathKind),
                     projectedRoomClearSource,
                     killedMonsterCode,
                     blockingCount,
@@ -610,6 +626,21 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             return true;
+        }
+
+        private static IReadOnlyList<DropInfo> MergeDrops(
+            IReadOnlyList<DropInfo> first,
+            IReadOnlyList<DropInfo> second)
+        {
+            if (second == null || second.Count == 0)
+                return first;
+            if (first == null || first.Count == 0)
+                return second;
+
+            var result = new List<DropInfo>(first.Count + second.Count);
+            result.AddRange(first);
+            result.AddRange(second);
+            return result;
         }
 
         private async Task<IReadOnlyList<DropInfo>> ApplyParticipantRewardAsync(
@@ -949,7 +980,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 context.Envelope,
                 context.SequenceId,
                 actorCode,
-                actorType);
+                actorType,
+                context.DeathKind);
             if (!worldDeath.Accepted || worldDeath.Fact == null)
                 return false;
 
@@ -962,7 +994,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 canonicalEnvelope,
                 context.SequenceId,
                 context.SourceUserId,
-                context.Origin);
+                context.Origin,
+                worldDeath.Fact.DeathKind);
             return true;
         }
 
@@ -1084,7 +1117,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         memberEvent,
                         source.SequenceId,
                         source.SourceUserId,
-                        DungeonKillOrigin.PartyRelay));
+                        DungeonKillOrigin.PartyRelay,
+                        source.DeathKind));
                 }
                 catch (Exception ex)
                 {

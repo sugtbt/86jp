@@ -5,6 +5,7 @@ namespace DfoServer.Game.Quests
         EchoOnly = 0,
         Mutate = 1,
         Reject = 2,
+        Recompute = 3,
     }
 
     internal static class QuestClientTriggerAuthority
@@ -29,12 +30,14 @@ namespace DfoServer.Game.Quests
             {
                 return triggerType == 0x20
                     ? QuestClientTriggerDisposition.Mutate
-                    : QuestClientTriggerDisposition.EchoOnly;
+                    : QuestClientTriggerDisposition.Recompute;
             }
 
             switch (type)
             {
                 case "seeking":
+                    return QuestClientTriggerDisposition.Recompute;
+
                 case "hunt monster":
                 case "clear map":
                 case "clear quest":

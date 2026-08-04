@@ -494,14 +494,26 @@ namespace DfoServer.Network.Handlers
 
             var (cid, _) = ResolveOwner(session);
             int newCharGold, newCargoGold;
+            InventoryMutationResult mutation;
+            InventoryLease lease;
             bool ok;
-            if (TryGetOwnedInventoryLease(session, cid, out var lease))
+            if (TryGetOwnedInventoryLease(session, cid, out lease))
             {
                 lock (lease.SyncRoot)
                 {
                     ok = isDeposit
-                        ? InventoryCargoRuntimeService.TryDepositCargoGold(lease.Inventory, amount, out newCharGold, out newCargoGold)
-                        : InventoryCargoRuntimeService.TryWithdrawCargoGold(lease.Inventory, amount, out newCharGold, out newCargoGold);
+                        ? InventoryCargoRuntimeService.TryDepositCargoGold(
+                            lease.Inventory,
+                            amount,
+                            out newCharGold,
+                            out newCargoGold,
+                            out mutation)
+                        : InventoryCargoRuntimeService.TryWithdrawCargoGold(
+                            lease.Inventory,
+                            amount,
+                            out newCharGold,
+                            out newCargoGold,
+                            out mutation);
                 }
             }
             else
@@ -509,6 +521,7 @@ namespace DfoServer.Network.Handlers
                 ok = false;
                 newCharGold = 0;
                 newCargoGold = 0;
+                mutation = null;
             }
             if (!ok)
             {
@@ -522,6 +535,13 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, wireType, ack.ToArray()));
 
             await _refresh.SendGoldUpdate(session);
+            if (session.GameSession?.QuestManager != null)
+            {
+                await session.GameSession.QuestManager
+                    .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                        lease,
+                        mutation);
+            }
 
             FileLogger.Log($"[{ProtocolName}] {(isDeposit ? "DEPOSIT" : "WITHDRAW")}_MONEY: amount={amount} charGold={newCharGold} cargoGold={newCargoGold}");
         }

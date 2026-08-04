@@ -148,6 +148,21 @@ namespace DfoServer.Game.Quests
                 };
             }
 
+            var disposition = QuestClientTriggerAuthority.Resolve(
+                questId,
+                triggerType);
+            IReadOnlyCollection<int> itemFilter = null;
+            IReadOnlyDictionary<int, int> heldItemCounts = null;
+            if (disposition == QuestClientTriggerDisposition.Recompute
+                && !TryCaptureSeekingHeldCounts(
+                    owner,
+                    questId,
+                    out itemFilter,
+                    out heldItemCounts))
+            {
+                return QuestSetTriggerResult.Fail(22);
+            }
+
             var applied = _progress.Apply(new QuestProgressApplicationRequest
             {
                 CharacterId = characterId,
@@ -160,6 +175,8 @@ namespace DfoServer.Game.Quests
                     {
                         [questId] = activeQuest.ActivationId,
                     },
+                ItemFilter = itemFilter,
+                HeldItemCounts = heldItemCounts,
                 CommandOwner = owner,
             });
             if (!applied.Success)
@@ -191,15 +208,45 @@ namespace DfoServer.Game.Quests
                 return QuestSetTriggerResult.Fail(22);
 
             var change = applied.Changes[applied.Changes.Count - 1];
-            var disposition = QuestClientTriggerAuthority.Resolve(
-                questId,
-                triggerType);
             FileLogger.Log(
                 $"[QuestService] SET_TRIGGER quest={questId} " +
                 $"type=0x{triggerType:X2} inc={increment} " +
                 $"authority={disposition} " +
                 $"trigger={change.PreviousTriggerValue}->{change.TriggerValue}");
             return change;
+        }
+
+        private static bool TryCaptureSeekingHeldCounts(
+            QuestCommandOwnerContext owner,
+            ushort questId,
+            out IReadOnlyCollection<int> itemFilter,
+            out IReadOnlyDictionary<int, int> heldItemCounts)
+        {
+            itemFilter = null;
+            heldItemCounts = null;
+            var seekItems = GameWorld.QuestData.GetSeekingConsumeItems(questId);
+            var itemIds = new HashSet<int>();
+            foreach (var item in seekItems)
+            {
+                if (item.ItemId >= 0 && item.Count > 0)
+                    itemIds.Add(item.ItemId);
+            }
+            if (itemIds.Count == 0 || !owner.IsCurrentInventoryOwner())
+                return false;
+
+            var counts = new Dictionary<int, int>();
+            var lease = owner.InventoryLease;
+            lock (lease.SyncRoot)
+            {
+                if (!owner.IsCurrentInventoryOwner())
+                    return false;
+                foreach (var itemId in itemIds)
+                    counts[itemId] = lease.Inventory.CountMainItem(itemId);
+            }
+
+            itemFilter = itemIds;
+            heldItemCounts = counts;
+            return owner.IsCurrentInventoryOwner();
         }
 
         public bool SyncItemSeekingQuestProgress(
@@ -276,7 +323,7 @@ namespace DfoServer.Game.Quests
                     applied.Error);
                 return false;
             }
-            return applied.MatchedObjective;
+            return applied.Changes.Count > 0;
         }
 
         public bool SyncClearMapQuestProgress(
