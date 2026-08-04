@@ -105,7 +105,11 @@ namespace DfoServer.Game.Quests
                             {
                                 return QuestAcceptResult.Fail(21);
                             }
-                            if (!QuestDungeonActivationPolicy
+                            // 一转分支共用同一张任务副本卡，但职业选择依靠
+                            // PVF 的 collision quest 互斥；不应再被物理槽位优先级
+                            // 把 2/3/4 号职业误判成不可接取。
+                            if (RequiresDungeonSlotArbitration(questId)
+                                && !QuestDungeonActivationPolicy
                                     .IsAcceptanceAllowed(questId, active))
                             {
                                 FileLogger.Log(
@@ -241,6 +245,17 @@ namespace DfoServer.Game.Quests
                 $"[QuestAcceptanceApplicationService] ACCEPT quest={questId} " +
                 $"slot={slot} initTrigger={initialTrigger} eventItems={eventItems.Count}");
             return result;
+        }
+
+        /// <summary>
+        /// 判断任务接取是否需要应用任务副本物理槽位仲裁。
+        /// 一转职业分支已有 collision quest 语义，跳过第二层槽位过滤，
+        /// 否则已有分支会让后续职业选择收到错误的“前置未满足”。
+        /// </summary>
+        private static bool RequiresDungeonSlotArbitration(int questId)
+        {
+            var quest = GameWorld.QuestData.GetQuestFile(questId);
+            return quest == null || quest.JobChangeQuestValue != 1;
         }
 
         private static int CountMainItemWithPendingRewards(
