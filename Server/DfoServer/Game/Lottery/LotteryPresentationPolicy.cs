@@ -23,6 +23,10 @@ namespace DfoServer.Game.Lottery
                 return null;
             }
 
+            if (reward.DisplayCore != null
+                && reward.DisplayCore.ItemId == reward.ItemTemplateId)
+                return reward.DisplayCore;
+
             if (reward.ListType == InventoryListType.Main
                 && InventoryService.IsVirtualMainSlot(reward.SlotIndex))
             {

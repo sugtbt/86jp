@@ -76,6 +76,53 @@ namespace DfoServer.SelfTests
             Check("reject unrelated overflow confirm", !LotteryItemHandler.IsLotteryOverflowConfirm(
                 new byte[] { 0x01, 0x1A, 0x00 }), ref failures);
 
+            var resetRequestBody = new byte[21];
+            Buffer.BlockCopy(BitConverter.GetBytes((short)113), 0, resetRequestBody, 13, 2);
+            Buffer.BlockCopy(BitConverter.GetBytes(0x0098B414), 0, resetRequestBody, 17, 4);
+            Check("parse increase chance reset request",
+                IncreaseChanceLotteryResetRequest.TryParse(resetRequestBody, out var resetRequest)
+                && resetRequest.SlotIndex == 113
+                && resetRequest.ItemTemplateId == 0x0098B414,
+                ref failures);
+            Check("reject malformed increase chance reset request",
+                !IncreaseChanceLotteryResetRequest.TryParse(new byte[20], out _),
+                ref failures);
+
+            var progress = new LotteryProgressSnapshot
+            {
+                ItemTemplateId = 0x0098B414,
+                NewRewardIndex = 6,
+            };
+            progress.ClaimedRewardIndexes.Add(1);
+            progress.ClaimedRewardIndexes.Add(6);
+            var progressBody = IncreaseChanceLotteryPacketBuilder.BuildAllState(progress);
+            Check("increase chance all-state body layout",
+                progressBody.Length == 204
+                && BitConverter.ToInt32(progressBody, 0) == 2
+                && BitConverter.ToInt32(progressBody, 4) == 0x0098B414
+                && BitConverter.ToInt32(progressBody, 8) == 7
+                && BitConverter.ToInt32(progressBody, 12) == 0x0098B414
+                && progressBody[16] == 2
+                && progressBody[17] == 7,
+                ref failures);
+            var resetResponse = IncreaseChanceLotteryPacketBuilder.BuildResetResponse(0, true);
+            Check("increase chance reset response layout",
+                 resetResponse.Length == 1
+                && resetResponse[0] == 1,
+                ref failures);
+            var failedResetResponse = IncreaseChanceLotteryPacketBuilder.BuildResetResponse(1, false);
+            Check("increase chance reset error response layout",
+                failedResetResponse.Length == 2
+                && failedResetResponse[0] == 0
+                && failedResetResponse[1] == 1,
+                ref failures);
+            var emptyProgressBody = IncreaseChanceLotteryPacketBuilder.BuildAllState(
+                (LotteryProgressSnapshot)null);
+            Check("increase chance empty-state body layout",
+                emptyProgressBody.Length == 204
+                && emptyProgressBody.All(value => value == 0),
+                ref failures);
+
             var phaseStart = LotteryItemAckBuilder.BuildPhaseStartWithoutPreview();
             Check("phase start body length", phaseStart.Length == 13, ref failures);
             Check("phase start hides source slot", BitConverter.ToInt16(phaseStart, 1) == -1, ref failures);
@@ -367,6 +414,14 @@ namespace DfoServer.SelfTests
                 && magicCapsuleResult.Rewards.Count == 1
                 && (magicCapsuleResult.Rewards[0].ItemTemplateId == MagicCapsulePrimaryRewardItemId
                     || magicCapsuleResult.Rewards[0].ItemTemplateId == MagicCapsuleSecondaryRewardItemId),
+                ref failures);
+            Check("PVF increase chance lottery definition", definitions.TryGet(
+                0x0098B414,
+                out var increaseChanceDefinition)
+                && increaseChanceDefinition.UsesIncreaseChanceProgress
+                && increaseChanceDefinition.ProgressResetCount == 9
+                && increaseChanceDefinition.ProgressResetGoldCost == 2000000
+                && increaseChanceDefinition.RewardPool.Count == 10,
                 ref failures);
 
             var startConcurrentOpen = new ManualResetEventSlim(false);

@@ -132,6 +132,61 @@ namespace DfoServer.Network.Handlers
             }
         }
 
+        public async Task HandleIncreaseChanceLotteryReset(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            if (!IncreaseChanceLotteryResetRequest.TryParse(body, out var request))
+            {
+                await SendResetResult(session, 1, false);
+                return;
+            }
+
+            var (characterId, accountId) = SessionOwnerResolver.Resolve(session);
+            if (!TryGetOwnedInventoryLease(session, characterId, out var lease))
+            {
+                await SendResetResult(session, 1, false);
+                return;
+            }
+
+            LotteryProgressSnapshot progress;
+            int updatedGold;
+            lock (lease.SyncRoot)
+            {
+                if (!_openService.TryResetProgress(
+                        lease.Inventory,
+                        accountId,
+                        request.SlotIndex,
+                        request.ItemTemplateId,
+                        out progress,
+                        out updatedGold))
+                {
+                    progress = null;
+                }
+            }
+
+            if (progress == null)
+            {
+                await SendResetResult(session, 1, false);
+                FileLogger.Log($"[{ProtocolName}] INCREASE_CHANCE_LOTTERY_RESET rejected: cid={characterId} slot={request.SlotIndex} item=0x{request.ItemTemplateId:X8}");
+                return;
+            }
+
+            await SendResetResult(session, 0, true);
+            await LotteryItemResponseSender.SendProgress(session, progress);
+            await _responses.SendGoldRefresh(session);
+            FileLogger.Log($"[{ProtocolName}] INCREASE_CHANCE_LOTTERY_RESET ok: cid={characterId} account={accountId} item=0x{request.ItemTemplateId:X8} gold={updatedGold}");
+        }
+
+        private static Task SendResetResult(EnhancedClientSession session, int result, bool showSuccess)
+        {
+            return session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                0x03F6,
+                IncreaseChanceLotteryPacketBuilder.BuildResetResponse(result, showSuccess)));
+        }
+
         internal static bool IsLotteryOverflowConfirm(byte[] body)
         {
             return body != null
@@ -177,6 +232,7 @@ namespace DfoServer.Network.Handlers
             {
                 if (!_openService.TryOpen(
                         lease.Inventory,
+                        accountId,
                         slotIndex,
                         openPlan.UseDoubleReward,
                         MailboxInventoryOverflowRewardSink.Instance,
@@ -193,7 +249,10 @@ namespace DfoServer.Network.Handlers
             if (openPlan.RefreshPremiumAfterOpen)
                 await _responses.SendPremiumServiceRefresh(session, characterId, accountId);
 
-            FileLogger.Log($"[{ProtocolName}] USE_LOTTERY_ITEM: source=0x{result.SourceItemTemplateId:X8} slot={result.SourceSlotIndex} remaining={result.SourceRemainingStackCount} gold={result.ConsumedGold}->{result.UpdatedGold} mode={openPlan.Mode} double={result.UsedDoubleReward} rewards={string.Join(",", result.Rewards.Select(reward => $"{reward.ListType}:0x{reward.ItemTemplateId:X8}x{reward.GrantedCount}@{reward.SlotIndex}"))}");
+            var progressText = result.Progress == null
+                ? string.Empty
+                : $" progress={result.Progress.NewRewardIndex} claimed={result.Progress.ClaimedRewardIndexes.Count} autoReset={result.Progress.AutoReset}";
+            FileLogger.Log($"[{ProtocolName}] USE_LOTTERY_ITEM: source=0x{result.SourceItemTemplateId:X8} slot={result.SourceSlotIndex} remaining={result.SourceRemainingStackCount} gold={result.ConsumedGold}->{result.UpdatedGold} mode={openPlan.Mode} double={result.UsedDoubleReward} mailbox={result.DeliveredToMailbox} rewards={string.Join(",", result.Rewards.Select(reward => $"{reward.ListType}:0x{reward.ItemTemplateId:X8}x{reward.GrantedCount}@{reward.SlotIndex}"))}{progressText}");
             return true;
         }
 

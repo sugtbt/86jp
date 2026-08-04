@@ -1,5 +1,7 @@
 using System;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.Game.Lottery;
+using DfoServer.Infrastructure;
 
 namespace DfoServer.Network.Builders
 {
@@ -7,11 +9,25 @@ namespace DfoServer.Network.Builders
     // 活动增率数据对单机服务端无意义。
     public sealed class LotteryBufferBodyBuilder : IInitPacketBuilder
     {
+        private readonly IncreaseChanceLotteryProgressRepository _progressRepository;
+
+        public LotteryBufferBodyBuilder()
+        {
+            var connectionString = SqliteDatabaseBootstrap.Initialize(
+                ServerPaths.DatabasePath,
+                ServerPaths.SchemaFilePath);
+            _progressRepository = new IncreaseChanceLotteryProgressRepository(connectionString);
+        }
+
         public ushort NotiType => 0x03D8;
 
         public bool TryBuild(SelectCharacterDataSnapshot snapshot, int occurrenceIndex, out byte[] body)
         {
-            body = new byte[204];
+            var accountId = snapshot?.CharacterRecord?.AccountId ?? 0;
+            var progress = accountId > 0
+                ? _progressRepository.LoadAll(accountId)
+                : System.Array.Empty<LotteryProgressSnapshot>();
+            body = IncreaseChanceLotteryPacketBuilder.BuildAllState(progress);
             return true;
         }
     }
