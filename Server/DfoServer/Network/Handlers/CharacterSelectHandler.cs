@@ -32,6 +32,9 @@ namespace DfoServer.Network.Handlers
 
         public string ProtocolName => "GameProtocol";
 
+        /// <summary>
+        /// 创建选角处理器；公开入口用于不需要副本恢复上下文的调用方。
+        /// </summary>
         public CharacterSelectHandler(
             ISelectCharacterDataSource selectCharacterDataSource,
             ICharacterRepository characterRepository,
@@ -49,6 +52,9 @@ namespace DfoServer.Network.Handlers
         {
         }
 
+        /// <summary>
+        /// 创建完整选角处理器，并共享副本、佣兵和团队频道状态，避免切换角色时丢失跨系统约束。
+        /// </summary>
         internal CharacterSelectHandler(
             Game.Dungeon.DungeonPersistentEffectApplicationService
                 dungeonPersistentEffects,
@@ -78,6 +84,112 @@ namespace DfoServer.Network.Handlers
                 if (s?.Player != null && s.Player.CharacterId > 0 && s.Player.UserId == uid)
                     return s;
             return null;
+        }
+
+        /// <summary>
+        /// 构造在线目标的查看信息 USERINFO 最小包与明细包。
+        /// 客户端必须先接收远端路由 0x00 的 subtype0 建立目标上下文，再接收 subtype1 才会登记远程资料。
+        /// </summary>
+        /// <param name="target">被查询的在线目标会话。</param>
+        /// <param name="requesterUserId">发起查看信息请求的客户端 UserId；用于日志关联与运行时核对。</param>
+        /// <param name="minimumPacket">目标角色的 subtype0 最小资料包。</param>
+        /// <param name="detailedPacket">目标角色的 subtype1 明细包。</param>
+        /// <returns>两个包均构造成功时返回 true。</returns>
+        private bool TryBuildOnlineUserInfoSequence(
+            EnhancedClientSession target,
+            ushort requesterUserId,
+            out byte[] minimumPacket,
+            out byte[] detailedPacket)
+        {
+            minimumPacket = null;
+            detailedPacket = null;
+
+            if (target?.Player == null || target.Player.CharacterId <= 0 || target.Player.UserId == 0)
+                return false;
+
+            try
+            {
+                var accountId = target.Account?.AccountId ?? 1;
+                var snapshot = _selectCharacterDataSource.Load(target.Player.CharacterId, accountId);
+                var addition = snapshot?.InitializationSnapshot?.UserInfoAddition;
+                if (addition == null)
+                    return false;
+
+                // 客户端必须先建立 subtype0 最小资料上下文，后续 subtype1 明细才会进入远程资料解析器。
+                byte[] minimumBody = null;
+                if (snapshot?.CharacterRecord == null
+                    || !new UserInfoBodyBuilder().TryBuild(snapshot, 0, out minimumBody)
+                    || minimumBody == null
+                    || !UserInfoBodyBuilder.TryRewriteSubtype0UserId(minimumBody, target.Player.UserId))
+                {
+                    return false;
+                }
+
+                // 0x01 是选角/入场时的本机资料通道，会把 subtype1 应用到主界面角色；
+                // 城镇查看他人资料必须使用 0x00，才能保留独立的远端资料上下文。
+                const byte remoteUserInfoRoutingByte = 0x00;
+                minimumPacket = BuildPacketWithRouting(0x00, 0x0002, minimumBody, remoteUserInfoRoutingByte);
+
+                // 远程查看信息必须沿用选角时的完整 subtype1 布局。
+                // 客户端按装备数量计算后续字段偏移；压缩或清空装备会使整个资料包在解析入口被丢弃。
+                // 宠物条目依赖客户端本地 Creature.lst；旧宠物 UID 会触发 Failed Create Creature 0，
+                // 使远程资料登记中断。因此远程查看只发送普通装备和时装，保持 subtype1 其余字段布局不变。
+                var removedUnsupportedEquipment = 0;
+                for (var index = addition.EquippedEntries.Count - 1; index >= 0; index--)
+                {
+                    var core = addition.EquippedEntries[index]?.Core;
+                    if (core == null
+                        || addition.EquippedEntries[index].Slot == 24
+                        || (core.ItemKind != ItemCore.KindEquipment && core.ItemKind != ItemCore.KindAvatar))
+                    {
+                        addition.EquippedEntries.RemoveAt(index);
+                        removedUnsupportedEquipment++;
+                    }
+                }
+                var equipmentCount = addition.EquippedEntries.Count;
+                // 这里不能清空真实装备列表：客户端要先用至少一个可解析的装备条目
+                // 建立远程资料 entry，Type2 面板后续才能通过 UID 找到该资料。
+                // 过滤后的条目仍来自目标角色的独立 Load 快照，不会修改在线目标库存。
+                equipmentCount = addition.EquippedEntries.Count;
+                if (snapshot?.CharacterRecord == null
+                    || !new UserInfoBodyBuilder().TryBuild(snapshot, 1, out var detailedBody)
+                    || detailedBody == null
+                    || detailedBody.Length < 5)
+                {
+                    return false;
+                }
+
+                // 不要用零字节把短资料包硬补到固定长度。subtype1 后半段是多个变长列表，
+                // 客户端会按列表计数继续读取；补零会把不存在的 creature/任务条目伪造成有效计数，
+                // 在 Failed Create Creature 之后中断资料登记，导致 Type2 查不到 entry。
+                // UserInfoSubtype1Builder 已按实际列表数量写出完整结构，保留其真实长度即可。
+
+                // subtype1 必须保留目标 UID。真机比较点 0x00F54CCB 将它与本机 UID 比较；
+                // 不相等时只跳过“本机角色更新”块，随后仍进入公共资料提交，属于正确的远端分支。
+                // 若写成请求方 UID，客户端会记录 My Character Info 并把对方资料刷新到本机主界面。
+                var detailCorrelationUid = target.Player.UserId;
+                if (!UserInfoBodyBuilder.TryRewriteUserId(detailedBody, detailCorrelationUid))
+                {
+                    return false;
+                }
+
+                // mode=3 的最小资料与明细必须沿用同一个远端路由，避免上下文在两包之间切回本机角色。
+                detailedPacket = BuildPacketWithRouting(0x00, 0x0002, detailedBody, remoteUserInfoRoutingByte);
+                FileLogger.Log(
+                    $"[{ProtocolName}] GET_USERINFO remote compatibility minimumSize={minimumBody.Length} detailBody: " +
+                    $"cid={target.Player.CharacterId} targetUid={target.Player.UserId} requesterUid={requesterUserId} " +
+                    $"detailHeaderUid={detailCorrelationUid} " +
+                    $"equipmentCount={equipmentCount} removedUnsupported={removedUnsupportedEquipment} bodySize={detailedBody.Length} " +
+                    // 固定记录前 160 字节，便于和历史成功包逐字段比对，不泄露完整技能和任务列表。
+                    $"prefix={BitConverter.ToString(detailedBody, 0, Math.Min(160, detailedBody.Length))}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] TryBuildOnlineUserInfoSequence cid={target.Player.CharacterId} 失败: {ex.Message}");
+                return false;
+            }
         }
 
         private static int ResolveAccountId(EnhancedClientSession session, CharacterRecord record)
@@ -244,6 +356,7 @@ namespace DfoServer.Network.Handlers
                         {
                             record.Subtype0Tail = tail;
                             session.Player.Subtype0Tail = tail;
+
                         }
 
                         // 城镇模型使用会话内的 AppearanceEntries；不要使用可能过期/空的 characters.appearance_blob，
@@ -316,6 +429,13 @@ namespace DfoServer.Network.Handlers
                 session, "select-character-ready", honor: characterList.Honor);
         }
 
+        /// <summary>
+        /// 处理客户端的角色资料请求；查询在线他人时返回历史兼容的 subtype1 明细包。
+        /// </summary>
+        /// <param name="session">发起资料查询的在线会话。</param>
+        /// <param name="header">当前游戏包头。</param>
+        /// <param name="body">请求体，在线他人查询格式为 u16 UserId 加 mode=0x03。</param>
+        /// <returns>异步发送资料包的任务。</returns>
         public async Task Handle_ENUM_CMDPACKET_GET_USERINFO(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             try
@@ -334,10 +454,32 @@ namespace DfoServer.Network.Handlers
                         var target = FindOnlineByUserId(reqUid);
                         if (target != null)
                         {
-                            // ⚠️ 待真机验证: inspect(mode=3)可能需要【完整明细 subtype-1】而不只精简外观 subtype-0。
-                            //    先发 subtype-0(与同屏他人外观同源, 已验证能渲染外观); 若信息窗仍空, 晨间加发 subtype-1。
-                            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0002, Game.Appearance.AppearanceService.BuildNoti2Body(target.Player)));
-                            FileLogger.Log($"[{ProtocolName}] GET_USERINFO other MATCH reqUid={reqUid} mode={mode} -> USERINFO(0x0002 subtype0) sent (targetCid={target.Player.CharacterId})");
+                            // mode=3 是查看他人资料的按需查询。城镇同屏 Creature 不等同于资料窗口上下文，
+                            // 必须先发送远端路由的 subtype0 建立目标资料对象，再用 subtype1 填充完整明细。
+                            var sequenceBuilt = TryBuildOnlineUserInfoSequence(
+                                target,
+                                session?.Player?.UserId ?? 0,
+                                out var minimumPacket,
+                                out var detailedPacket);
+                            if (sequenceBuilt)
+                            {
+                                // 两个资料包使用相同目标 UID 和远端路由 0x00；先建立上下文，避免 subtype1
+                                // 被当作普通同屏资料刷新。客户端处理完明细后再结束 CMD 8 命令事务。
+                                await session.SendPacketAsync(minimumPacket);
+                                await session.SendPacketAsync(detailedPacket);
+
+                                // ACK 必须放在资料包之后，避免提前结束查询状态。
+                                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                                    0x01,
+                                    (ushort)CmdPacketType.GET_USERINFO,
+                                    CommonPacketBodyBuilder.BuildSuccessAck()));
+                            }
+                            FileLogger.Log(
+                                $"[{ProtocolName}] GET_USERINFO other MATCH reqUid={reqUid} mode={mode} " +
+                                $"-> USERINFO subtype0+subtype1+cmd8Ack={(sequenceBuilt ? 1 : 0)} sent " +
+                                $"(targetCid={target.Player.CharacterId} targetUid={target.Player.UserId} " +
+                                $"requesterUid={session?.Player?.UserId ?? 0} detailHeaderUid={(sequenceBuilt && detailedPacket.Length >= 20 ? BitConverter.ToUInt16(detailedPacket, 18) : 0)} " +
+                                $"routingByte7=0x{(sequenceBuilt ? detailedPacket[7] : (byte)0):X2})");
                             return;
                         }
                         // 未匹配 → 枚举在线 uid, 让真机日志直接显示 reqUid 是否=某在线目标的 UserId(诊断 uid 映射)
@@ -373,7 +515,15 @@ namespace DfoServer.Network.Handlers
             return true;
         }
 
-        private static byte[] BuildPacketWithRouting(byte command, ushort type, byte[] body, byte routingByte7)
+        /// <summary>
+        /// 构造带外层第 7 字节路由标志的游戏包，供 USERINFO 等依赖客户端分发状态的通知复用。
+        /// </summary>
+        /// <param name="command">游戏包命令字节。</param>
+        /// <param name="type">游戏包类型。</param>
+        /// <param name="body">待封装的包体。</param>
+        /// <param name="routingByte7">客户端使用的第 7 字节路由标志。</param>
+        /// <returns>包含固定 15 字节外层头的完整游戏包。</returns>
+        internal static byte[] BuildPacketWithRouting(byte command, ushort type, byte[] body, byte routingByte7)
         {
             int totalLen = 15 + (body != null ? body.Length : 0);
             var packet = new byte[totalLen];
@@ -583,6 +733,12 @@ namespace DfoServer.Network.Handlers
             }
         }
 
+        /// <summary>
+        /// 处理返回选角请求；团队频道会退出到频道选择场景，普通频道仍返回当前连接的角色列表。
+        /// </summary>
+        /// <param name="session">当前游戏连接。</param>
+        /// <param name="header">客户端请求头。</param>
+        /// <param name="body">客户端请求包体。</param>
         public async Task Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             var shieldReset = BuildKnightShieldReturnSelectReset(session?.Player);
@@ -605,6 +761,7 @@ namespace DfoServer.Network.Handlers
                 _dungeonInstances);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0007, CommonPacketBodyBuilder.BuildSuccessAck()));
             FileLogger.Log($"[{ProtocolName}] RETURN_SELECT_CHARACTER: sent ACK for session {session.SessionId}");
+
             await SendCharacterListAsync(session);
         }
 
