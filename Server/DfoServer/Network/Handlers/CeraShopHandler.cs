@@ -24,6 +24,21 @@ namespace DfoServer.Network.Handlers
             _refresh = refresh;
         }
 
+        public Task HandleGenCeraTicket(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        {
+            // 从台服借来的数据包 `Dispatcher_GenCeraTicket::dispatch_sig`
+            // 只能防止客户端卡住，同时还有一个副作用，会让鼠标消失，只要将鼠标移动到邮箱等会让指针变化的地方就会再出现
+            var writer = new GamePacketWriter();
+            writer.WriteByte(1);
+            var now = DateTime.UtcNow;
+            var ts = new DateTimeOffset(now).ToUnixTimeSeconds();
+            var s = $"1234{ts:D10}00000";
+            writer.WriteUtf8Dstr(s);
+            writer.WriteUInt32(123456);
+            return session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, header.type, writer.ToArray()));
+        }
+
+
         public async Task HandleCeraShopPurchase(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY raw body({body?.Length ?? 0}): {(body != null ? BitConverter.ToString(body) : "null")}");

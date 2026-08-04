@@ -776,6 +776,7 @@ namespace DfoServer.Network
             d[0x0003] = (s, h, b) =>
                 s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0003, CommonPacketBodyBuilder.BuildSuccessAck()));
             d[0x0040] = _ceraShopHandler.HandleCeraShopPurchase;                   //64
+            d[(ushort)CmdPacketType.GEN_CERATICKET] = _ceraShopHandler.HandleGenCeraTicket;
             d[0x01A1] = _inventoryHandler.Handle_ACHIEVEMENT_TRIGGER;              //417
             d[0x01DE] = _dungeonHandler.HandleDungeonSceneUniqueIdReport;           //478
             d[0x02A8] = (s, h, b) =>
