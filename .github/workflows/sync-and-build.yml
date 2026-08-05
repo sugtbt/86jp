@@ -68,7 +68,7 @@ jobs:
           }
 
       - name: Setup .NET 10
-        if: steps.sync_step.outputs.has_new_commits == 'true'
+        
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
