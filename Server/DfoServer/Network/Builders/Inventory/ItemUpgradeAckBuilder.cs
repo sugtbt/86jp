@@ -9,7 +9,7 @@ namespace DfoServer.Network.Builders
         {
             var writer = new GamePacketWriter();
             writer.WriteByte(0x01);
-            writer.WriteByte((byte)result.Mode);
+            writer.WriteByte((byte)result.Method);
             writer.WriteInt16(result.MaterialSlotIndex);
             writer.WriteInt32(result.MaterialRemainingStackCount);
             writer.WriteInt16(result.OptionalTicketSlotIndex);

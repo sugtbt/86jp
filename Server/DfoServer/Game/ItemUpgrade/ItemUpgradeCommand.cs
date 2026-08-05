@@ -5,6 +5,7 @@ namespace DfoServer.Game.ItemUpgrade
 {
     public sealed class ItemUpgradeCommand
     {
+        public ItemUpgradeMethod Method { get; set; }
         public ItemUpgradeMode Mode { get; set; }
         public short TargetSlotIndex { get; set; }
         public int TargetItemTemplateId { get; set; }
@@ -31,6 +32,7 @@ namespace DfoServer.Game.ItemUpgrade
         public ItemUpgradeCommand Command { get; set; }
         public bool Success { get; set; }
         public byte ErrorCode { get; set; }
+        public ItemUpgradeMethod Method { get; set; }
         public ItemUpgradeMode Mode { get; set; }
         public ItemUpgradeScene Scene { get; set; }
         public short TargetSlotIndex { get; set; }
@@ -56,6 +58,7 @@ namespace DfoServer.Game.ItemUpgrade
             return new ItemUpgradeResult
             {
                 Command = command,
+                Method = command != null ? command.Method : ItemUpgradeMethod.Reinforce,
                 Mode = command != null ? command.Mode : ItemUpgradeMode.Reinforce,
                 TargetSlotIndex = command != null ? command.TargetSlotIndex : (short)-1,
                 TargetItemTemplateId = command != null ? command.TargetItemTemplateId : 0,

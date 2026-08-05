@@ -159,7 +159,7 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")} mode={request.Mode} target=({request.TargetSlotIndex},0x{request.TargetItemTemplateId:X8}) materialSlot={request.MaterialSlotIndex} optSlot={request.OptionalTicketSlotIndex} name={request.TargetItemName}");
+            FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM raw({body?.Length ?? 0}B): {(body != null ? BitConverter.ToString(body) : "null")} method={request.Method} mode={request.Mode} target=({request.TargetSlotIndex},0x{request.TargetItemTemplateId:X8}) materialSlot={request.MaterialSlotIndex} optSlot={request.OptionalTicketSlotIndex} name={request.TargetItemName}");
 
             var (cid, _) = ResolveOwner(session);
             var command = request.ToCommand();
@@ -197,7 +197,7 @@ namespace DfoServer.Network.Handlers
             if (!ok)
             {
                 var errorCode = result != null ? result.ErrorCode : ItemUpgradeResult.ErrorInvalidTarget;
-                FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: FAILED error={errorCode} mode={request.Mode} targetSlot={request.TargetSlotIndex} materialSlot={request.MaterialSlotIndex}");
+                FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: FAILED error={errorCode} method={request.Method} mode={request.Mode} targetSlot={request.TargetSlotIndex} materialSlot={request.MaterialSlotIndex}");
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0050, ItemUpgradeAckBuilder.BuildError(errorCode)));
                 return;
             }
@@ -219,7 +219,7 @@ namespace DfoServer.Network.Handlers
             if (result.NoticeRequired)
                 await BroadcastItemUpgradeNotice(session, result);
 
-            FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: OK scene={result.Scene} mode={result.Mode} targetSlot={result.TargetSlotIndex} level={result.OldLevel}->{result.NewLevel} success={result.UpgradeSucceeded} resultCode={result.ResultCode} rate={result.FinalSuccessWeight} gold={result.UpdatedGold}");
+            FileLogger.Log($"[{ProtocolName}] UPGRADE_ITEM: OK scene={result.Scene} method={result.Method} mode={result.Mode} targetSlot={result.TargetSlotIndex} level={result.OldLevel}->{result.NewLevel} success={result.UpgradeSucceeded} resultCode={result.ResultCode} rate={result.FinalSuccessWeight} gold={result.UpdatedGold}");
         }
 
         private async Task BroadcastItemUpgradeNotice(EnhancedClientSession session, ItemUpgradeResult result)

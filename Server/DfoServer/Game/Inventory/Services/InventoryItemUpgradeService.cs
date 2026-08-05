@@ -27,6 +27,12 @@ namespace DfoServer.Game.Inventory
             if (inventory == null)
                 return false;
 
+            if (!TryResolveTableKind(command.Method, command.Mode, out var tableKind))
+            {
+                result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorWrongUpgradeMode);
+                return false;
+            }
+
             var target = inventory.GetItem(InventoryListType.Main, command.TargetSlotIndex);
             if (target == null
                 || target.ItemKind != ItemCore.KindEquipment
@@ -71,7 +77,8 @@ namespace DfoServer.Game.Inventory
             }
 
             var amplify = ResolveAmplifyState(target);
-            if (command.Mode == ItemUpgradeMode.Reinforce && amplify.HasAmplifyAttribute)
+            if (command.Mode == ItemUpgradeMode.Reinforce
+                && (amplify.HasUnidentifiedOutworldVigor || amplify.HasAmplifyAttribute))
             {
                 result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorWrongUpgradeMode);
                 return false;
@@ -79,6 +86,12 @@ namespace DfoServer.Game.Inventory
 
             if (command.Mode == ItemUpgradeMode.Amplify)
             {
+                if (amplify.HasUnidentifiedOutworldVigor)
+                {
+                    result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorAmplifyNotIdentified);
+                    return false;
+                }
+
                 if (!amplify.HasAmplifyAttribute)
                 {
                     result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorWrongUpgradeMode);
@@ -99,11 +112,10 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
-            var tableKind = command.Mode == ItemUpgradeMode.Amplify
-                ? ItemUpgradeTableKind.Amplify
-                : ItemUpgradeTableKind.Normal;
             var material = inventory.GetItem(InventoryListType.Main, command.MaterialSlotIndex);
-            var materialConfig = ResolveMaterialConfig(material);
+            var materialConfig = tableKind == ItemUpgradeTableKind.Advanced
+                ? null
+                : ResolveMaterialConfig(material);
 
             if (!TryBuildContext(
                     command,
@@ -293,6 +305,7 @@ namespace DfoServer.Game.Inventory
             {
                 Command = command,
                 Success = true,
+                Method = command.Method,
                 Mode = command.Mode,
                 Scene = context.Scene,
                 TargetSlotIndex = command.TargetSlotIndex,
@@ -327,6 +340,28 @@ namespace DfoServer.Game.Inventory
 
             result = upgradeResult;
             return true;
+        }
+
+        private static bool TryResolveTableKind(
+            ItemUpgradeMethod method,
+            ItemUpgradeMode mode,
+            out ItemUpgradeTableKind tableKind)
+        {
+            switch (method)
+            {
+                case ItemUpgradeMethod.Reinforce:
+                    tableKind = ItemUpgradeTableKind.Normal;
+                    return mode == ItemUpgradeMode.Reinforce;
+                case ItemUpgradeMethod.Amplify:
+                    tableKind = ItemUpgradeTableKind.Amplify;
+                    return mode == ItemUpgradeMode.Amplify;
+                case ItemUpgradeMethod.AdvancedReinforce:
+                    tableKind = ItemUpgradeTableKind.Advanced;
+                    return mode == ItemUpgradeMode.Reinforce;
+                default:
+                    tableKind = ItemUpgradeTableKind.Normal;
+                    return false;
+            }
         }
 
         private static bool TryBuildContext(
@@ -688,12 +723,14 @@ namespace DfoServer.Game.Inventory
 
             var rawType = item.AmplifyType;
             var type = (byte)(rawType & 0x7F);
+            var hasUnidentifiedOutworldVigor = (rawType & 0x80) != 0;
             var hasAttribute = type >= (byte)AmplifyAttributeType.Vitality
                 && type <= (byte)AmplifyAttributeType.Intelligence;
             return new AmplifyState
             {
+                HasUnidentifiedOutworldVigor = hasUnidentifiedOutworldVigor,
                 HasAmplifyAttribute = hasAttribute,
-                IsIdentified = hasAttribute && (rawType & 0x80) == 0 && item.AmplifyValue > 0,
+                IsIdentified = hasAttribute && !hasUnidentifiedOutworldVigor && item.AmplifyValue > 0,
             };
         }
 
@@ -772,6 +809,8 @@ namespace DfoServer.Game.Inventory
 
         private struct AmplifyState
         {
+            public bool HasUnidentifiedOutworldVigor { get; set; }
+
             public bool HasAmplifyAttribute { get; set; }
 
             public bool IsIdentified { get; set; }

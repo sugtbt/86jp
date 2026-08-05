@@ -11,6 +11,13 @@ namespace DfoServer.Game.ItemUpgrade
         Amplify = 1,
     }
 
+    public enum ItemUpgradeMethod
+    {
+        Reinforce = 0,
+        Amplify = 1,
+        AdvancedReinforce = 2,
+    }
+
     public enum ItemUpgradeScene
     {
         Npc = 0,
@@ -34,6 +41,7 @@ namespace DfoServer.Game.ItemUpgrade
     {
         Normal = 0,
         Amplify = 1,
+        Advanced = 2,
     }
 
     public sealed class ItemUpgradeChanceEntry

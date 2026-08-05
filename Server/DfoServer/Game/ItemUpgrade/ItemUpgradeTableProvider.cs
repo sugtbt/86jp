@@ -13,14 +13,23 @@ namespace DfoServer.Game.ItemUpgrade
         private static readonly Lazy<UpgradeTableFile> AmplifyTableFile =
             new Lazy<UpgradeTableFile>(() => UpgradeTableFile.Parse(PvfArchiveAccessor.ReadText("etc/amplifyupgrade.etc")));
 
+        private static readonly Lazy<UpgradeTableFile> AdvancedReinforcementTableFile =
+            new Lazy<UpgradeTableFile>(() => UpgradeTableFile.Parse(PvfArchiveAccessor.ReadText("etc/chn_high_ranking_upgrade.etc")));
+
         private static readonly Lazy<AmplifyItemFile> AmplifyItemConfig =
             new Lazy<AmplifyItemFile>(() => AmplifyItemFile.Parse(PvfArchiveAccessor.ReadText("etc/amplifyitem.etc")));
 
         public static UpgradeTableFile GetFile(ItemUpgradeTableKind kind)
         {
-            return kind == ItemUpgradeTableKind.Amplify
-                ? AmplifyTableFile.Value
-                : ReinforcementTableFile.Value;
+            switch (kind)
+            {
+                case ItemUpgradeTableKind.Amplify:
+                    return AmplifyTableFile.Value;
+                case ItemUpgradeTableKind.Advanced:
+                    return AdvancedReinforcementTableFile.Value;
+                default:
+                    return ReinforcementTableFile.Value;
+            }
         }
 
         public static UpgradeTableDefinition GetTable(ItemUpgradeTableKind kind, string tableType = null)
@@ -28,7 +37,13 @@ namespace DfoServer.Game.ItemUpgrade
             var file = GetFile(kind);
             var resolvedTableType = tableType;
             if (string.IsNullOrWhiteSpace(resolvedTableType))
-                resolvedTableType = kind == ItemUpgradeTableKind.Amplify ? "amplify" : "normal";
+            {
+                resolvedTableType = kind == ItemUpgradeTableKind.Amplify
+                    ? "amplify"
+                    : kind == ItemUpgradeTableKind.Advanced
+                        ? "chn_high_ranking"
+                        : "normal";
+            }
 
             return file.GetTable(resolvedTableType);
         }
