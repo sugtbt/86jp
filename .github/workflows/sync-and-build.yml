@@ -1,4 +1,4 @@
-name: Sync Subdir and Build AOT
+name: Sync and Build .NET 10
 
 on:
   schedule:
@@ -14,48 +14,58 @@ jobs:
     steps:
       - name: Checkout GitHub Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Sync Upstream to Subdirectory
+      - name: Sync from GitGud (Merge Mode)
         id: sync_step
         shell: pwsh
         env:
           SOURCE_REPO: https://gitgud.io/rewio/86JP.git
         run: |
-          # 1. 浅克隆上游仓库到临时目录
-          git clone $env:SOURCE_REPO temp_upstream --depth 1
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # 获取上游最新 commit hash
-          $upstreamHash = git -C temp_upstream rev-parse --short HEAD
-          echo "commit_hash=$upstreamHash" >> $env:GITHUB_OUTPUT
+          git remote add upstream $env:SOURCE_REPO 2>$null
+          git fetch upstream
           
-          # 2. 删除旧的 upstream 目录
-          if (Test-Path "upstream") {
-              Remove-Item -Recurse -Force "upstream"
+          $upstreamInfo = git remote show upstream
+          $upstreamBranch = "master"
+          foreach ($line in $upstreamInfo) {
+              if ($line -match "HEAD branch:\s*(\S+)") {
+                  $upstreamBranch = $matches[1]
+                  break
+              }
           }
           
-          # 3. 复制新代码到 upstream 目录
-          Copy-Item -Path "temp_upstream" -Destination "upstream" -Recurse -Force
+          git checkout $upstreamBranch 2>$null
+          if ($LASTEXITCODE -ne 0) { git checkout -b $upstreamBranch }
           
-          # 4. 删除嵌套的 .git 目录
-          Remove-Item -Recurse -Force "upstream/.git"
+          $beforeHash = git rev-parse HEAD
           
-          # 5. 检查文件变化并提交
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 使用 Merge 模式同步，保留本地独有的 .github 文件夹
+          # -X theirs 表示如果代码有冲突，优先使用上游代码
+          git merge "upstream/$upstreamBranch" -m "chore: sync from GitGud" --allow-unrelated-histories -X theirs
           
-          git add upstream/
-          $changes = git status --porcelain upstream/
+          if ($LASTEXITCODE -ne 0) {
+              echo "Merge failed. Aborting."
+              git merge --abort
+              exit 1
+          }
           
-          if ($changes) {
+          $afterHash = git rev-parse HEAD
+          
+          # 对比 Merge 前后的 Hash，判断上游是否有实际更新
+          if ($beforeHash -ne $afterHash) {
               echo "has_new_commits=true" >> $env:GITHUB_OUTPUT
-              git commit -m "chore: sync upstream code"
-              git push origin HEAD
+              echo "commit_hash=$($afterHash.Substring(0,7))" >> $env:GITHUB_OUTPUT
+              
+              # Merge 模式使用正常推送，不需要 --force
+              git push origin $upstreamBranch
+              git push origin --tags
           } else {
               echo "has_new_commits=false" >> $env:GITHUB_OUTPUT
           }
-          
-          # 清理临时目录
-          Remove-Item -Recurse -Force temp_upstream
 
       - name: Setup .NET 10
         if: steps.sync_step.outputs.has_new_commits == 'true'
@@ -64,15 +74,14 @@ jobs:
           dotnet-version: '10.0.x'
           include-prerelease: true
 
-      - name: Build Project with Native AOT
+      - name: Build with Native dotnet CLI
         if: steps.sync_step.outputs.has_new_commits == 'true'
         shell: cmd
         run: |
-          dotnet publish upstream\Server\DfoServer\DfoServer.csproj ^
+          dotnet publish Server\DfoServer\DfoServer.csproj ^
             -c Release ^
             -r win-x64 ^
             --self-contained true ^
-            -p:PublishAot=true ^
             -p:PublishSingleFile=true ^
             -p:IncludeNativeLibrariesForSelfExtract=true ^
             -o dist\win-x64
@@ -81,17 +90,17 @@ jobs:
         if: steps.sync_step.outputs.has_new_commits == 'true'
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\win-x64\* -DestinationPath DfoServer-win-x64-AOT.zip -Force
+          Compress-Archive -Path dist\win-x64\* -DestinationPath DfoServer-win-x64.zip -Force
 
       - name: Create Release
         if: steps.sync_step.outputs.has_new_commits == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ steps.sync_step.outputs.commit_hash }}
-          name: Auto Build ${{ steps.sync_step.outputs.commit_hash }} (AOT)
+          name: Auto Build ${{ steps.sync_step.outputs.commit_hash }}
           draft: false
           prerelease: false
           files: |
-            DfoServer-win-x64-AOT.zip
+            DfoServer-win-x64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
