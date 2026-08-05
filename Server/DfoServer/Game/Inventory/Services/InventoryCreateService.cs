@@ -16,6 +16,7 @@ namespace DfoServer.Game.Inventory
         MailAttachment = 6,
         AdminGrant = 7,
         CharacterCreate = 8,
+        DailyRefill = 9,
     }
 
     internal sealed class InventoryCreateOptions
