@@ -81,9 +81,14 @@ jobs:
           dotnet publish Server\DfoServer\DfoServer.csproj ^
             -c Release ^
             -r win-x64 ^
-            --self-contained true ^
-            -p:PublishSingleFile=true ^
-            -p:IncludeNativeLibrariesForSelfExtract=true ^
+            //--self-contained true ^
+            //-p:PublishSingleFile=true ^
+            //-p:IncludeNativeLibrariesForSelfExtract=true ^
+            -p:UseSystemResourceKeys=true ^
+            -p:InvariantGlobalization=true ^
+            -p:StripSymbols=true^
+            -p:DebugType=none^
+            -p:PublishAot=true ^
             -o dist\win-x64
 
       - name: Zip Build Output
