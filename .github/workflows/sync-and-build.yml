@@ -64,9 +64,9 @@ jobs:
               git push origin $upstreamBranch
               git push origin --tags
           } else {
-              echo "has_new_commits=false" >> $env:GITHUB_OUTPUT
+              echo "has_new_commits=true" >> $env:GITHUB_OUTPUT
           }
-          echo "has_new_commits=true" >> $env:GITHUB_OUTPUT
+          
 
       - name: Setup .NET 10
         if: steps.sync_step.outputs.has_new_commits == 'true'
