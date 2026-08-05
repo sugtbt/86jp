@@ -1,0 +1,97 @@
+name: Sync Subdir and Build AOT
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout GitHub Repository
+        uses: actions/checkout@v4
+
+      - name: Sync Upstream to Subdirectory
+        id: sync_step
+        shell: pwsh
+        env:
+          SOURCE_REPO: https://gitgud.io/rewio/86JP.git
+        run: |
+          # 1. 浅克隆上游仓库到临时目录
+          git clone $env:SOURCE_REPO temp_upstream --depth 1
+          
+          # 获取上游最新 commit hash
+          $upstreamHash = git -C temp_upstream rev-parse --short HEAD
+          echo "commit_hash=$upstreamHash" >> $env:GITHUB_OUTPUT
+          
+          # 2. 删除旧的 upstream 目录
+          if (Test-Path "upstream") {
+              Remove-Item -Recurse -Force "upstream"
+          }
+          
+          # 3. 复制新代码到 upstream 目录
+          Copy-Item -Path "temp_upstream" -Destination "upstream" -Recurse -Force
+          
+          # 4. 删除嵌套的 .git 目录
+          Remove-Item -Recurse -Force "upstream/.git"
+          
+          # 5. 检查文件变化并提交
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add upstream/
+          $changes = git status --porcelain upstream/
+          
+          if ($changes) {
+              echo "has_new_commits=true" >> $env:GITHUB_OUTPUT
+              git commit -m "chore: sync upstream code"
+              git push origin HEAD
+          } else {
+              echo "has_new_commits=false" >> $env:GITHUB_OUTPUT
+          }
+          
+          # 清理临时目录
+          Remove-Item -Recurse -Force temp_upstream
+
+      - name: Setup .NET 10
+        if: steps.sync_step.outputs.has_new_commits == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          include-prerelease: true
+
+      - name: Build Project with Native AOT
+        if: steps.sync_step.outputs.has_new_commits == 'true'
+        shell: cmd
+        run: |
+          dotnet publish upstream\Server\DfoServer\DfoServer.csproj ^
+            -c Release ^
+            -r win-x64 ^
+            --self-contained true ^
+            -p:PublishAot=true ^
+            -p:PublishSingleFile=true ^
+            -p:IncludeNativeLibrariesForSelfExtract=true ^
+            -o dist\win-x64
+
+      - name: Zip Build Output
+        if: steps.sync_step.outputs.has_new_commits == 'true'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\win-x64\* -DestinationPath DfoServer-win-x64-AOT.zip -Force
+
+      - name: Create Release
+        if: steps.sync_step.outputs.has_new_commits == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.sync_step.outputs.commit_hash }}
+          name: Auto Build ${{ steps.sync_step.outputs.commit_hash }} (AOT)
+          draft: false
+          prerelease: false
+          files: |
+            DfoServer-win-x64-AOT.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
