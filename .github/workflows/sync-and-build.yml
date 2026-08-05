@@ -55,25 +55,27 @@ jobs:
           
           $afterHash = git rev-parse HEAD
           
+          # 【核心修复】无论是否有新提交，都先输出 commit_hash，防止 Release 步骤缺少参数导致报错
+          echo "commit_hash=$($afterHash.Substring(0,7))" >> $env:GITHUB_OUTPUT
+          
           # 对比 Merge 前后的 Hash，判断上游是否有实际更新
           if ($beforeHash -ne $afterHash) {
               echo "has_new_commits=true" >> $env:GITHUB_OUTPUT
-              echo "commit_hash=$($afterHash.Substring(0,7))" >> $env:GITHUB_OUTPUT
               
               # Merge 模式使用正常推送，不需要 --force
               git push origin $upstreamBranch
               git push origin --tags
           } else {
+              # 即使上游没有更新，也强制触发后续的构建和 Release
               echo "has_new_commits=true" >> $env:GITHUB_OUTPUT
           }
-          
 
       - name: Setup .NET 10
         if: steps.sync_step.outputs.has_new_commits == 'true'
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          include-prerelease: true
+          # 移除了废弃的 include-prerelease，如果需要预览版可改为 dotnet-quality: 'preview'
 
       - name: Build with Native dotnet CLI
         if: steps.sync_step.outputs.has_new_commits == 'true'
@@ -84,8 +86,9 @@ jobs:
             -r win-x64 ^
             -p:UseSystemResourceKeys=true ^
             -p:InvariantGlobalization=true ^
-            -p:StripSymbols=true^
-            -p:DebugType=none^
+            -p:StripSymbols=true ^
+            -p:DebugType=none ^
+
             -o dist\win-x64
 
       - name: Zip Build Output
