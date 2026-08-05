@@ -70,7 +70,7 @@ namespace DfoServer.SelfTests
             Check("buy-only-cera item reports insufficient cera instead of inventory full", CheckBuyOnlyCeraErrorAck());
             Check("happy-token gift box grants account currency atomically without an inventory item", CheckHappyTokenCeraGiftBox());
             Check("60-day Devil Contract package activates all services without an inventory item", CheckDevilContractPackage());
-            Check("mixed packages route all premium services without inventory slots", CheckMixedContractRewardRouting());
+            Check("contract packages parse and route all services without inventory slots", CheckContractRewardRouting());
 
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;
@@ -319,12 +319,14 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
             }
         }
 
-        private static bool CheckMixedContractRewardRouting()
+        private static bool CheckContractRewardRouting()
         {
             const int mixedPackageProductId = 104008;
             const int mixedPackageItemId = 2682994;
+            const int contractBoosterItemId = 10008056;
             const int includedPremiumItemId = 2660411;
             const int devilServiceItemId = 2681934;
+            var expectedBoosterRewards = new[] { 46, 34, includedPremiumItemId };
 
             if (!CeraShopProductCatalog.TryResolve(mixedPackageProductId, out var product)
                 || product == null
@@ -337,6 +339,24 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
                 || !mixedPackage.PackageRewards.Any(reward => reward != null && reward.ItemId != includedPremiumItemId))
                 return false;
 
+            var contractBooster = StackableItemProvider.Load(contractBoosterItemId);
+            var contractRewards = contractBooster?.BoosterRewards
+                .Where(reward => string.Equals(reward?.RewardKind, "cera", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            // [cera] 数据为“抽取次数 + 物品ID/权重/数量”，不能按物品ID/数量二元组拆分。
+            if (contractRewards == null
+                || contractRewards.Count != expectedBoosterRewards.Length)
+                return false;
+            for (var i = 0; i < expectedBoosterRewards.Length; i++)
+            {
+                var reward = contractRewards[i];
+                if (reward.ItemId != expectedBoosterRewards[i]
+                    || reward.Weight != 1000
+                    || reward.Count != 1
+                    || reward.DrawCount != 1)
+                    return false;
+            }
+
             if (!PremiumService.TryResolveContractItem(includedPremiumItemId, out var includedType, out var includedDays)
                 || includedType != 84
                 || includedDays != 15
@@ -348,21 +368,17 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
             var inventory = new InventoryService(903031, 903032);
             if (!InventoryRewardGrantService.TryPlanBatch(
                     inventory,
-                    new[]
-                    {
-                        InventoryRewardGrantRequest.Create(
-                            includedPremiumItemId,
+                    expectedBoosterRewards
+                        .Append(devilServiceItemId)
+                        .Select(itemId => InventoryRewardGrantRequest.Create(
+                            itemId,
                             1,
-                            ItemCreateReason.MallPurchase),
-                        InventoryRewardGrantRequest.Create(
-                            devilServiceItemId,
-                            1,
-                            ItemCreateReason.MallPurchase),
-                    },
+                            ItemCreateReason.MallPurchase))
+                        .ToArray(),
                     out var plan)
                 || plan == null
                 || !plan.Success
-                || plan.Entries.Count != 2)
+                || plan.Entries.Count != expectedBoosterRewards.Length + 1)
                 return false;
 
             return plan.Entries.All(entry => entry.Kind == InventoryRewardGrantKind.Premium);

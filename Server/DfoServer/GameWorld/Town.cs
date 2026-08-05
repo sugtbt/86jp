@@ -54,6 +54,19 @@ namespace DfoServer.GameWorld
             return roomInfo;
         }
 
+        public static bool IsCeraRoom(int townId, int areaId)
+        {
+            try
+            {
+                var room = GetCeraRoomInfo(townId);
+                return room.Town == townId && room.Area == areaId;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public static bool TryGetDungeonGateReturnInfo(
             int townId,
             int areaId,

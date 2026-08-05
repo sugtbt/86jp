@@ -56,7 +56,10 @@ namespace DfoServer.Network
                 {
                     var tcpClient = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
                     var packetStructure = _packetStructures[port];
-                    var session = new EnhancedClientSession(tcpClient, packetStructure);
+                    var session = new EnhancedClientSession(
+                        tcpClient,
+                        packetStructure,
+                        port);
 
                     
                     _packetProcessor.SetClientPacketStructure(session.SessionId, packetStructure);

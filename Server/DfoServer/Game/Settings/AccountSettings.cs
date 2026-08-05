@@ -90,20 +90,6 @@ namespace DfoServer.Game.Settings
             return result;
         }
 
-        public static void ApplyAccountScopedHotkeySlots(byte[] target, byte[] accountHotkeys)
-        {
-            if (target == null)
-                return;
-
-            var source = ExtractAccountScopedHotkeySlots(accountHotkeys ?? DefaultHotkeySlots);
-            if (source == null)
-                return;
-
-            var length = System.Math.Min(source.Length, target.Length);
-            if (length > 0)
-                System.Buffer.BlockCopy(source, 0, target, 0, length);
-        }
-
         public static readonly byte[] DefaultMainGameOption = {
             0x01,0x00,0x01,0x00,0x01,0x00,0x03,0x00,0x46,0x00,0x19,0x00,0x00,0x00,0x00,0x00,
             0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x01,0x00,0x01,0x00,0x00,0x00,

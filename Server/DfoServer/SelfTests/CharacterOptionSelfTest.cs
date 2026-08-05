@@ -151,11 +151,13 @@ namespace DfoServer.SelfTests
                         CharacterVisibilityBodyBuilder.Build(0x1234, 9),
                         new byte[] { 0x34, 0x12, 0x09 }));
 
-                var characterHotkeys = BuildHotkeyBlob(0x0002, 0x1234, 0x5678, 0x0099);
+                var characterHotkeys = BuildHotkeyBlob(0x004D, 0x1234, 0x5678, 0x0099);
                 stateRepo.SaveHotkeyConfig(CharacterId, characterHotkeys);
+                accountSettingsRepo.SaveHotkeySlots(AccountId, BuildHotkeyBlob(0x0002));
                 var snapshotWithHotkeys = dataSource.Load(CharacterId, AccountId);
                 Check("hotkeys load from character_hotkey_slots",
                     snapshotWithHotkeys.InitializationSnapshot.HotkeyConfigSlots.Count >= 4
+                    && snapshotWithHotkeys.InitializationSnapshot.HotkeyConfigSlots[0] == 0x004D
                     && snapshotWithHotkeys.InitializationSnapshot.HotkeyConfigSlots[1] == 0x1234
                     && snapshotWithHotkeys.InitializationSnapshot.HotkeyConfigSlots[2] == 0x5678);
 
@@ -166,9 +168,9 @@ namespace DfoServer.SelfTests
                     && ReadLoginHotkeyPayloadLength(loginPackets[1]) == AccountSettings.AccountScopedHotkeySlotCount * 2);
                 Check("login hotkey prefix keeps rapid-fire enabled",
                     ReadLoginHotkeyPrefix(loginPackets[1]) == 0x0002);
-                Check("rapid-fire default remains enabled",
+                Check("login hotkey prefix does not overwrite character movement-up key",
                     snapshotWithHotkeys.InitializationSnapshot.HotkeyConfigSlots.Count > 0
-                    && snapshotWithHotkeys.InitializationSnapshot.HotkeyConfigSlots[0] == 0x0002);
+                    && snapshotWithHotkeys.InitializationSnapshot.HotkeyConfigSlots[0] == 0x004D);
 
                 var creatorDefaults = CharacterKeyboardDefaults.BuildHotkeySlots(10);
                 Check("creator default hotkey body has creator slot count",

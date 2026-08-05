@@ -17,6 +17,8 @@ namespace DfoServer.Network
         public IPacketHeader PacketStructure { get; private set; }
         public ushort SequenceNumber { get; private set; }
 
+        public int ListenerPort { get; }
+
         
         
         
@@ -39,20 +41,30 @@ namespace DfoServer.Network
 
         private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
 
-        public EnhancedClientSession(TcpClient client, IPacketHeader packetStructure)
+        public EnhancedClientSession(
+            TcpClient client,
+            IPacketHeader packetStructure,
+            int listenerPort = 0)
         {
             TcpClient = client;
             PacketStructure = packetStructure;
             SequenceNumber = 0;
+            ListenerPort = listenerPort;
         }
 
-        public async Task SendPacketAsync(byte[] data)
+        public Task SendPacketAsync(byte[] data)
+            => SendPacketAsync(data, CancellationToken.None);
+
+        public async Task SendPacketAsync(
+            byte[] data,
+            CancellationToken cancellationToken)
         {
             PacketFileLogger.Log("SEND", data);
-            await _sendLock.WaitAsync();
+            await _sendLock.WaitAsync(cancellationToken);
             try
             {
-                await Stream.WriteAsync(data, 0, data.Length);
+                await Stream.WriteAsync(
+                    data, 0, data.Length, cancellationToken);
             }
             finally
             {

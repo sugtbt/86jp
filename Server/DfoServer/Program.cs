@@ -16,6 +16,7 @@ namespace DfoServer
             ("--selftest-auction-service", SelfTests.AuctionServiceNotificationSelfTest.Run),
             ("--selftest-chronicle-growth", SelfTests.ChronicleGrowthSelfTest.Run),
             ("--selftest-chronicle-refine", SelfTests.ChronicleRefineSelfTest.Run),
+            ("--selftest-title-change", SelfTests.TitleChangeSelfTest.Run),
             ("--selftest-separate-upgrade", SelfTests.SeparateUpgradeSelfTest.Run),
             ("--selftest-avatar-compound", SelfTests.AvatarCompoundSelfTest.Run),
             ("--selftest-cerashop", SelfTests.CeraShopSelfTest.Run),
@@ -76,12 +77,16 @@ namespace DfoServer
             ("--selftest-honor-level", SelfTests.HonorLevelSelfTest.Run),
             ("--selftest-character-experience-progression", SelfTests.CharacterExperienceProgressionSelfTest.Run),
             ("--selftest-party", SelfTests.PartySelfTest.Run),
+            ("--selftest-party-command-isolation", SelfTests.PartyCommandIsolationSelfTest.Run),
+            ("--selftest-party-udp-relay-core", SelfTests.PartyUdpRelayCoreSelfTest.Run),
+            ("--selftest-other-user-info", SelfTests.OtherUserInfoSelfTest.Run),
             ("--selftest-dungeon-combat-party", SelfTests.DungeonCombatPartySelfTest.Run),
             ("--selftest-udp-relay", SelfTests.UdpRelaySelfTest.Run),
             ("--selftest-growth-capsule", SelfTests.GrowthCapsuleSelfTest.Run),
             ("--selftest-crane-minigame", SelfTests.CraneMiniGameSelfTest.Run),
             ("--selftest-mailbox", SelfTests.MailboxSelfTest.Run),
             ("--selftest-mercenary", SelfTests.MercenarySelfTest.Run),
+            ("--selftest-equipment-regeneration-config", SelfTests.EquipmentRegenerationConfigSelfTest.Run),
         };
 
         // 顺序跑全部自测, 输出汇总表; 任一失败(或抛异常)退出码为 1。
@@ -189,6 +194,46 @@ namespace DfoServer
             }
         }
 
+        private static PartyUdpRelay CreatePartyUdpRelay()
+        {
+            FileLogger.Log(
+                "[PartyUdpRelay scope=party] startup gate " +
+                $"DFO_UDP_RELAY={(GameNetworkConfig.UdpRelayEnabled ? 1 : 0)}");
+            if (!GameNetworkConfig.UdpRelayEnabled)
+                return null;
+
+            if (GameNetworkConfig.ProxyMode)
+            {
+                FileLogger.Log(
+                    "[PartyUdpRelay scope=party] disabled: " +
+                    "proxy mode is not supported");
+                return null;
+            }
+
+            if (!GameNetworkConfig.UdpRelayPublicIpConfigured ||
+                !System.Net.IPAddress.TryParse(
+                    GameNetworkConfig.UdpRelayPublicIp,
+                    out var publicIp) ||
+                publicIp.AddressFamily !=
+                    System.Net.Sockets.AddressFamily.InterNetwork ||
+                System.Net.IPAddress.IsLoopback(publicIp) ||
+                publicIp.Equals(System.Net.IPAddress.Any) ||
+                publicIp.Equals(System.Net.IPAddress.Broadcast))
+            {
+                FileLogger.Log(
+                    "[PartyUdpRelay scope=party] disabled: set a " +
+                    "non-loopback numeric IPv4 address with " +
+                    "DFO_UDP_RELAY_PUBLIC_IP");
+                return null;
+            }
+
+            return new PartyUdpRelay(
+                publicIp.ToString(),
+                GameNetworkConfig.UdpRelayPortBase,
+                GameNetworkConfig.UdpRelayPortCount,
+                "party");
+        }
+
         static void Main(string[] args)
         {
             args ??= Array.Empty<string>();
@@ -227,6 +272,7 @@ namespace DfoServer
             }
 
             GameNetworkConfig.Configure(args);
+            GameNetworkConfig.ValidateRelayConfiguration();
 
             PacketFileLogger.Initialize();
             if (GameNetworkConfig.PacketCaptureEnabled)
@@ -256,6 +302,7 @@ namespace DfoServer
                 FileLogger.Log(
                     $"[Startup] ITEM_METADATA_WARMUP totalMs={itemMetadataWarmupTimer.Elapsed.TotalMilliseconds:F3}");
                 Game.Dungeon.ClearRewardGenerator.WarmUp();
+                Game.Inventory.EquipmentRegenerationCandidateCatalog.Warmup();
                 GameWorld.IndependentDropDefinitionCatalog.WarmUp();
                 Game.Inventory.ChronicleRefineMaterialResolver.Warmup();
                 Game.Mercenary.StrikerSkillDataProvider.Warmup();
@@ -291,10 +338,16 @@ namespace DfoServer
             int channelPort = GameNetworkConfig.ProxyMode ? 7002 : 7001;
             int gamePort = GameNetworkConfig.ProxyMode ? 10012 : 10011;
 
+            using var udpRelay = CreatePartyUdpRelay();
+            using var gameProtocolHandler = new GameProtocolHandler(
+                sessionDirectory,
+                packet => server.BroadcastToPortAsync(gamePort, packet),
+                udpRelay);
+
             var portConfigs = new Dictionary<int, (IProtocolHandler handler, IPacketHeader structure)>
             {
                 { channelPort, (new ChannelProtocolHandler(), new ChannelPacketHeader()) },
-                { gamePort, (new GameProtocolHandler(sessionDirectory, packet => server.BroadcastToPortAsync(gamePort, packet)), new GamePacketHeader()) }
+                { gamePort, (gameProtocolHandler, new GamePacketHeader()) }
             };
 
             server.Start(portConfigs);

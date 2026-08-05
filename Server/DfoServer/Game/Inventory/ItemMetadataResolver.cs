@@ -351,6 +351,13 @@ namespace DfoServer.Game.Inventory
             return equipment != null;
         }
 
+        internal static bool IsTitleEquipment(int itemTemplateId)
+        {
+            return TryLoadEquipmentFile(itemTemplateId, out var equipment)
+                && EquipmentTypeInfo.ParseOrUnknown(equipment?.EquipmentType)
+                    == EquipmentType.TitleName;
+        }
+
         internal static bool IsEquipmentUsableByJob(int itemTemplateId, byte characterJob)
         {
             if (!TryLoadEquipmentFile(itemTemplateId, out var equipment)

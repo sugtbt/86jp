@@ -252,7 +252,6 @@ namespace DfoServer.Game.SelectCharacter
                 hkSlots = Settings.CharacterKeyboardDefaults.BuildHotkeySlots(character.Job);
                 _initFlagsRepository.SaveHotkeyConfig(characterId, hkSlots);
             }
-            Settings.AccountSettings.ApplyAccountScopedHotkeySlots(hkSlots, acctSettings?.HotkeySlots);
             if (hkSlots != null && hkSlots.Length >= 2)
             {
                 initSnapshot.HotkeyKeyType = character != null && Settings.CharacterKeyboardDefaults.IsCreatorMage(character.Job)

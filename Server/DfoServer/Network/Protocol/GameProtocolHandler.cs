@@ -21,7 +21,7 @@ using System.Threading.Tasks;
 
 namespace DfoServer.Network
 {
-    public class GameProtocolHandler : BaseProtocolHandler
+    public class GameProtocolHandler : BaseProtocolHandler, IDisposable
     {
         private readonly LoginHandler _loginHandler;
         private readonly CharacterSelectHandler _characterSelectHandler;
@@ -61,11 +61,15 @@ namespace DfoServer.Network
         private readonly PartyHandler _partyHandler;
         private readonly Handlers.Dungeon.DungeonRejoinCoordinator
             _dungeonRejoin;
+        private readonly CharacterTransitionCoordinator _characterTransitions;
         private readonly Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> _cmdDispatch;
 
         public override string ProtocolName => "GameProtocol";
 
-        public GameProtocolHandler(ISessionDirectory sessionDirectory, Func<byte[], Task> broadcastGamePacket = null)
+        public GameProtocolHandler(
+            ISessionDirectory sessionDirectory,
+            Func<byte[], Task> broadcastGamePacket = null,
+            PartyUdpRelay udpRelay = null)
         {
             var databasePath = ServerPaths.DatabasePath;
             var schemaFilePath = ServerPaths.SchemaFilePath;
@@ -103,6 +107,8 @@ namespace DfoServer.Network
             _characterRepository = characterRepository;
             _selectCharacterDataSource = sqliteSelectCharacterDataSource;
             _sessionDirectory = sessionDirectory;
+            _characterTransitions =
+                new CharacterTransitionCoordinator(sessionDirectory);
             _dungeonInstances = new DungeonInstanceRegistry(
                 ClockService.Instance);
             _loginHandler = new LoginHandler(accountRepository, characterRepository);
@@ -242,7 +248,9 @@ namespace DfoServer.Network
             _staminaHandler = new StaminaHandler(_inventoryRefreshSender);
             _settingsHandler = new SettingsHandler(sessionDirectory);
             _ceraShopHandler = new CeraShopHandler(sqliteSelectCharacterDataSource, _inventoryRefreshSender);
-            _skillHandler = new SkillHandler(characterRepository, _inventoryRefreshSender);
+            _skillHandler = new SkillHandler(
+                characterRepository,
+                _inventoryRefreshSender);
             _luckyStarHandler = new LuckyStarHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             _rentalHandler = new RentalHandler(sqliteSelectCharacterDataSource, rentalTimeProvider, _inventoryRefreshSender);
             var mailboxRepository = new MailboxRepository(databasePath, schemaFilePath);
@@ -266,7 +274,8 @@ namespace DfoServer.Network
                 _partyManager,
                 characterRepository,
                 sessionDirectory,
-                _dungeonInstances);
+                udpRelay,
+                characterTransitions: _characterTransitions);
             _dungeonRejoin = new Handlers.Dungeon.DungeonRejoinCoordinator(
                 _dungeonInstances,
                 _partyHandler.TryRestoreDungeonParticipantAsync,
@@ -302,9 +311,15 @@ namespace DfoServer.Network
             RegisterCollectionBoxHandlers(_cmdDispatch);
             RegisterMercenaryHandlers(_cmdDispatch);
             RegisterPartyHandlers(_cmdDispatch);
+            _cmdDispatch[(ushort)CmdPacketType.SET_UDP_IP_PORT] = HandleSetUdpEndpoint;
             RegisterExpertJobHandlers(_cmdDispatch);
             RegisterMiscHandlers(_cmdDispatch);
             _cmdDispatch[0x00CF] = _shopCoinEventHandler.HandleShopCoinEvent;   // 207 SHOP_COIN_EVENT 每日免费复活币
+        }
+
+        public void Dispose()
+        {
+            _partyHandler.Dispose();
         }
 
         public override async Task OnClientConnected(EnhancedClientSession session)
@@ -434,7 +449,8 @@ namespace DfoServer.Network
             d[0x000E] = _partyHandler.Handle_WALKOUT_PARTY_MEMBER;  // 14 踢人
             d[0x000A] = _partyHandler.Handle_REQUEST_PEER;          // 10 右键同屏玩家→组队/交易邀请(按uid)→给目标发 SC 0x0007 弹框
             d[0x000B] = _partyHandler.Handle_RES_PEER;              // 11 被邀请者应答(body=邀请者uid+reqType)→组队并广播 PARTY_INFO
-            d[0x01A3] = _partyHandler.Handle_CREATE_GROUP;          // 419 组队邀请(按名)
+            // 419 creates a chat/1:1 conversation; party invites use 0x000A/0x000B.
+            d[0x01A3] = _partyHandler.Handle_CREATE_GROUP;
             d[0x00A6] = _partyHandler.Handle_CALL_PARTY_MEMBER_REALTIME_INFO;  // 166 请求成员实时信息(HP%)
             d[0x0079] = _partyHandler.Handle_CHANGE_HOST;           // 121 委托队长(body=1字节槽位)
             // P2P 上报类: df 只喂统计计数器, 不回包不转发。收下即忽略, 消掉 Unhandled 日志。
@@ -442,6 +458,14 @@ namespace DfoServer.Network
             d[0x0061] = (s, h, b) => Task.CompletedTask;            // PEER_CONNECT_RESULT
             d[0x0031] = (s, h, b) => Task.CompletedTask;            // REPORT_BAD_P2P_USER
             d[0x01DF] = (s, h, b) => Task.CompletedTask;            // P2P_STATISTICS
+        }
+
+        private async Task HandleSetUdpEndpoint(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            await _partyHandler.Handle_SET_UDP_IP_PORT(session, header, body);
         }
 
         private void RegisterInventoryHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
@@ -480,6 +504,7 @@ namespace DfoServer.Network
             d[(ushort)CmdPacketType.ENCHANT_3RD_CHRONICLE_ITEM] = _inventoryHandler.Handle_ENCHANT_3RD_CHRONICLE_ITEM;
             d[0x0110] = _inventoryHandler.Handle_ENUM_CMDPACKET_ENCHANT_BY_BEAD;   //272
             d[0x0191] = _inventoryHandler.Handle_UNSEAL_RANDOM_OPTION;             //401
+            d[0x0197] = _inventoryHandler.Handle_REGENERATION_RANDOM_OPTION;       //407 equipment compound
             d[0x019C] = _inventoryHandler.Handle_TITLE_BOOK;                       //412
             d[0x01B6] = _inventoryHandler.Handle_CHANGE_RANDOM_OPTION;             //438
             d[0x019D] = _inventoryHandler.Handle_TITLE_BOOK;                       //413
@@ -499,6 +524,10 @@ namespace DfoServer.Network
             d[0x0134] = _inventoryHandler.Handle_WITHDRAW_MONEY;                   //308 金库取金币
             d[0x0198] = _inventoryHandler.Handle_UPGRADE_CARGO;                    //408 扩容个人仓库
             d[0x01CC] = _inventoryHandler.Handle_AVATAR_OPTION_CHANGE;             //460 时装属性调整箱
+            d[(ushort)CmdPacketType.USE_LIMIT_CUBE] =
+                _inventoryHandler.Handle_USE_LIMIT_CUBE;
+            d[(ushort)CmdPacketType.USE_TITLE_CHANGE_ITEM] =
+                _inventoryHandler.Handle_USE_TITLE_CHANGE_ITEM;
             d[KnightShieldDeckBodyBuilder.ChangeDeckCommandType] = _knightShieldHandler.HandleChangeDeckInfo;
         }
 
@@ -776,6 +805,7 @@ namespace DfoServer.Network
             d[0x0003] = (s, h, b) =>
                 s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0003, CommonPacketBodyBuilder.BuildSuccessAck()));
             d[0x0040] = _ceraShopHandler.HandleCeraShopPurchase;                   //64
+            d[(ushort)CmdPacketType.GEN_CERATICKET] = _ceraShopHandler.HandleGenCeraTicket;
             d[0x01A1] = _inventoryHandler.Handle_ACHIEVEMENT_TRIGGER;              //417
             d[0x01DE] = _dungeonHandler.HandleDungeonSceneUniqueIdReport;           //478
             d[0x02A8] = (s, h, b) =>

@@ -153,6 +153,18 @@ namespace DfoServer.Game.Inventory
             return result;
         }
 
+        internal static bool IsEquipmentItemLocked(
+            InventoryService inventory,
+            ItemCore item)
+        {
+            return inventory != null
+                && item != null
+                && item.EquipmentLockId != 0
+                && inventory.EquipmentLocks.TryGet(item.EquipmentLockId, out var itemLock)
+                && itemLock != null
+                && itemLock.State != 0;
+        }
+
         internal static bool TryLockEquipmentItem(
             InventoryService inventory,
             InventoryListType listType,

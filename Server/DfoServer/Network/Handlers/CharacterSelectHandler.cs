@@ -71,10 +71,12 @@ namespace DfoServer.Network.Handlers
         }
 
         // 按 UserId 找在线会话(他人外观拉取用)。
-        private EnhancedClientSession FindOnlineByUserId(ushort uid)
+        internal static EnhancedClientSession FindOnlineByUserId(
+            Game.Session.ISessionDirectory sessions,
+            ushort uid)
         {
-            if (_sessions == null) return null;
-            foreach (var s in _sessions.GetAllGameSessions())
+            if (sessions == null) return null;
+            foreach (var s in sessions.GetAllGameSessions())
                 if (s?.Player != null && s.Player.CharacterId > 0 && s.Player.UserId == uid)
                     return s;
             return null;
@@ -331,7 +333,7 @@ namespace DfoServer.Network.Handlers
                     byte mode = body[2];
                     if (mode != 0x02 && reqUid != 0xFFFF && reqUid != session.Player.UserId)
                     {
-                        var target = FindOnlineByUserId(reqUid);
+                        var target = FindOnlineByUserId(_sessions, reqUid);
                         if (target != null)
                         {
                             // ⚠️ 待真机验证: inspect(mode=3)可能需要【完整明细 subtype-1】而不只精简外观 subtype-0。

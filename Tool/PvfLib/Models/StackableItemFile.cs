@@ -116,6 +116,34 @@ namespace PvfLib
         public List<int> IgnoreIndexes { get; set; } = new List<int>();
     }
 
+    public sealed class LimitedCubeItemRequirement
+    {
+        public int ItemId { get; set; }
+
+        public int Count { get; set; }
+    }
+
+    public sealed class LimitedCubeResultEntry
+    {
+        public int ItemId { get; set; }
+
+        public short ResultValue { get; set; }
+
+        public int Weight { get; set; }
+    }
+
+    public sealed class UpgradeLimitCubeInfo
+    {
+        public List<LimitedCubeItemRequirement> ConditionItems { get; } =
+            new List<LimitedCubeItemRequirement>();
+
+        public List<LimitedCubeItemRequirement> AdditionalMaterials { get; } =
+            new List<LimitedCubeItemRequirement>();
+
+        public List<LimitedCubeResultEntry> Results { get; } =
+            new List<LimitedCubeResultEntry>();
+    }
+
     
     
     
@@ -203,6 +231,7 @@ namespace PvfLib
         // [action type] `[xxx]` p1 p2 ...: ActionTypeName="[xxx]", ActionTypeParams=[p1,p2,...]
         public string ActionTypeName { get; set; }
         public List<int> ActionTypeParams { get; set; } = new List<int>();
+        public UpgradeLimitCubeInfo UpgradeLimitCube { get; set; }
         public EquipmentUpgradeTicketInfo EquipmentReinforcementTicket { get; set; }
         public EquipmentUpgradeTicketInfo EquipmentAmplifyReinforcementTicket { get; set; }
         public EnchantRandomUpgradeInfo EnchantRandomUpgrade { get; set; }
@@ -346,6 +375,7 @@ namespace PvfLib
                     case "3choro enchant": stk.ThreeChronicleEnchant = ParseThreeChronicleEnchant(root, node, content); break;
                     case "enchant table": stk.EnchantTable = ParseEnchantTableIndexes(node, content); break;
                     case "action type": ParseActionType(node, content, stk); break;
+                    case "upgrade limit cube info": stk.UpgradeLimitCube = ParseUpgradeLimitCubeInfo(node, content); break;
                     case "equipment reinforcement ticket": stk.EquipmentReinforcementTicket = ParseUpgradeTicket(node, content); break;
                     case "equipment amplify reinforcement ticket": stk.EquipmentAmplifyReinforcementTicket = ParseUpgradeTicket(node, content); break;
                     case "enchant random": stk.EnchantRandomUpgrade = ParseEnchantRandomUpgrade(node, content); break;
@@ -654,9 +684,7 @@ namespace PvfLib
             foreach (var item in node.DataItems)
                 ints.AddRange(ParseInts(item.GetContent(content)));
 
-            if (weighted && string.Equals(rewardKind, "cera", StringComparison.OrdinalIgnoreCase))
-                AddPairRewards(ints, rewardKind, fallbackGroup, rewards);
-            else if (weighted)
+            if (weighted)
                 AddWeightedRewards(ints, rewardKind, fallbackGroup, rewards);
             else
                 AddPairRewards(ints, rewardKind, fallbackGroup, rewards);
@@ -1047,21 +1075,84 @@ namespace PvfLib
 
         private static List<int> ParseIntList(ScriptNode node, string content)
         {
-            var result = new List<int>();
-            if (node == null || node.DataItems == null)
-                return result;
+            return PvfScriptValueReader.ReadIntegers(node, content);
+        }
 
-            foreach (var item in node.DataItems)
+        private static UpgradeLimitCubeInfo ParseUpgradeLimitCubeInfo(
+            ScriptNode node,
+            string content)
+        {
+            if (node == null)
+                return null;
+
+            var info = new UpgradeLimitCubeInfo();
+            if (!TryParseLimitedCubeRequirements(
+                    node.GetChild("A condition item"),
+                    content,
+                    required: true,
+                    info.ConditionItems)
+                || !TryParseLimitedCubeRequirements(
+                    node.GetChild("B condition item"),
+                    content,
+                    required: false,
+                    info.AdditionalMaterials))
             {
-                var raw = item.GetContent(content);
-                foreach (var token in raw.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (int.TryParse(StripBacktick(token), out var value))
-                        result.Add(value);
-                }
+                return null;
             }
 
-            return result;
+            var resultValues = PvfScriptValueReader.ReadIntegers(
+                node.GetChild("result item"),
+                content);
+            if (resultValues.Count == 0 || resultValues.Count % 3 != 0)
+                return null;
+
+            for (var index = 0; index < resultValues.Count; index += 3)
+            {
+                var itemId = resultValues[index];
+                var resultValue = resultValues[index + 1];
+                var weight = resultValues[index + 2];
+                if (itemId <= 0
+                    || resultValue <= 0
+                    || resultValue > short.MaxValue
+                    || weight <= 0)
+                {
+                    return null;
+                }
+
+                info.Results.Add(new LimitedCubeResultEntry
+                {
+                    ItemId = itemId,
+                    ResultValue = (short)resultValue,
+                    Weight = weight,
+                });
+            }
+
+            return info;
+        }
+
+        private static bool TryParseLimitedCubeRequirements(
+            ScriptNode node,
+            string content,
+            bool required,
+            ICollection<LimitedCubeItemRequirement> result)
+        {
+            var values = PvfScriptValueReader.ReadIntegers(node, content);
+            if ((required && values.Count == 0) || values.Count % 2 != 0)
+                return false;
+
+            for (var index = 0; index < values.Count; index += 2)
+            {
+                if (values[index] <= 0 || values[index + 1] <= 0)
+                    return false;
+
+                result.Add(new LimitedCubeItemRequirement
+                {
+                    ItemId = values[index],
+                    Count = values[index + 1],
+                });
+            }
+
+            return true;
         }
 
         private static void ParseActionType(ScriptNode node, string content, StackableItemFile stk)
