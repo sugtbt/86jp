@@ -86,7 +86,6 @@ jobs:
             -p:InvariantGlobalization=true ^
             -p:StripSymbols=true^
             -p:DebugType=none^
-            -p:PublishAot=true ^
             -o dist\win-x64
 
       - name: Zip Build Output
