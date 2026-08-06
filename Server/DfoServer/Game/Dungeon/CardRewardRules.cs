@@ -20,7 +20,9 @@ namespace DfoServer.Game.Dungeon
                 return false;
             lock (run.SyncRoot)
             {
-                if (run.CardRewards == null)
+                if (run.SettlementState
+                        != DungeonSettlementState.CardsRevealed
+                    || run.CardRewards == null)
                     return false;
                 if (cardType == 1 && !HasPaidCardReward(run.CardRewards))
                     return false;

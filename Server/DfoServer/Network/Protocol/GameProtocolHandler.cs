@@ -62,6 +62,8 @@ namespace DfoServer.Network
         private readonly Handlers.Dungeon.DungeonRejoinCoordinator
             _dungeonRejoin;
         private readonly CharacterTransitionCoordinator _characterTransitions;
+        private readonly PvpChannelInfoHandler _pvpChannelInfoHandler;
+        private readonly PvpRoomHandler _pvpRoomHandler;
         private readonly Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> _cmdDispatch;
 
         public override string ProtocolName => "GameProtocol";
@@ -69,7 +71,8 @@ namespace DfoServer.Network
         public GameProtocolHandler(
             ISessionDirectory sessionDirectory,
             Func<byte[], Task> broadcastGamePacket = null,
-            PartyUdpRelay udpRelay = null)
+            PartyUdpRelay udpRelay = null,
+            PartyUdpRelay pvpUdpRelay = null)
         {
             var databasePath = ServerPaths.DatabasePath;
             var schemaFilePath = ServerPaths.SchemaFilePath;
@@ -290,6 +293,13 @@ namespace DfoServer.Network
                 new Game.Currency.CharacterGoldLimitRepository(databasePath, schemaFilePath),
                 _inventoryRefreshSender);
             _craneMiniGameHandler = new CraneMiniGameHandler(_inventoryRefreshSender);
+            _pvpChannelInfoHandler = new PvpChannelInfoHandler();
+            _pvpRoomHandler = new PvpRoomHandler(
+                sessionDirectory,
+                _townHandler.BuildFullUserInfoPacket,
+                _characterTransitions,
+                pvpUdpRelay: pvpUdpRelay);
+            _partyHandler.AttachPvpRoomHandler(_pvpRoomHandler);
 
             _cmdDispatch = new Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>>();
             RegisterLoginHandlers(_cmdDispatch);
@@ -319,6 +329,7 @@ namespace DfoServer.Network
 
         public void Dispose()
         {
+            _pvpRoomHandler.Dispose();
             _partyHandler.Dispose();
         }
 
@@ -418,6 +429,7 @@ namespace DfoServer.Network
                     var gsConnStr = SqliteDatabaseBootstrap.Initialize(
                         ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
                     s.GameSession = new Game.Session.GameSession(s, gsConnStr);
+                    await _pvpRoomHandler.HandleLobbyReadyAsync(s);
                     await _inventoryRefreshSender.SendAllEquipmentItemLockListRefresh(s);
                     await s.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(null);
                     await PetCreatureRuntimeService.BeginTownAsync(s, "select_character");
@@ -465,7 +477,11 @@ namespace DfoServer.Network
             GamePacketHeader header,
             byte[] body)
         {
+            var previous = session?.Player?.ReportedUdpEndpoint;
             await _partyHandler.Handle_SET_UDP_IP_PORT(session, header, body);
+            var current = session?.Player?.ReportedUdpEndpoint;
+            if (current != null && !ReferenceEquals(previous, current))
+                await _pvpRoomHandler.HandleReportedUdpEndpointChanged(session);
         }
 
         private void RegisterInventoryHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
@@ -814,6 +830,32 @@ namespace DfoServer.Network
             d[0x0373] = _luckyStarHandler.HandleShopPurchasePacket;
             d[(ushort)CmdPacketType.GET_EXPAND_EXP_GAGE_REWARD] = _growthCapsuleHandler.HandleClaimAsync;
             d[(ushort)CmdPacketType.UPGRADE_CARRY_GOLD] = _goldLimitHandler.HandleUpgradeAsync;
+            d[PvpChannelInfoHandler.CommandType] =
+                _pvpChannelInfoHandler.HandlePvpChannelInfo;
+            d[PvpRoomHandler.MakeRoomCommandType] =
+                _pvpRoomHandler.HandleMakeRoom;
+            d[PvpRoomHandler.EnterRoomCommandType] =
+                _pvpRoomHandler.HandleEnterRoom;
+            d[PvpRoomHandler.SetSeatStateCommandType] =
+                _pvpRoomHandler.HandleSetSeatState;
+            d[PvpRoomHandler.SetReadyStateCommandType] =
+                _pvpRoomHandler.HandleSetReadyState;
+            d[PvpRoomHandler.SetTeamModeCommandType] =
+                _pvpRoomHandler.HandleSetTeamMode;
+            d[PvpRoomHandler.DiePvpCharacterCommandType] =
+                _pvpRoomHandler.HandleDiePvpCharacter;
+            d[PvpRoomHandler.PvpTimeOutCommandType] =
+                _pvpRoomHandler.HandlePvpTimeOut;
+            d[PvpRoomHandler.EndPvpResultCommandType] =
+                _pvpRoomHandler.HandleEndPvpResult;
+            d[PvpRoomHandler.PvpRankResponseCommandType] =
+                _pvpRoomHandler.HandlePvpRankResponse;
+            d[PvpRoomHandler.CompleteLoadPvpCommandType] =
+                _pvpRoomHandler.HandleCompleteLoadPvp;
+            d[PvpRoomHandler.ConnectP2pPvpCommandType] =
+                _pvpRoomHandler.HandleConnectP2pPvp;
+            d[PvpRoomHandler.PvpRequestFightCommandType] =
+                _pvpRoomHandler.HandlePvpRequestFight;
         }
 
         private void RegisterExpertJobHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)

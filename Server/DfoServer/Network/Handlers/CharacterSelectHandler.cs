@@ -222,7 +222,11 @@ namespace DfoServer.Network.Handlers
                     var inventory = TryLoadInventoryForLease(
                         record.CharacterId,
                         ResolveAccountId(session, record));
-                    session.Player.HydrateFrom(record);
+                    session.Player.HydrateFrom(
+                        record,
+                        GameChannelSpawnPolicy.Resolve(
+                            session.ListenerPort,
+                            record.TownId));
                     TryRegisterInventoryLease(session, record, inventory);
 
                     try
@@ -297,7 +301,33 @@ namespace DfoServer.Network.Handlers
                     ownerAcctId);
             }
 
-            foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(_selectCharacterDataSource, ownerCharId, ownerAcctId))
+            SkillInfoSnapshot pvpSkillOverride = null;
+            if (GameNetworkConfig.IsFreeDuelListener(session.ListenerPort))
+            {
+                var skillOwner = _characterRepository.GetById(ownerCharId);
+                if (skillOwner != null)
+                {
+                    var pvpSkills = new Game.Skills.SqlitePvpSkillRepository(
+                        Infrastructure.ServerPaths.DatabasePath,
+                        Infrastructure.ServerPaths.SchemaFilePath);
+                    pvpSkillOverride = pvpSkills.LoadOrInitialize(
+                        ownerCharId,
+                        skillOwner.Job,
+                        skillOwner.Level,
+                        skillOwner.GrowType);
+                    FileLogger.Log(
+                        $"[{ProtocolName}] Loaded independent PvP skills " +
+                        $"character_id={ownerCharId} " +
+                        $"entries={pvpSkillOverride.Pages[0].Entries.Count}+" +
+                        $"{pvpSkillOverride.Pages[1].Entries.Count}");
+                }
+            }
+
+            foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(
+                         _selectCharacterDataSource,
+                         ownerCharId,
+                         ownerAcctId,
+                         pvpSkillOverride))
                 await session.SendPacketAsync(packet);
 
             if (InventoryContext.TryGetLease(ownerCharId, out var inventoryLease)

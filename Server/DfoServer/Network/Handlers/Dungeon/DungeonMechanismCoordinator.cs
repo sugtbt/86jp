@@ -152,18 +152,29 @@ namespace DfoServer.Network.Handlers.Dungeon
             DungeonRun run,
             DungeonRoomPoint moveTarget,
             ref int overrideMapId)
-            => SpecialDungeonRunCoordinator.TryApplyGentWarpOverride(
+        {
+            SpecialDungeonRunCoordinator.TryApplyBossRouteOverride(
+                run,
+                moveTarget,
+                ref overrideMapId);
+            SpecialDungeonRunCoordinator.TryApplyGentWarpOverride(
                 session,
                 run,
                 moveTarget,
                 ref overrideMapId);
+        }
 
         internal static void CopyMoveStateForParty(
             DungeonRun leaderRun,
             DungeonRun memberRun)
-            => TimeSpiralDungeonCoordinator.CopyTeleportStateForPartyMove(
+        {
+            TimeSpiralDungeonCoordinator.CopyTeleportStateForPartyMove(
                 leaderRun,
                 memberRun);
+            SpecialDungeonRunCoordinator.CopyBossRouteStateForPartyMove(
+                leaderRun,
+                memberRun);
+        }
 
         internal static void OnMoveMapCompleted(
             EnhancedClientSession session,

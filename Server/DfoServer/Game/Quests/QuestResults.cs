@@ -10,7 +10,12 @@ namespace DfoServer.Game.Quests
     {
         public byte ErrorCode;
         public ushort QuestId;
+        // ACCEPT ACK 先用 PVF/QST 初值建立客户端任务模型。
         public uint InitTrigger;
+        // 事务内按角色当前状态校准并实际落库的权威值。
+        public uint CommittedTrigger;
+        // 两者不同时，由网络适配层在 ACCEPT ACK 后投影一次 SET_TRIGGER。
+        public QuestSetTriggerResult PostAcceptTriggerProjection;
         public List<QuestEventItemGrant> EventItems = new List<QuestEventItemGrant>();
 
         public bool Success => ErrorCode == 0;

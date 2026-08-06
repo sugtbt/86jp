@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using DfoServer.Game.Dungeon;
+using DfoServer.GameWorld;
 using DfoServer.Network.Handlers.Dungeon;
 using PvfLib;
 using DungeonData = DfoServer.GameWorld.Dungeon;
@@ -148,16 +149,15 @@ namespace DfoServer.SelfTests
                     "[size]\n2 2\n" +
                     "[greed]\n`II00\n AACC`\n");
                 var multilineGreedMaze = multilineGreedDungeon.Mazes[0];
-                var greedCells = new HashSet<DungeonRoomPoint>();
-                DungeonRoomTopology.AddGreedCells(
-                    multilineGreedMaze,
-                    greedCells);
+                var greedCells = new HashSet<DungeonMazeRoomCoordinate>(
+                    DungeonMazeTopology.ResolveGreedCoordinates(
+                        multilineGreedMaze));
                 Check("maze parser and topology preserve multiline two-character greed cells",
                     multilineGreedMaze.Greed == "II00\nAACC"
-                    && greedCells.Contains(new DungeonRoomPoint(0, 0))
-                    && !greedCells.Contains(new DungeonRoomPoint(1, 0))
-                    && !greedCells.Contains(new DungeonRoomPoint(0, 1))
-                    && greedCells.Contains(new DungeonRoomPoint(1, 1)),
+                    && greedCells.Contains(new DungeonMazeRoomCoordinate(0, 0))
+                    && !greedCells.Contains(new DungeonMazeRoomCoordinate(1, 0))
+                    && !greedCells.Contains(new DungeonMazeRoomCoordinate(0, 1))
+                    && greedCells.Contains(new DungeonMazeRoomCoordinate(1, 1)),
                     ref failures);
 
                 var linearGreedDungeon = DungeonFile.Parse(

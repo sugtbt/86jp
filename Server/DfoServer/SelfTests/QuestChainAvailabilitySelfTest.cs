@@ -49,6 +49,7 @@ namespace DfoServer.SelfTests
             CheckCompletionRefresh(ref failures);
             CheckJobCompletionRefresh(ref failures);
             CheckExpertJobCompletionRefresh(ref failures);
+            CheckDanglingPrerequisitePolicy(ref failures);
             CheckTimeGateSameSlotProjection(ref failures);
             CheckJobAndExpertJobSuccessors(ref failures);
 
@@ -334,6 +335,87 @@ namespace DfoServer.SelfTests
                 !disjointSuccessors.Contains(11007)
                 && !disjointSuccessors.Contains(11013)
                 && !disjointSuccessors.Contains(11016),
+                ref failures);
+        }
+
+        private static void CheckDanglingPrerequisitePolicy(ref int failures)
+        {
+            var noirperaSuccessor = QuestPrerequisiteCatalog.Get(1926);
+            Check("Noirpera successor keeps its valid prerequisite candidate",
+                noirperaSuccessor != null
+                && noirperaSuccessor.IsValid
+                && noirperaSuccessor.CompletedQuestGroups.Count == 1
+                && noirperaSuccessor.CompletedQuestGroups[0].Length == 1
+                && noirperaSuccessor.CompletedQuestGroups[0][0] == 1925,
+                ref failures);
+            Check("clearing Noirpera quest 1925 exposes successor 1926",
+                BuildQuestIds(1925).Contains(1926),
+                ref failures);
+            Check("Noirpera successor remains unavailable before quest 1925",
+                !BuildQuestIds().Contains(1926),
+                ref failures);
+
+            var mixedAndOrDefinition = QuestPrerequisiteCatalog.Get(5853);
+            Check("a dangling AND candidate does not invalidate a legal OR candidate",
+                mixedAndOrDefinition != null
+                && mixedAndOrDefinition.IsValid
+                && mixedAndOrDefinition.CompletedQuestGroups.Count == 1
+                && mixedAndOrDefinition.CompletedQuestGroups[0].Length == 2
+                && mixedAndOrDefinition.CompletedQuestGroups[0][0] == 2253
+                && mixedAndOrDefinition.CompletedQuestGroups[0][1] == 5852,
+                ref failures);
+
+            var danglingCollisionDefinition = QuestPrerequisiteCatalog.Get(12733);
+            Check("an unknown collision target is diagnostic rather than authorization",
+                danglingCollisionDefinition != null
+                && danglingCollisionDefinition.IsValid
+                && danglingCollisionDefinition.CompletedQuestGroups.Count == 1
+                && danglingCollisionDefinition.CompletedQuestGroups[0].Length == 1
+                && danglingCollisionDefinition.CompletedQuestGroups[0][0] == 12732
+                && danglingCollisionDefinition.CollisionQuestIds.Count == 0
+                && danglingCollisionDefinition.Diagnostics.Count > 0,
+                ref failures);
+
+            var failClosedQuestIds = new[]
+            {
+                4344, 4073, 4496, 12732, 12734, 12778,
+                20715, 20716, 20717, 20750, 20751, 20752, 20753,
+            };
+            var allFailClosed = true;
+            foreach (var questId in failClosedQuestIds)
+            {
+                var definition = QuestPrerequisiteCatalog.Get(questId);
+                if (definition == null || definition.IsValid)
+                {
+                    allFailClosed = false;
+                    break;
+                }
+            }
+            Check("prerequisites with no valid candidate group remain fail-closed",
+                allFailClosed,
+                ref failures);
+
+            var unknownAnswer = new PvfLib.QuestFile
+            {
+                PreRequiredQuestAnswerGroups = new List<string> { "999 0" },
+            };
+            Check("unknown answer prerequisites remain fail-closed",
+                !QuestPrerequisiteDefinition.Parse(
+                    1,
+                    unknownAnswer,
+                    questId => questId == 1).IsValid,
+                ref failures);
+
+            var incompleteAndGroup = new PvfLib.QuestFile
+            {
+                PreRequiredQuestGroups = new List<string> { "2 999" },
+            };
+            var incompleteAndDefinition = QuestPrerequisiteDefinition.Parse(
+                1,
+                incompleteAndGroup,
+                questId => questId == 1 || questId == 2);
+            Check("an AND group cannot survive by dropping its unknown member",
+                !incompleteAndDefinition.IsValid,
                 ref failures);
         }
 

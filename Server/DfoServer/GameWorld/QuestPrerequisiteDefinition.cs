@@ -76,6 +76,7 @@ namespace DfoServer.GameWorld
             QuestRequiredAnswer[] requiredAnswers,
             int[] collisionQuestIds,
             int[] accountCollisionQuestIds,
+            string[] diagnostics,
             string validationError)
         {
             QuestId = questId;
@@ -83,6 +84,7 @@ namespace DfoServer.GameWorld
             RequiredAnswers = requiredAnswers ?? Array.Empty<QuestRequiredAnswer>();
             CollisionQuestIds = collisionQuestIds ?? Array.Empty<int>();
             AccountCollisionQuestIds = accountCollisionQuestIds ?? Array.Empty<int>();
+            Diagnostics = diagnostics ?? Array.Empty<string>();
             ValidationError = validationError;
         }
 
@@ -91,6 +93,7 @@ namespace DfoServer.GameWorld
         internal IReadOnlyList<QuestRequiredAnswer> RequiredAnswers { get; }
         internal IReadOnlyList<int> CollisionQuestIds { get; }
         internal IReadOnlyList<int> AccountCollisionQuestIds { get; }
+        internal IReadOnlyList<string> Diagnostics { get; }
         internal string ValidationError { get; }
         internal bool IsValid => string.IsNullOrEmpty(ValidationError);
 
@@ -186,17 +189,18 @@ namespace DfoServer.GameWorld
             if (questExists == null)
                 return Invalid(questId, "quest catalog predicate is missing");
 
+            var diagnostics = new List<string>();
             var completedGroups = new List<int[]>();
-            var error = ParsePositiveIdGroups(
+            var error = ParseCompletedQuestGroups(
                 questId,
                 SelectGroups(
                     quest.PreRequiredQuestGroups,
                     quest.PreRequiredQuest),
                 questExists,
-                "pre required quest",
-                completedGroups);
+                completedGroups,
+                diagnostics);
             if (error != null)
-                return Invalid(questId, error);
+                return Invalid(questId, error, diagnostics);
 
             var requiredAnswers = new List<QuestRequiredAnswer>();
             error = ParseRequiredAnswers(
@@ -207,31 +211,33 @@ namespace DfoServer.GameWorld
                 questExists,
                 requiredAnswers);
             if (error != null)
-                return Invalid(questId, error);
+                return Invalid(questId, error, diagnostics);
 
             var collisionGroups = new List<int[]>();
-            error = ParsePositiveIdGroups(
+            error = ParseCollisionQuestGroups(
                 questId,
                 SelectGroups(
                     quest.CollisionQuestGroups,
                     quest.CollisionQuest),
                 questExists,
                 "collision quest",
-                collisionGroups);
+                collisionGroups,
+                diagnostics);
             if (error != null)
-                return Invalid(questId, error);
+                return Invalid(questId, error, diagnostics);
 
             var accountCollisionGroups = new List<int[]>();
-            error = ParsePositiveIdGroups(
+            error = ParseCollisionQuestGroups(
                 questId,
                 SelectGroups(
                     quest.AccountCollisionQuestGroups,
                     quest.AccountCollisionQuest),
                 questExists,
                 "account collision quest",
-                accountCollisionGroups);
+                accountCollisionGroups,
+                diagnostics);
             if (error != null)
-                return Invalid(questId, error);
+                return Invalid(questId, error, diagnostics);
 
             return new QuestPrerequisiteDefinition(
                 questId,
@@ -239,18 +245,23 @@ namespace DfoServer.GameWorld
                 requiredAnswers.ToArray(),
                 FlattenDistinct(collisionGroups),
                 FlattenDistinct(accountCollisionGroups),
+                diagnostics.ToArray(),
                 null);
         }
 
         private static QuestPrerequisiteDefinition Invalid(
             int questId,
-            string error)
+            string error,
+            IReadOnlyList<string> diagnostics = null)
             => new QuestPrerequisiteDefinition(
                 questId,
                 Array.Empty<int[]>(),
                 Array.Empty<QuestRequiredAnswer>(),
                 Array.Empty<int>(),
                 Array.Empty<int>(),
+                diagnostics == null
+                    ? Array.Empty<string>()
+                    : new List<string>(diagnostics).ToArray(),
                 error ?? "invalid quest prerequisite definition");
 
         private static IReadOnlyList<string> SelectGroups(
@@ -264,12 +275,66 @@ namespace DfoServer.GameWorld
             return Array.Empty<string>();
         }
 
-        private static string ParsePositiveIdGroups(
+        private static string ParseCompletedQuestGroups(
+            int ownerQuestId,
+            IReadOnlyList<string> rawGroups,
+            Func<int, bool> questExists,
+            ICollection<int[]> output,
+            ICollection<string> diagnostics)
+        {
+            var hasDeclaredGroup = false;
+            foreach (var rawGroup in rawGroups)
+            {
+                if (!TryParseStrictIntList(rawGroup, out var values))
+                    return "pre required quest contains a non-integer token";
+                if (values.Count == 0)
+                    continue;
+                hasDeclaredGroup = true;
+
+                var distinct = new List<int>();
+                var seen = new HashSet<int>();
+                var missing = new List<int>();
+                foreach (var referencedQuestId in values)
+                {
+                    if (referencedQuestId <= 0)
+                    {
+                        return $"pre required quest contains non-positive quest id " +
+                            referencedQuestId;
+                    }
+                    if (referencedQuestId == ownerQuestId)
+                        return "pre required quest contains a self reference";
+                    if (!questExists(referencedQuestId))
+                    {
+                        missing.Add(referencedQuestId);
+                        continue;
+                    }
+                    if (seen.Add(referencedQuestId))
+                        distinct.Add(referencedQuestId);
+                }
+
+                if (missing.Count > 0)
+                {
+                    diagnostics.Add(
+                        $"pre required quest skipped candidate group '{rawGroup}' " +
+                        $"because quest(s) {string.Join(",", missing)} are unknown");
+                    continue;
+                }
+                output.Add(distinct.ToArray());
+            }
+
+            if (hasDeclaredGroup && output.Count == 0)
+                return "pre required quest has no valid candidate group";
+
+            return null;
+        }
+
+        private static string ParseCollisionQuestGroups(
             int ownerQuestId,
             IReadOnlyList<string> rawGroups,
             Func<int, bool> questExists,
             string fieldName,
-            ICollection<int[]> output)
+            ICollection<int[]> output,
+            ICollection<string> diagnostics)
         {
             foreach (var rawGroup in rawGroups)
             {
@@ -283,15 +348,24 @@ namespace DfoServer.GameWorld
                 foreach (var referencedQuestId in values)
                 {
                     if (referencedQuestId <= 0)
-                        return $"{fieldName} contains non-positive quest id {referencedQuestId}";
+                    {
+                        return $"{fieldName} contains non-positive quest id " +
+                            referencedQuestId;
+                    }
                     if (referencedQuestId == ownerQuestId)
                         return $"{fieldName} contains a self reference";
                     if (!questExists(referencedQuestId))
-                        return $"{fieldName} references unknown quest {referencedQuestId}";
+                    {
+                        diagnostics.Add(
+                            $"{fieldName} ignored unknown quest {referencedQuestId}");
+                        continue;
+                    }
                     if (seen.Add(referencedQuestId))
                         distinct.Add(referencedQuestId);
                 }
-                output.Add(distinct.ToArray());
+
+                if (distinct.Count > 0)
+                    output.Add(distinct.ToArray());
             }
 
             return null;
@@ -401,6 +475,11 @@ namespace DfoServer.GameWorld
                     FileLogger.Log(
                         $"[QuestPrerequisiteCatalog] invalid quest={questId}: " +
                         definition.ValidationError);
+                }
+                foreach (var diagnostic in definition.Diagnostics)
+                {
+                    FileLogger.Log(
+                        $"[QuestPrerequisiteCatalog] quest={questId}: {diagnostic}");
                 }
             }
             return result;

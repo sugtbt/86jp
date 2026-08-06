@@ -4,16 +4,19 @@ namespace DfoServer.Network.Builders
 {
     public static class LoginPacketBuilder
     {
-        public static byte[] BuildInitialLoginNotice()
+        public static byte[] BuildInitialLoginNotice(
+            int listenerGamePort = GameNetworkConfig.NormalGamePort)
         {
+            var channel =
+                GameNetworkConfig.ResolveGameChannel(listenerGamePort);
             var writer = new GamePacketWriter();
 
             writer.WriteByte(0x01);
-            writer.WriteAsciiDstr(GameNetworkConfig.ChannelName);
+            writer.WriteAsciiDstr(channel.LoginName);
             writer.WriteInt32(0x00000000);
             writer.WriteInt32(0x00000000);
             writer.WriteByte((byte)GameNetworkConfig.ChannelServerIndex);
-            writer.WriteByte((byte)GameNetworkConfig.ChannelIndex);
+            writer.WriteByte((byte)channel.ChannelId);
             writer.WriteByte(0x00);
             writer.WriteInt32((int)System.DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             writer.WriteInt32(0x00000001);
@@ -27,14 +30,17 @@ namespace DfoServer.Network.Builders
             return writer.ToArray();
         }
 
-        public static byte[] BuildLoginSuccess()
+        public static byte[] BuildLoginSuccess(
+            int listenerGamePort = GameNetworkConfig.NormalGamePort)
         {
             var writer = new GamePacketWriter();
 
             writer.WriteByte(0x01);
             writer.WriteByte(18);
             writer.WriteByte(0x00);
-            writer.WriteByte(0x01);
+            writer.WriteByte(
+                GameNetworkConfig.ResolveLoginEnvironment(
+                    listenerGamePort));
             writer.WriteByte(0x00);
             writer.WriteInt32(GameNetworkConfig.LoginChannelPort);
             writer.WriteAsciiDstr(GameNetworkConfig.ServerIp);

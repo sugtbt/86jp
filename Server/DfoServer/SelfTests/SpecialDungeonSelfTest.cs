@@ -28,10 +28,84 @@ namespace DfoServer.SelfTests
             TestGentInfiltrate(ref failures);
             TestSeizeMoney(ref failures);
             TestClearMapGroups(ref failures);
+            TestBossRouteRuntime(ref failures);
             TestPvfBackedData(ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void TestBossRouteRuntime(ref int failures)
+        {
+            var definition = new DungeonBossRouteDefinition(
+                bossX: 4,
+                bossY: 1,
+                new[]
+                {
+                    new DungeonBossRouteEntryDefinition(
+                        DungeonBossRouteDirection.Above, 4, 0, 101),
+                    new DungeonBossRouteEntryDefinition(
+                        DungeonBossRouteDirection.Below, 4, 2, 102),
+                    new DungeonBossRouteEntryDefinition(
+                        DungeonBossRouteDirection.Left, 3, 1, 103),
+                    new DungeonBossRouteEntryDefinition(
+                        DungeonBossRouteDirection.Left, 3, 1, 104),
+                });
+            var runtime = new DungeonBossRouteRuntime(definition, fallbackMapId: 102);
+
+            var selected = runtime.TrySelectForMove(
+                sourceX: 3,
+                sourceY: 1,
+                targetX: 4,
+                targetY: 1,
+                selectIndex: count => count - 1,
+                out var selectedMapId,
+                out var transitioned);
+            Check(
+                "Boss route commits the first matching entrance",
+                selected
+                    && transitioned
+                    && selectedMapId == 104
+                    && runtime.SelectedMapId == 104
+                    && runtime.SelectedDirection == DungeonBossRouteDirection.Left
+                    && !runtime.SelectedByFallback,
+                ref failures);
+
+            selected = runtime.TrySelectForMove(
+                sourceX: 4,
+                sourceY: 2,
+                targetX: 4,
+                targetY: 1,
+                selectIndex: _ => 0,
+                out selectedMapId,
+                out transitioned);
+            Check(
+                "Boss route replay is an instance-level no-op",
+                selected && !transitioned && selectedMapId == 104,
+                ref failures);
+
+            var fallbackRuntime = new DungeonBossRouteRuntime(
+                definition,
+                fallbackMapId: 102);
+            var fallbackMapId = fallbackRuntime.ResolveForStartMap(
+                out var fallbackCommitted);
+            selected = fallbackRuntime.TrySelectForMove(
+                sourceX: 3,
+                sourceY: 1,
+                targetX: 4,
+                targetY: 1,
+                selectIndex: _ => 0,
+                out selectedMapId,
+                out transitioned);
+            Check(
+                "Boss room creation freezes fallback before a late route event",
+                fallbackCommitted
+                    && fallbackMapId == 102
+                    && selected
+                    && !transitioned
+                    && selectedMapId == 102
+                    && fallbackRuntime.SelectedByFallback,
+                ref failures);
         }
 
         private static void TestPacketBodies(ref int failures)
@@ -1099,6 +1173,123 @@ namespace DfoServer.SelfTests
                 "Generic selection fixes quest-bound Boss maps outside TimeCrack",
                 run.SpecialDungeon == null
                 && run.SelectedBossMapId == 8212,
+                ref failures);
+
+            var routeDefinition = DungeonBossRouteDefinitionProjector.Project(
+                dungeonId: 154,
+                mazeIndex: 0,
+                maze,
+                bossPos);
+            Check(
+                "Ancient Tomb projects Boss candidates from MAP greed masks",
+                routeDefinition != null
+                    && routeDefinition.Routes.Count == 3
+                    && routeDefinition.Routes[0].Direction
+                        == DungeonBossRouteDirection.Above
+                    && routeDefinition.Routes[0].MapId == 8211
+                    && routeDefinition.Routes[1].Direction
+                        == DungeonBossRouteDirection.Below
+                    && routeDefinition.Routes[1].MapId == 8212
+                    && routeDefinition.Routes[2].Direction
+                        == DungeonBossRouteDirection.Left
+                    && routeDefinition.Routes[2].MapId == 8213,
+                ref failures);
+            Check(
+                "Ancient Tomb MAP greed decodes authoritative entrance bits",
+                DungeonMapResolver.TryGetMapEntranceMask(8211, out var aboveMask)
+                    && aboveMask == 2
+                    && DungeonMapResolver.TryGetMapEntranceMask(8212, out var belowMask)
+                    && belowMask == 8
+                    && DungeonMapResolver.TryGetMapEntranceMask(8213, out var leftMask)
+                    && leftMask == 4,
+                ref failures);
+
+            var blazingGrakaMaze = GameWorld.Dungeon.GetDungeonMaze(8, 0);
+            var blazingGrakaRoute = DungeonBossRouteDefinitionProjector.Project(
+                dungeonId: 8,
+                mazeIndex: 0,
+                blazingGrakaMaze,
+                new[] { 3, 1 });
+            Check(
+                "MAP greed route projection applies outside Ancient Tomb",
+                blazingGrakaRoute != null
+                    && blazingGrakaRoute.Routes.Count == 2
+                    && blazingGrakaRoute.Routes[0].Direction
+                        == DungeonBossRouteDirection.Below
+                    && blazingGrakaRoute.Routes[0].MapId == 1223
+                    && blazingGrakaRoute.Routes[1].Direction
+                        == DungeonBossRouteDirection.Right
+                    && blazingGrakaRoute.Routes[1].MapId == 1224,
+                ref failures);
+
+            var butterflyMaze = GameWorld.Dungeon.GetDungeonMaze(52, 0);
+            var butterflyRoute = DungeonBossRouteDefinitionProjector.Project(
+                dungeonId: 52,
+                mazeIndex: 0,
+                butterflyMaze,
+                new[] { 1, 1 });
+            Check(
+                "MAP greed route projection preserves another ordinary dungeon",
+                butterflyRoute != null
+                    && butterflyRoute.Routes.Count == 2
+                    && butterflyRoute.Routes[0].Direction
+                        == DungeonBossRouteDirection.Left
+                    && butterflyRoute.Routes[0].MapId == 6512
+                    && butterflyRoute.Routes[1].Direction
+                        == DungeonBossRouteDirection.Right
+                    && butterflyRoute.Routes[1].MapId == 6513,
+                ref failures);
+
+            run.RoomKey = new RoomKey(3, 1, -1);
+            var routeOverrideMapId = -1;
+            var routeApplied = SpecialDungeonRunCoordinator
+                .TryApplyBossRouteOverride(
+                    run,
+                    new DungeonRoomPoint(4, 1),
+                    ref routeOverrideMapId);
+            Check(
+                "Ancient Tomb actual route overrides its quest-bound fallback",
+                routeApplied
+                    && routeOverrideMapId == 8213
+                    && run.SelectedBossMapId == 8213
+                    && run.Instance.Mechanisms.BossRoute?.SelectedMapId == 8213,
+                ref failures);
+
+            var partyRun = new DungeonRun(
+                run.Instance,
+                runId: 2,
+                runGeneration: 1,
+                initialState: DungeonRunState.Active);
+            SpecialDungeonRunCoordinator.CloneSelectionState(run, partyRun);
+            SpecialDungeonRunCoordinator.CopyBossRouteStateForPartyMove(
+                run,
+                partyRun);
+            var replayOverrideMapId = -1;
+            partyRun.RoomKey = new RoomKey(4, 2, -1);
+            var replayApplied = SpecialDungeonRunCoordinator
+                .TryApplyBossRouteOverride(
+                    partyRun,
+                    new DungeonRoomPoint(4, 1),
+                    ref replayOverrideMapId);
+            Check(
+                "Party participants share one immutable Boss route result",
+                partyRun.SelectedBossMapId == 8213
+                    && replayApplied
+                    && replayOverrideMapId == 8213
+                    && run.Instance.Mechanisms.BossRoute?.SelectedDirection
+                        == DungeonBossRouteDirection.Left,
+                ref failures);
+
+            var timeCrackMaze = GameWorld.Dungeon.GetDungeonMaze(2007, 0);
+            var timeCrackRun = new DungeonRun(2007, 0) { MazeIndex = 0 };
+            SpecialDungeonRunCoordinator.ConfigureSelection(
+                timeCrackRun,
+                timeCrackMaze,
+                new[] { 9, 0 },
+                Array.Empty<ActiveQuest>());
+            Check(
+                "Ordinary random Boss pools do not become route-bound",
+                timeCrackRun.Instance.Mechanisms.BossRoute == null,
                 ref failures);
         }
 

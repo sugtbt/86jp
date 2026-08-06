@@ -49,7 +49,8 @@ namespace DfoServer.Game.Quests
                 grantRequestIndexes.Add(index);
             }
 
-            var initialTrigger = GameWorld.QuestData.GetInitTrigger(questId);
+            var clientInitialTrigger = GameWorld.QuestData.GetInitTrigger(questId);
+            var committedTrigger = clientInitialTrigger;
             var slot = -1;
             lock (lease.SyncRoot)
             {
@@ -124,7 +125,7 @@ namespace DfoServer.Game.Quests
 
                             if (GameWorld.QuestData.IsQuestClearQuest(questId))
                             {
-                                initialTrigger = QuestClearProgressRules.Compute(
+                                committedTrigger = QuestClearProgressRules.Compute(
                                     connection,
                                     transaction,
                                     characterId,
@@ -132,8 +133,8 @@ namespace DfoServer.Game.Quests
                             }
                             if (seekItems.Count > 0)
                             {
-                                initialTrigger = QuestProgressReducer.ApplySeekingItems(
-                                    new QuestTrigger(initialTrigger),
+                                committedTrigger = QuestProgressReducer.ApplySeekingItems(
+                                    new QuestTrigger(committedTrigger),
                                     seekItems,
                                     itemId => CountMainItemWithPendingRewards(
                                         inventory,
@@ -178,7 +179,7 @@ namespace DfoServer.Game.Quests
                                 characterId,
                                 slot,
                                 questId,
-                                initialTrigger);
+                                committedTrigger);
                             if (repeatable)
                             {
                                 QuestRepository.DeleteClearedFlag(
@@ -226,8 +227,18 @@ namespace DfoServer.Game.Quests
             var result = new QuestAcceptResult
             {
                 QuestId = questId,
-                InitTrigger = initialTrigger,
+                InitTrigger = clientInitialTrigger,
+                CommittedTrigger = committedTrigger,
             };
+            if (clientInitialTrigger != committedTrigger)
+            {
+                result.PostAcceptTriggerProjection = new QuestSetTriggerResult
+                {
+                    QuestId = questId,
+                    PreviousTriggerValue = clientInitialTrigger,
+                    TriggerValue = committedTrigger,
+                };
+            }
             for (var index = 0; index < eventItems.Count; index++)
             {
                 result.EventItems.Add(new QuestEventItemGrant
@@ -239,7 +250,9 @@ namespace DfoServer.Game.Quests
             }
             FileLogger.Log(
                 $"[QuestAcceptanceApplicationService] ACCEPT quest={questId} " +
-                $"slot={slot} initTrigger={initialTrigger} eventItems={eventItems.Count}");
+                $"slot={slot} clientInitTrigger={clientInitialTrigger} " +
+                $"committedTrigger={committedTrigger} " +
+                $"eventItems={eventItems.Count}");
             return result;
         }
 

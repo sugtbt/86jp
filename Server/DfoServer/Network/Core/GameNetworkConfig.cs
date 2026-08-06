@@ -1,13 +1,22 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace DfoServer.Network
 {
     public static class GameNetworkConfig
     {
+        public const int NormalChannelIndex = 11;
+        public const int FreeDuelChannelIndex = 68;
         public const string ChannelName = "ch.11";
         public const int ChannelServerIndex = 1;
-        public const int ChannelIndex = 11;
+        public const int ChannelIndex = NormalChannelIndex;
         public const int NormalGamePort = 10011;
+        public const int FreeDuelGamePort = 10068;
+        public const string FreeDuelListenerEnvironmentVariable =
+            "DFO_FREE_DUEL_CHANNEL_LISTENER";
+        public const byte GeneralChannelEnvironment = 0x01;
+        public const byte FreeDuelChannelEnvironment = 0x0D;
         public const int InitialUdpPort1 = 12311;
         public const int InitialUdpPort2 = 12312;
         public const int LoginChannelPort = 10128;
@@ -19,58 +28,123 @@ namespace DfoServer.Network
         public static bool PacketCaptureEnabled { get; private set; }
         public static string PacketCaptureDir { get; private set; }
         public static bool ProxyMode { get; private set; }
+        public static bool FreeDuelListenerEnabled { get; private set; }
         public static bool UdpRelayEnabled { get; private set; }
+        public static bool PvpUdpRelayEnabled { get; private set; }
         public static string UdpRelayPublicIp { get; private set; }
         public static bool UdpRelayPublicIpConfigured { get; private set; }
         public static int UdpRelayPortBase { get; private set; } = 30000;
         public static int UdpRelayPortCount { get; private set; } = 256;
+        public static int PvpUdpRelayPortBase { get; private set; } = 30256;
+        public static int PvpUdpRelayPortCount { get; private set; } = 256;
+
+        public static bool RelayPortRangesOverlap =>
+            PortRangesOverlap(
+                UdpRelayPortBase,
+                UdpRelayPortCount,
+                PvpUdpRelayPortBase,
+                PvpUdpRelayPortCount);
+
+        public static IReadOnlyList<GameChannelEndpoint> GetGameChannels()
+            => BuildGameChannels(FreeDuelListenerEnabled);
+
+        internal static IReadOnlyList<GameChannelEndpoint> BuildGameChannels(
+            bool includeFreeDuel)
+        {
+            var normalListenerPort =
+                ProxyMode ? 10012 : NormalGamePort;
+            var channels = new List<GameChannelEndpoint>
+            {
+                new GameChannelEndpoint(
+                    NormalChannelIndex,
+                    NormalGamePort,
+                    normalListenerPort)
+            };
+
+            if (includeFreeDuel)
+            {
+                channels.Add(
+                    new GameChannelEndpoint(
+                        FreeDuelChannelIndex,
+                        FreeDuelGamePort,
+                        FreeDuelGamePort));
+            }
+
+            return channels;
+        }
+
+        public static GameChannelEndpoint ResolveGameChannel(
+            int listenerGamePort)
+            => BuildGameChannels(includeFreeDuel: true).FirstOrDefault(
+                   channel =>
+                       channel.ListenerGamePort == listenerGamePort)
+               ?? BuildGameChannels(includeFreeDuel: false)[0];
+
+        public static GameChannelEndpoint FindGameChannel(int channelId)
+            => BuildGameChannels(includeFreeDuel: true).FirstOrDefault(
+                channel => channel.ChannelId == channelId);
+
+        public static bool IsFreeDuelChannel(int channelId)
+            => channelId == FreeDuelChannelIndex;
+
+        public static bool IsFreeDuelListener(int listenerGamePort)
+            => listenerGamePort == FreeDuelGamePort;
+
+        public static byte ResolveLoginEnvironment(int listenerGamePort)
+            => IsFreeDuelListener(listenerGamePort)
+                ? FreeDuelChannelEnvironment
+                : GeneralChannelEnvironment;
 
         public static void Configure(string[] args)
         {
             string serverIp = null;
             string udpRelayPublicIp = null;
+            var freeDuelListenerRequested = false;
 
             UdpRelayPublicIp = null;
             UdpRelayPublicIpConfigured = false;
+            FreeDuelListenerEnabled = false;
 
             if (args != null)
             {
                 for (var i = 0; i < args.Length; i++)
                 {
                     if (string.Equals(
-                            args[i],
-                            "--server-ip",
-                            StringComparison.OrdinalIgnoreCase) &&
-                        i + 1 < args.Length)
+                            args[i], "--server-ip",
+                            StringComparison.OrdinalIgnoreCase)
+                        && i + 1 < args.Length)
                     {
                         serverIp = args[++i];
                     }
                     else if (string.Equals(
-                                 args[i],
-                                 "--udp-relay-public-ip",
-                                 StringComparison.OrdinalIgnoreCase) &&
-                             i + 1 < args.Length)
+                                 args[i], "--udp-relay-public-ip",
+                                 StringComparison.OrdinalIgnoreCase)
+                             && i + 1 < args.Length)
                     {
                         udpRelayPublicIp = args[++i];
                     }
                     else if (string.Equals(
-                                 args[i],
-                                 "--packet-capture",
+                                 args[i], "--packet-capture",
                                  StringComparison.OrdinalIgnoreCase))
                     {
                         PacketCaptureEnabled = true;
-                        if (i + 1 < args.Length &&
-                            !args[i + 1].StartsWith("-"))
+                        if (i + 1 < args.Length
+                            && !args[i + 1].StartsWith("-"))
                         {
                             PacketCaptureDir = args[++i];
                         }
                     }
                     else if (string.Equals(
-                                 args[i],
-                                 "--proxy",
+                                 args[i], "--proxy",
                                  StringComparison.OrdinalIgnoreCase))
                     {
                         ProxyMode = true;
+                    }
+                    else if (string.Equals(
+                                 args[i], "--free-duel-channel-listener",
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        freeDuelListenerRequested = true;
                     }
                 }
             }
@@ -85,9 +159,16 @@ namespace DfoServer.Network
             if (!string.IsNullOrWhiteSpace(serverIp))
                 ServerIp = serverIp.Trim();
 
+            FreeDuelListenerEnabled =
+                freeDuelListenerRequested
+                || ReadBoolEnvironmentVariable(
+                    FreeDuelListenerEnvironmentVariable,
+                    false);
             UdpRelayEnabled = ReadBoolEnvironmentVariable(
-                "DFO_UDP_RELAY",
-                false);
+                "DFO_UDP_RELAY", false);
+            PvpUdpRelayEnabled = ReadBoolEnvironmentVariable(
+                "DFO_PVP_UDP_RELAY", false);
+
             if (string.IsNullOrWhiteSpace(udpRelayPublicIp))
             {
                 udpRelayPublicIp = Environment.GetEnvironmentVariable(
@@ -100,32 +181,67 @@ namespace DfoServer.Network
             }
 
             UdpRelayPortBase = ReadIntEnvironmentVariable(
-                "DFO_UDP_RELAY_PORT_BASE",
-                30000);
+                "DFO_UDP_RELAY_PORT_BASE", 30000);
             UdpRelayPortCount = ReadIntEnvironmentVariable(
-                "DFO_UDP_RELAY_PORT_COUNT",
-                256);
+                "DFO_UDP_RELAY_PORT_COUNT", 256);
+            PvpUdpRelayPortBase = ReadIntEnvironmentVariable(
+                "DFO_PVP_UDP_RELAY_PORT_BASE", 30256);
+            PvpUdpRelayPortCount = ReadIntEnvironmentVariable(
+                "DFO_PVP_UDP_RELAY_PORT_COUNT", 256);
         }
 
         internal static void ValidateRelayConfiguration()
         {
-            if (UdpRelayEnabled &&
-                !IsValidRelayPortRange(
-                    UdpRelayPortBase,
-                    UdpRelayPortCount))
+            if (UdpRelayEnabled
+                && !IsValidRelayPortRange(
+                    UdpRelayPortBase, UdpRelayPortCount))
             {
                 throw new InvalidOperationException(
                     "Invalid party UDP relay port range: " +
                     $"{UdpRelayPortBase}/{UdpRelayPortCount}.");
             }
+
+            if (PvpUdpRelayEnabled
+                && !IsValidRelayPortRange(
+                    PvpUdpRelayPortBase, PvpUdpRelayPortCount))
+            {
+                throw new InvalidOperationException(
+                    "Invalid PvP UDP relay port range: " +
+                    $"{PvpUdpRelayPortBase}/{PvpUdpRelayPortCount}.");
+            }
+
+            if (UdpRelayEnabled
+                && PvpUdpRelayEnabled
+                && RelayPortRangesOverlap)
+            {
+                throw new InvalidOperationException(
+                    "Party and PvP UDP relay port ranges must not overlap.");
+            }
+        }
+
+        internal static bool PortRangesOverlap(
+            int leftBase,
+            int leftCount,
+            int rightBase,
+            int rightCount)
+        {
+            if (leftBase <= 0 || leftCount <= 0
+                || rightBase <= 0 || rightCount <= 0)
+            {
+                return false;
+            }
+
+            var leftLast = (long)leftBase + leftCount - 1;
+            var rightLast = (long)rightBase + rightCount - 1;
+            return leftBase <= rightLast && rightBase <= leftLast;
         }
 
         private static bool IsValidRelayPortRange(
             int portBase,
             int portCount)
-            => portBase > 0 &&
-               portCount >= 2 &&
-               (long)portBase + portCount - 1 <= ushort.MaxValue;
+            => portBase > 0
+               && portCount >= 2
+               && (long)portBase + portCount - 1 <= ushort.MaxValue;
 
         private static bool ReadBoolEnvironmentVariable(
             string name,
@@ -135,12 +251,21 @@ namespace DfoServer.Network
             if (string.IsNullOrWhiteSpace(value))
                 return fallback;
 
-            return value.Trim().ToLowerInvariant() switch
+            switch (value.Trim().ToLowerInvariant())
             {
-                "1" or "true" or "yes" or "on" => true,
-                "0" or "false" or "no" or "off" => false,
-                _ => fallback,
-            };
+                case "1":
+                case "true":
+                case "yes":
+                case "on":
+                    return true;
+                case "0":
+                case "false":
+                case "no":
+                case "off":
+                    return false;
+                default:
+                    return fallback;
+            }
         }
 
         private static int ReadIntEnvironmentVariable(

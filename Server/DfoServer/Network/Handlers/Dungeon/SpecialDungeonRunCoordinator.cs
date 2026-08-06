@@ -109,15 +109,32 @@ namespace DfoServer.Network.Handlers.Dungeon
                     special);
             }
 
-            // Select explicit Boss-map candidates once per run. Active quest targets
-            // take priority; otherwise the PVF candidate pool remains random.
-            run.SelectedBossMapId = ResolveSelectedBossMapId(
+            // Keep the existing quest/random choice as a fallback. When the PVF
+            // candidate MAP greed masks differ by entrance, the shared instance
+            // runtime commits the matching pool when that entrance is traversed.
+            var fallbackBossMapId = ResolveSelectedBossMapId(
                 run.DungeonId,
                 run.MazeIndex,
                 maze,
                 bossPos,
                 activeQuests,
                 run.Difficulty);
+            run.SelectedBossMapId = fallbackBossMapId;
+            var bossRouteDefinition =
+                DungeonBossRouteDefinitionProjector.Project(
+                    run.DungeonId,
+                    run.MazeIndex,
+                    maze,
+                    bossPos);
+            if (bossRouteDefinition != null
+                && fallbackBossMapId > 0
+                && bossRouteDefinition.ContainsMapId(fallbackBossMapId))
+            {
+                run.Instance.Mechanisms.TryAttachBossRoute(
+                    new DungeonBossRouteRuntime(
+                        bossRouteDefinition,
+                        fallbackBossMapId));
+            }
 
             FileLogger.Log(
                 $"[SpecialDungeonModule] selection configured: " +
@@ -127,7 +144,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 $"conditionTargets={run.BossEntranceConditionTargets.Count} " +
                 $"conditionalBosses={run.BossEntranceConditionalSummonCodes.Count} " +
                 $"iconGroups={run.SpecialMinimapIconGroups?.Count ?? 0} " +
-                $"timer={special?.GentInfiltrateTimerSeconds ?? 0}");
+                $"timer={special?.GentInfiltrateTimerSeconds ?? 0} " +
+                $"bossRouteCount={run.Instance.Mechanisms.BossRoute?.Definition.Routes.Count ?? 0} " +
+                $"bossFallback={fallbackBossMapId}");
         }
 
         internal static void CloneSelectionState(DungeonRun source, DungeonRun target)
@@ -155,7 +174,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             int requestedOverrideMapId)
         {
             if (requestedOverrideMapId > 0
-                || run?.SelectedBossMapId <= 0
+                || run == null
                 || run.BossMapPos == null
                 || run.BossMapPos.Length < 2
                 || nextX != run.BossMapPos[0]
@@ -164,7 +183,78 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return requestedOverrideMapId;
             }
 
+            var bossRoute = run.Instance?.Mechanisms.BossRoute;
+            if (bossRoute != null)
+            {
+                var selectedMapId = bossRoute.ResolveForStartMap(
+                    out var fallbackCommitted);
+                run.SelectedBossMapId = selectedMapId;
+                if (fallbackCommitted)
+                {
+                    FileLogger.Log(
+                        $"[SpecialDungeonModule] boss route fallback committed: " +
+                        $"instance={run.PartyDungeonInstanceId} dungeon={run.DungeonId} " +
+                        $"boss=({nextX},{nextY}) map={selectedMapId}");
+                }
+                return selectedMapId;
+            }
+
+            if (run.SelectedBossMapId <= 0)
+                return requestedOverrideMapId;
             return run.SelectedBossMapId;
+        }
+
+        internal static bool TryApplyBossRouteOverride(
+            DungeonRun run,
+            DungeonRoomPoint moveTarget,
+            ref int overrideMapId)
+        {
+            var bossRoute = run?.Instance?.Mechanisms.BossRoute;
+            if (bossRoute == null || overrideMapId > 0)
+                return false;
+
+            if (!bossRoute.TrySelectForMove(
+                    run.RoomKey.X,
+                    run.RoomKey.Y,
+                    moveTarget.X,
+                    moveTarget.Y,
+                    ServerRandom.Next,
+                    out var selectedMapId,
+                    out var transitioned))
+            {
+                return false;
+            }
+
+            run.SelectedBossMapId = selectedMapId;
+            overrideMapId = selectedMapId;
+            if (transitioned)
+            {
+                FileLogger.Log(
+                    $"[SpecialDungeonModule] boss route committed: " +
+                    $"instance={run.PartyDungeonInstanceId} dungeon={run.DungeonId} " +
+                    $"source=({run.RoomKey.X},{run.RoomKey.Y}) " +
+                    $"boss=({moveTarget.X},{moveTarget.Y}) " +
+                    $"direction={bossRoute.SelectedDirection} map={selectedMapId}");
+            }
+            return true;
+        }
+
+        internal static void CopyBossRouteStateForPartyMove(
+            DungeonRun leaderRun,
+            DungeonRun memberRun)
+        {
+            if (leaderRun == null
+                || memberRun == null
+                || leaderRun.PartyDungeonInstanceId
+                    != memberRun.PartyDungeonInstanceId)
+            {
+                return;
+            }
+
+            var selectedMapId = leaderRun.Instance.Mechanisms.BossRoute?.SelectedMapId
+                ?? leaderRun.SelectedBossMapId;
+            if (selectedMapId > 0)
+                memberRun.SelectedBossMapId = selectedMapId;
         }
 
         internal static void AppendStartMapActors(

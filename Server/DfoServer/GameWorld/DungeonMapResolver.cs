@@ -84,6 +84,10 @@ namespace DfoServer.GameWorld
             MapGreedSignatureCache =
                 new ConcurrentDictionary<int, string>();
 
+        private static readonly ConcurrentDictionary<int, int>
+            MapEntranceMaskCache =
+                new ConcurrentDictionary<int, int>();
+
         private static readonly ConcurrentDictionary<long, bool>
             MapAiCharacterCache =
                 new ConcurrentDictionary<long, bool>();
@@ -829,6 +833,108 @@ namespace DfoServer.GameWorld
 
             greed = new string(values.GetRange(offset, charsPerCell).ToArray());
             return greed.Length > 0;
+        }
+
+        internal static bool TryDecodeGreedSymbol(
+            string symbol,
+            out int mask)
+        {
+            mask = 0;
+            if (string.IsNullOrWhiteSpace(symbol))
+                return false;
+
+            char value = '\0';
+            var count = 0;
+            foreach (var raw in symbol)
+            {
+                if (char.IsWhiteSpace(raw) || raw == '`' || raw == ',')
+                    continue;
+
+                var current = char.ToUpperInvariant(raw);
+                if (current < 'A' || current > 'P')
+                    return false;
+                if (count > 0 && current != value)
+                    return false;
+
+                value = current;
+                count++;
+            }
+
+            if (count < 1 || count > 2)
+                return false;
+
+            mask = value - 'A';
+            return true;
+        }
+
+        internal static bool TryGetMapEntranceMask(
+            int mapId,
+            out int entranceMask)
+        {
+            entranceMask = 0;
+            if (mapId <= 0)
+                return false;
+
+            var cached = MapEntranceMaskCache.GetOrAdd(
+                mapId,
+                id => LoadMapEntranceMask(id));
+            if (cached < 0)
+                return false;
+
+            entranceMask = cached;
+            return true;
+        }
+
+        private static int LoadMapEntranceMask(int mapId)
+        {
+            try
+            {
+                var greed = DungeonMapCatalog.GetMapFile(mapId).Greed;
+                if (string.IsNullOrWhiteSpace(greed))
+                    return -1;
+
+                var values = new List<char>();
+                foreach (var raw in greed)
+                {
+                    if (char.IsWhiteSpace(raw) || raw == '`' || raw == ',')
+                        continue;
+                    values.Add(char.ToUpperInvariant(raw));
+                }
+
+                // ImportMapScript stores each MAP greed row as pairs of
+                // two-character A..P symbols. CMap::CheckEntrance evaluates the
+                // second symbol of every pair as a four-bit invasion mask.
+                if (values.Count == 0 || values.Count % 4 != 0)
+                    return -1;
+
+                var result = 0;
+                for (var offset = 0; offset < values.Count; offset += 4)
+                {
+                    var source = new string(new[]
+                    {
+                        values[offset],
+                        values[offset + 1],
+                    });
+                    var entrance = new string(new[]
+                    {
+                        values[offset + 2],
+                        values[offset + 3],
+                    });
+                    if (!TryDecodeGreedSymbol(source, out _)
+                        || !TryDecodeGreedSymbol(entrance, out var mask))
+                    {
+                        return -1;
+                    }
+
+                    result |= mask;
+                }
+
+                return result;
+            }
+            catch
+            {
+                return -1;
+            }
         }
 
         private static bool TryResolveQuestCompanionStartMap(

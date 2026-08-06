@@ -9,6 +9,7 @@ namespace DfoServer.Game.Dungeon
         private readonly object _syncRoot = new object();
         private TournamentDungeonRuntime _tournament;
         private BloodAltarDungeonRuntime _bloodAltar;
+        private DungeonBossRouteRuntime _bossRoute;
 
         internal DungeonDynamicActorRegistry DynamicActors { get; } =
             new DungeonDynamicActorRegistry();
@@ -60,6 +61,31 @@ namespace DfoServer.Game.Dungeon
                     return true;
                 }
                 return ReferenceEquals(_bloodAltar, runtime);
+            }
+        }
+
+        internal DungeonBossRouteRuntime BossRoute
+        {
+            get
+            {
+                lock (_syncRoot)
+                    return _bossRoute;
+            }
+        }
+
+        internal bool TryAttachBossRoute(DungeonBossRouteRuntime runtime)
+        {
+            if (runtime == null)
+                throw new ArgumentNullException(nameof(runtime));
+
+            lock (_syncRoot)
+            {
+                if (_bossRoute == null)
+                {
+                    _bossRoute = runtime;
+                    return true;
+                }
+                return ReferenceEquals(_bossRoute, runtime);
             }
         }
 

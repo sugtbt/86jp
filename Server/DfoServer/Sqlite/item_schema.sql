@@ -271,6 +271,28 @@ CREATE TABLE IF NOT EXISTS character_skills (
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );
 
+-- Fair-PvP skills are intentionally isolated from the town/dungeon tree.
+-- The state marker makes an empty PvP tree distinguishable from one that has
+-- never been initialized.
+CREATE TABLE IF NOT EXISTS character_pvp_skill_state (
+    character_id INTEGER PRIMARY KEY,
+    initialized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS character_pvp_skills (
+    character_id INTEGER NOT NULL,
+    page_index INTEGER NOT NULL CHECK (page_index >= 0 AND page_index <= 1),
+    slot INTEGER NOT NULL,
+    skill_id INTEGER NOT NULL,
+    level INTEGER NOT NULL,
+    extra_values BLOB,
+    PRIMARY KEY (character_id, page_index, slot),
+    UNIQUE (character_id, page_index, skill_id),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS character_dark_knight_combo_skill_pages (
     character_id INTEGER NOT NULL,
     page_index INTEGER NOT NULL CHECK (page_index >= 0 AND page_index <= 1),

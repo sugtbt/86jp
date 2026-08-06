@@ -17,13 +17,29 @@ namespace DfoServer.Network.Builders
         public static IEnumerable<byte[]> BuildPacketStream(ISelectCharacterDataSource dataSource, int characterId, int accountId)
             => BuildPacketStream(dataSource, characterId, accountId, NewCharacterInitSequence.Build());
 
+        public static IEnumerable<byte[]> BuildPacketStream(
+            ISelectCharacterDataSource dataSource,
+            int characterId,
+            int accountId,
+            SkillInfoSnapshot skillOverride)
+            => BuildPacketStream(
+                dataSource,
+                characterId,
+                accountId,
+                NewCharacterInitSequence.Build(),
+                skillOverride);
+
         internal static IEnumerable<byte[]> BuildPacketStream(
             ISelectCharacterDataSource dataSource,
             int characterId,
             int accountId,
-            List<SelectCharacterPacketTemplate> templates)
+            List<SelectCharacterPacketTemplate> templates,
+            SkillInfoSnapshot skillOverride = null)
         {
             var snapshot = dataSource.Load(characterId, accountId);
+
+            if (skillOverride != null)
+                snapshot.InitializationSnapshot.SkillInfo = skillOverride;
 
 
             if (snapshot.CharacterRecord != null)

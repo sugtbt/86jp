@@ -254,12 +254,24 @@ namespace DfoServer.Game.Quests
             int accountId,
             ICollection<int> itemFilter,
             IReadOnlyDictionary<int, int> temporaryHeldCounts = null)
+            => SyncItemSeekingQuestProgressChanges(
+                characterId,
+                accountId,
+                itemFilter,
+                temporaryHeldCounts).Count > 0;
+
+        internal IReadOnlyList<QuestSetTriggerResult>
+            SyncItemSeekingQuestProgressChanges(
+                int characterId,
+                int accountId,
+                ICollection<int> itemFilter,
+                IReadOnlyDictionary<int, int> temporaryHeldCounts = null)
         {
             var active = _repository.LoadActiveQuests(characterId);
             if (active.Count == 0
                 || !InventoryContext.TryGetLease(characterId, out var lease))
             {
-                return false;
+                return Array.Empty<QuestSetTriggerResult>();
             }
 
             var relevantItemIds = new HashSet<int>();
@@ -287,7 +299,7 @@ namespace DfoServer.Game.Quests
                 }
             }
             if (relevantItemIds.Count == 0)
-                return false;
+                return Array.Empty<QuestSetTriggerResult>();
 
             var heldCounts = new Dictionary<int, int>();
             lock (lease.SyncRoot)
@@ -321,9 +333,9 @@ namespace DfoServer.Game.Quests
                 FileLogger.Log(
                     $"[QuestService] SEEKING progress failed cid={characterId}: " +
                     applied.Error);
-                return false;
+                return Array.Empty<QuestSetTriggerResult>();
             }
-            return applied.Changes.Count > 0;
+            return applied.Changes;
         }
 
         public bool SyncClearMapQuestProgress(

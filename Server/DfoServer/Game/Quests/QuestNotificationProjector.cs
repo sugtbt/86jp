@@ -241,6 +241,27 @@ namespace DfoServer.Game.Quests
             await _sender.SendNotiAsync(0x023F, BuildAcceptedQuestNoti(characterId));
         }
 
+        internal async Task SendTriggerChangesAsync(
+            IEnumerable<QuestSetTriggerResult> changes)
+        {
+            if (changes == null)
+                return;
+
+            foreach (var change in changes)
+            {
+                if (change == null
+                    || !change.Success
+                    || change.PreviousTriggerValue == change.TriggerValue)
+                {
+                    continue;
+                }
+
+                await _sender.SendCmdAckAsync(
+                    (ushort)Network.CmdPacketType.SET_QUEST_TRIGGER,
+                    QuestAckBuilder.BuildSetTrigger(change));
+            }
+        }
+
         internal async Task SendAcceptableQuestListAsync()
         {
             var characterId = _sender.CharacterId;

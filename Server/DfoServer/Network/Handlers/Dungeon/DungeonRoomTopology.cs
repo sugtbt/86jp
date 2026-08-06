@@ -2,7 +2,6 @@ using DfoServer.Game.Dungeon;
 using PvfLib;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace DfoServer.Network.Handlers.Dungeon
 {
@@ -36,9 +35,6 @@ namespace DfoServer.Network.Handlers.Dungeon
         private static readonly object MazeCacheLock = new object();
         private static readonly Dictionary<string, MazeInfo> MazeCache =
             new Dictionary<string, MazeInfo>(StringComparer.Ordinal);
-        private static readonly object PvfCoordinateCacheLock = new object();
-        private static readonly Dictionary<string, DungeonRoomPoint[]> PvfCoordinateCache =
-            new Dictionary<string, DungeonRoomPoint[]>(StringComparer.Ordinal);
 
         public static bool TryResolveMoveTarget(
             int dungeonId,
@@ -102,34 +98,14 @@ namespace DfoServer.Network.Handlers.Dungeon
             bool includePvfCoordinates = true)
         {
             var cells = new HashSet<DungeonRoomPoint>();
-            if (maze == null)
-                return cells;
-
-            AddGreedCells(maze, cells);
-
-            if (maze.MapSpecifications != null)
+            foreach (var coordinate in
+                GameWorld.DungeonMazeTopology.ResolveRoomCoordinates(
+                    dungeonId,
+                    mazeIndex,
+                    maze,
+                    includePvfCoordinates))
             {
-                foreach (var spec in maze.MapSpecifications)
-                    cells.Add(new DungeonRoomPoint(spec.X, spec.Y));
-            }
-
-            if (maze.StartMap != null && maze.StartMap.Length >= 2)
-                cells.Add(new DungeonRoomPoint(maze.StartMap[0], maze.StartMap[1]));
-            if (maze.BossMap != null && maze.BossMap.Length >= 2)
-            {
-                for (var i = 0; i + 1 < maze.BossMap.Length; i += 2)
-                    cells.Add(new DungeonRoomPoint(maze.BossMap[i], maze.BossMap[i + 1]));
-            }
-
-            if (includePvfCoordinates)
-            {
-                foreach (var coordinate in GetCachedPvfCoordinates(dungeonId, mazeIndex, maze))
-                {
-                    if (!IsWithinMazeBounds(maze, coordinate))
-                        continue;
-
-                    cells.Add(coordinate);
-                }
+                cells.Add(new DungeonRoomPoint(coordinate.X, coordinate.Y));
             }
 
             return cells;
@@ -205,30 +181,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             return true;
         }
 
-        private static IEnumerable<DungeonRoomPoint> GetCachedPvfCoordinates(
-            int dungeonId,
-            int mazeIndex,
-            MazeInfo maze)
-        {
-            var key = dungeonId.ToString() + ":" + mazeIndex.ToString();
-            lock (PvfCoordinateCacheLock)
-            {
-                if (PvfCoordinateCache.TryGetValue(key, out var cached))
-                    return cached;
-            }
-
-            var coordinates = GameWorld.Dungeon.GetDungeonRoomCoordinates(dungeonId, mazeIndex, maze)
-                .Select(coordinate => new DungeonRoomPoint(coordinate.X, coordinate.Y))
-                .ToArray();
-
-            lock (PvfCoordinateCacheLock)
-            {
-                PvfCoordinateCache[key] = coordinates;
-            }
-
-            return coordinates;
-        }
-
         private static MazeInfo GetCachedMaze(int dungeonId, int mazeIndex)
         {
             var key = dungeonId.ToString() + ":" + mazeIndex.ToString();
@@ -245,57 +197,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             return maze;
-        }
-
-        private static bool IsWithinMazeBounds(MazeInfo maze, DungeonRoomPoint point)
-        {
-            if (maze.Width <= 0 || maze.Height <= 0)
-                return true;
-
-            return point.X >= 0 && point.Y >= 0 && point.X < maze.Width && point.Y < maze.Height;
-        }
-
-        internal static void AddGreedCells(MazeInfo maze, HashSet<DungeonRoomPoint> cells)
-        {
-            if (maze.Width <= 0 || maze.Height <= 0 || string.IsNullOrWhiteSpace(maze.Greed))
-                return;
-
-            var values = maze.Greed
-                .Where(ch => !char.IsWhiteSpace(ch) && ch != '`' && ch != ',')
-                .ToArray();
-            var cellCount = maze.Width * maze.Height;
-            var charsPerCell = values.Length >= cellCount * 2 ? 2 : 1;
-            if (values.Length < cellCount * charsPerCell)
-                return;
-
-            for (var y = 0; y < maze.Height; y++)
-            {
-                for (var x = 0; x < maze.Width; x++)
-                {
-                    var valueIndex = (y * maze.Width + x) * charsPerCell;
-                    var first = values[valueIndex];
-                    var second = charsPerCell == 2 ? values[valueIndex + 1] : '\0';
-                    if (IsOpenGreedCell(first, second, charsPerCell))
-                        cells.Add(new DungeonRoomPoint(x, y));
-                }
-            }
-        }
-
-        private static bool IsOpenGreedCell(char first, char second, int charsPerCell)
-        {
-            if (charsPerCell == 2)
-            {
-                if ((first == 'A' && second == 'A')
-                    || (first == '0' && second == '0')
-                    || (first == '.' && second == '.')
-                    || ((first == 'x' || first == 'X')
-                        && (second == 'x' || second == 'X')))
-                {
-                    return false;
-                }
-            }
-
-            return first != '0' && first != '.' && first != 'x' && first != 'X';
         }
 
         internal static DungeonRoomProgress GetCurrentRoomProgress(EnhancedClientSession session)

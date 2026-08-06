@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using DfoServer.Game.Characters;
+using DfoServer.Network;
 
 namespace DfoServer.Game.Session
 {
@@ -149,16 +150,28 @@ namespace DfoServer.Game.Session
         {
             if (record == null) throw new ArgumentNullException(nameof(record));
 
+            HydrateFrom(
+                record,
+                GameChannelSpawnPolicy.Resolve(
+                    listenerGamePort: 0,
+                    persistedTownId: record.TownId));
+        }
+
+        public void HydrateFrom(
+            CharacterRecord record,
+            GameChannelSpawn spawn)
+        {
+            if (record == null) throw new ArgumentNullException(nameof(record));
+            if (spawn == null) throw new ArgumentNullException(nameof(spawn));
+
             HydrateIdentityFrom(record);
             {
-                byte townId = record.TownId > 0 ? record.TownId : (byte)1;
-                var gate = GameWorld.Town.GetCeraRoomInfo(townId);
-                CurTownId = gate.Town > 0 ? gate.Town : (byte)1;
-                CurAreaId = gate.Town > 0 ? gate.Area : (byte)0;
-                CurPosX = gate.Town > 0 ? gate.X : (short)474;
-                CurPosY = gate.Town > 0 ? gate.Y : (short)234;
-                CurDirection = 5;
-                CurAreaState = 3;
+                CurTownId = spawn.TownId;
+                CurAreaId = spawn.AreaId;
+                CurPosX = spawn.X;
+                CurPosY = spawn.Y;
+                CurDirection = spawn.Direction;
+                CurAreaState = spawn.AreaState;
             }
 
             if (record.Appearance != null && record.Appearance.Length > 0)

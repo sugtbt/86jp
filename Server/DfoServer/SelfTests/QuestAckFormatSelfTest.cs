@@ -21,6 +21,7 @@ namespace DfoServer.SelfTests
         private const int CharacterId = 136001;
         private const int AccountId = 136001;
         private const int FixedGoldCharacterId = 136002;
+        private const int SeekingAcceptCharacterId = 136003;
         private const ushort FixedGoldQuestId = 2261;
         private const uint FixedGoldReward = 100000;
 
@@ -33,6 +34,8 @@ namespace DfoServer.SelfTests
         private const ushort MasaTargetQuestId = 2257;
         private const int MasaScannerItemId = 6056;
         private const int MasaRecordItemId = 3315;
+        private const ushort SeekingAcceptQuestId = 13092;
+        private const int SeekingAcceptItemId = 10088630;
 
         public static int Run()
         {
@@ -65,6 +68,15 @@ namespace DfoServer.SelfTests
                 GrowType = 0,
                 Level = 65,
             });
+            characterRepository.Create(new CharacterRecord
+            {
+                CharacterId = SeekingAcceptCharacterId,
+                AccountId = AccountId,
+                Name = Encoding.UTF8.GetBytes("quest-accept-trigger-test"),
+                Job = 0,
+                GrowType = 0,
+                Level = 86,
+            });
 
             var connStr = SqliteDatabaseBootstrap.BuildConnectionString(dbPath);
             var questService = new QuestService(connStr);
@@ -81,6 +93,13 @@ namespace DfoServer.SelfTests
             InventoryContext.Register(
                 fixedGoldSessionId,
                 fixedGoldInventory);
+            var seekingAcceptSessionId = Guid.NewGuid();
+            var seekingAcceptInventory = new InventoryService(
+                SeekingAcceptCharacterId,
+                AccountId);
+            InventoryContext.Register(
+                seekingAcceptSessionId,
+                seekingAcceptInventory);
 
             // --- 接取: 前置未完成 -> 失败 ACK ---
             var acceptFail = QuestAckBuilder.BuildAccept(questService.HandleAcceptQuest(CharacterId, BuildAcceptBody(LetterQuestId), AccountId));
@@ -163,11 +182,19 @@ namespace DfoServer.SelfTests
                 connStr,
                 fixedGoldInventory,
                 ref failures);
+            VerifyAcceptTriggerProjection(
+                connStr,
+                seekingAcceptSessionId,
+                seekingAcceptInventory,
+                ref failures);
 
             InventoryContext.Unregister(sessionId, CharacterId);
             InventoryContext.Unregister(
                 fixedGoldSessionId,
                 FixedGoldCharacterId);
+            InventoryContext.Unregister(
+                seekingAcceptSessionId,
+                SeekingAcceptCharacterId);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
@@ -204,16 +231,24 @@ namespace DfoServer.SelfTests
         }
 
         private static void MarkQuestCleared(string connStr, int questId)
+            => SetQuestFlag(connStr, CharacterId, questId, 1);
+
+        private static void SetQuestFlag(
+            string connStr,
+            int characterId,
+            int questId,
+            int flagValue)
         {
             using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
 INSERT INTO character_invisible_falgs (character_id, slot_index, flag_value)
-VALUES (@cid, @slot, 1)
-ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
-            cmd.Parameters.AddWithValue("@cid", CharacterId);
+VALUES (@cid, @slot, @flag)
+ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = @flag;";
+            cmd.Parameters.AddWithValue("@cid", characterId);
             cmd.Parameters.AddWithValue("@slot", questId);
+            cmd.Parameters.AddWithValue("@flag", flagValue);
             cmd.ExecuteNonQuery();
         }
 
@@ -497,6 +532,285 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
                 ref failures);
         }
 
+        private static void VerifyAcceptTriggerProjection(
+            string connectionString,
+            Guid sessionId,
+            InventoryService inventory,
+            ref int failures)
+        {
+            QuestService.SaveActiveQuests(
+                connectionString,
+                SeekingAcceptCharacterId,
+                new List<ActiveQuest>());
+
+            var prerequisite = GameWorld.QuestPrerequisiteCatalog.Get(
+                SeekingAcceptQuestId);
+            Check(
+                "seeking accept fixture has a valid prerequisite definition",
+                prerequisite != null && prerequisite.IsValid,
+                ref failures);
+            if (prerequisite == null || !prerequisite.IsValid)
+                return;
+
+            if (prerequisite.CompletedQuestGroups.Count > 0)
+            {
+                foreach (var questId in prerequisite.CompletedQuestGroups[0])
+                {
+                    SetQuestFlag(
+                        connectionString,
+                        SeekingAcceptCharacterId,
+                        questId,
+                        1);
+                }
+            }
+            foreach (var requiredAnswer in prerequisite.RequiredAnswers)
+            {
+                SetQuestFlag(
+                    connectionString,
+                    SeekingAcceptCharacterId,
+                    requiredAnswer.QuestId,
+                    GameWorld.QuestRelationIndex
+                        .GetRequiredQuestAnswerFlagValue(
+                            requiredAnswer.AnswerIndex));
+            }
+
+            var seekingItems = GameWorld.QuestData.GetSeekingConsumeItems(
+                SeekingAcceptQuestId);
+            var qstTrigger = GameWorld.QuestData.GetInitTrigger(
+                SeekingAcceptQuestId);
+            Check(
+                "seeking accept fixture uses one required physical item",
+                seekingItems.Count == 1
+                    && seekingItems[0].ItemId == SeekingAcceptItemId
+                    && seekingItems[0].Count == 1
+                    && qstTrigger == 1,
+                ref failures);
+            if (seekingItems.Count != 1
+                || seekingItems[0].ItemId != SeekingAcceptItemId
+                || seekingItems[0].Count != 1
+                || qstTrigger != 1)
+            {
+                return;
+            }
+
+            var prepared = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingAcceptItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var preparedGrant);
+            Check(
+                "seeking accept fixture prepares the required item",
+                prepared
+                    && preparedGrant != null
+                    && preparedGrant.Success
+                    && inventory.CountMainItem(SeekingAcceptItemId) == 1,
+                ref failures);
+            if (!prepared || preparedGrant == null || !preparedGrant.Success)
+                return;
+
+            var readySender = new RecordingSender(
+                SeekingAcceptCharacterId,
+                AccountId);
+            var readyManager = new QuestManager(
+                readySender,
+                connectionString);
+            readyManager.HandleAcceptQuestAsync(
+                    0x001F,
+                    BuildManagerQuestBody(SeekingAcceptQuestId),
+                    sessionId)
+                .GetAwaiter()
+                .GetResult();
+
+            Check(
+                "ready seeking accept commits authoritative trigger zero",
+                LoadActiveQuestTrigger(
+                    connectionString,
+                    SeekingAcceptCharacterId,
+                    SeekingAcceptQuestId) == 0,
+                ref failures);
+            Check(
+                "ready seeking accept projects ACK before SET_TRIGGER",
+                readySender.Events.Count == 2
+                    && readySender.Events[0] == "cmd:001F"
+                    && readySender.Events[1] == "cmd:0021"
+                    && readySender.CommandBodies.Count == 2,
+                ref failures);
+            Check(
+                "ready seeking ACCEPT ACK exposes the QST trigger",
+                readySender.CommandBodies.Count >= 1
+                    && IsSuccessfulQuestTriggerBody(
+                        readySender.CommandBodies[0],
+                        SeekingAcceptQuestId,
+                        qstTrigger,
+                        minimumLength: 8),
+                ref failures);
+            Check(
+                "ready seeking SET_TRIGGER projects the committed trigger",
+                readySender.CommandBodies.Count >= 2
+                    && IsSuccessfulQuestTriggerBody(
+                        readySender.CommandBodies[1],
+                        SeekingAcceptQuestId,
+                        0,
+                        minimumLength: 7),
+                ref failures);
+
+            var duplicateSender = new RecordingSender(
+                SeekingAcceptCharacterId,
+                AccountId);
+            var duplicateManager = new QuestManager(
+                duplicateSender,
+                connectionString);
+            duplicateManager.HandleAcceptQuestAsync(
+                    0x001F,
+                    BuildManagerQuestBody(SeekingAcceptQuestId),
+                    sessionId)
+                .GetAwaiter()
+                .GetResult();
+            Check(
+                "duplicate seeking accept does not replay trigger projection",
+                duplicateSender.Events.Count == 1
+                    && duplicateSender.Events[0] == "cmd:001F"
+                    && duplicateSender.CommandBodies.Count == 1
+                    && BitConverter.ToString(duplicateSender.CommandBodies[0])
+                        == "00-12",
+                ref failures);
+
+            QuestService.SaveActiveQuests(
+                connectionString,
+                SeekingAcceptCharacterId,
+                new List<ActiveQuest>());
+            var removed = inventory.TryConsumeMainItem(
+                SeekingAcceptItemId,
+                1,
+                out var removeMutation);
+            Check(
+                "incomplete seeking accept fixture removes exactly one item",
+                removed
+                    && removeMutation != null
+                    && inventory.CountMainItem(SeekingAcceptItemId) == 0,
+                ref failures);
+
+            var incompleteSender = new RecordingSender(
+                SeekingAcceptCharacterId,
+                AccountId);
+            var incompleteManager = new QuestManager(
+                incompleteSender,
+                connectionString);
+            incompleteManager.HandleAcceptQuestAsync(
+                    0x001F,
+                    BuildManagerQuestBody(SeekingAcceptQuestId),
+                    sessionId)
+                .GetAwaiter()
+                .GetResult();
+            Check(
+                "incomplete seeking accept keeps trigger one without projection",
+                LoadActiveQuestTrigger(
+                    connectionString,
+                    SeekingAcceptCharacterId,
+                    SeekingAcceptQuestId) == 1
+                    && incompleteSender.Events.Count == 1
+                    && incompleteSender.Events[0] == "cmd:001F",
+                ref failures);
+
+            var restored = InventoryRewardGrantService.TryCreateAndInsert(
+                inventory,
+                SeekingAcceptItemId,
+                ItemCreateReason.QuestReward,
+                1,
+                out var restoredGrant);
+            var hasLease = InventoryContext.TryGetOwnedLease(
+                sessionId,
+                SeekingAcceptCharacterId,
+                out var lease);
+            incompleteManager
+                .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                    lease,
+                    new InventoryMutationResult
+                    {
+                        ItemTemplateId = SeekingAcceptItemId,
+                    })
+                .GetAwaiter()
+                .GetResult();
+            var firstProjectionCount = CountEvent(
+                incompleteSender.Events,
+                "cmd:0021");
+            incompleteManager
+                .SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
+                    lease,
+                    new InventoryMutationResult
+                    {
+                        ItemTemplateId = SeekingAcceptItemId,
+                    })
+                .GetAwaiter()
+                .GetResult();
+            Check(
+                "later inventory completion commits one idempotent transition",
+                restored
+                    && restoredGrant != null
+                    && restoredGrant.Success
+                    && hasLease
+                    && LoadActiveQuestTrigger(
+                        connectionString,
+                        SeekingAcceptCharacterId,
+                        SeekingAcceptQuestId) == 0
+                    && firstProjectionCount == 1
+                    && CountEvent(incompleteSender.Events, "cmd:0021") == 1
+                    && CountEvent(incompleteSender.Events, "noti:023F") == 0
+                    && incompleteSender.CommandBodies.Count == 2
+                    && IsSuccessfulQuestTriggerBody(
+                        incompleteSender.CommandBodies[1],
+                        SeekingAcceptQuestId,
+                        0,
+                        minimumLength: 7),
+                ref failures);
+        }
+
+        private static byte[] BuildManagerQuestBody(ushort questId)
+        {
+            var body = new byte[4];
+            BitConverter.GetBytes(questId).CopyTo(body, 2);
+            return body;
+        }
+
+        private static uint LoadActiveQuestTrigger(
+            string connectionString,
+            int characterId,
+            ushort questId)
+        {
+            var active = QuestService.LoadActiveQuests(
+                connectionString,
+                characterId);
+            return QuestService.FindByQuestId(active, questId)?.TriggerValue
+                ?? uint.MaxValue;
+        }
+
+        private static bool IsSuccessfulQuestTriggerBody(
+            byte[] body,
+            ushort questId,
+            uint trigger,
+            int minimumLength)
+            => body != null
+                && body.Length >= minimumLength
+                && body[0] == 1
+                && BitConverter.ToUInt16(body, 1) == questId
+                && BitConverter.ToUInt32(body, 3) == trigger;
+
+        private static int CountEvent(
+            IReadOnlyList<string> events,
+            string expected)
+        {
+            var count = 0;
+            if (events == null)
+                return count;
+            foreach (var value in events)
+            {
+                if (value == expected)
+                    count++;
+            }
+            return count;
+        }
+
         private static int FindRetainCount(
             IReadOnlyList<QuestGiveupItemRecoveryEntry> plan,
             int itemId)
@@ -553,6 +867,7 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
             }
 
             public List<string> Events { get; } = new List<string>();
+            public List<byte[]> CommandBodies { get; } = new List<byte[]>();
             public byte[] LastCommandBody { get; private set; }
             public PlayerContext Player { get; } = new PlayerContext();
             public int CharacterId { get; }
@@ -571,6 +886,7 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = 1;";
             {
                 Events.Add($"cmd:{cmdType:X4}");
                 LastCommandBody = body;
+                CommandBodies.Add(body == null ? null : (byte[])body.Clone());
                 return Task.CompletedTask;
             }
         }

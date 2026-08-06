@@ -77,10 +77,10 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (run == null)
                 return false;
 
-            var phase = run.Phase;
+            var settlementState = run.SettlementState;
             if (run.CardRewards == null
-                || run.SettlementState == DungeonSettlementState.Completed
-                || (phase == DungeonRunPhase.CardsRevealed
+                || settlementState == DungeonSettlementState.Completed
+                || (settlementState == DungeonSettlementState.CardsRevealed
                     && (run.FreeCardRewardDelivered
                         || CardRewardRules.IsCommitted(
                             run,
@@ -100,7 +100,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             var identity = run.CaptureIdentity();
-            if (phase == DungeonRunPhase.ResultShown)
+            if (settlementState == DungeonSettlementState.ResultShown)
             {
                 int autoFlipDelayMs;
                 lock (run.SyncRoot)
@@ -116,7 +116,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return true;
             }
 
-            if (phase == DungeonRunPhase.CardsRevealed)
+            if (settlementState == DungeonSettlementState.CardsRevealed)
             {
                 ScheduleAutoFlipTimer(
                     session,
@@ -140,7 +140,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (run == null || body == null || body.Length < 2)
                 return;
             var runIdentity = run.CaptureIdentity();
-            var requestedLayout = run.Phase == DungeonRunPhase.ResultShown;
+            var requestedLayout = run.SettlementState
+                == DungeonSettlementState.ResultShown;
             var cardType = body[0];
             var cardIndex = body[1];
 
@@ -152,7 +153,8 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 if (requestedLayout)
                 {
-                    if (run.Phase != DungeonRunPhase.ResultShown)
+                    if (run.SettlementState
+                        != DungeonSettlementState.ResultShown)
                         return;
                     DungeonRunLifecycle.CancelAutoFlip(session);
                     await _sender.SendLayoutAsync(session);
@@ -165,7 +167,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     return;
                 }
 
-                if (run.Phase != DungeonRunPhase.CardsRevealed
+                if (run.SettlementState
+                        != DungeonSettlementState.CardsRevealed
                     || cardType > 1
                     || cardIndex > 3)
                 {
@@ -184,10 +187,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 }
 
                 if (!CardRewardRules.TrySelectCardSlot(run, cardType, cardIndex))
-                {
-                    await _sender.SendCardInfoAsync(session, run);
                     return;
-                }
 
                 await _sender.SendCardInfoAsync(session, run);
                 if (!session.Player.IsCurrentDungeonRun(runIdentity))
@@ -212,14 +212,17 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session)
         {
             var run = session.Player.CurrentRun;
-            if (run == null || run.Phase != DungeonRunPhase.ResultShown)
+            if (run == null
+                || run.SettlementState
+                    != DungeonSettlementState.ResultShown)
                 return;
             var identity = run.CaptureIdentity();
             await run.Settlement.CardProjectionGate.WaitAsync();
             try
             {
                 if (!session.Player.IsCurrentDungeonRun(identity)
-                    || run.Phase != DungeonRunPhase.ResultShown)
+                    || run.SettlementState
+                        != DungeonSettlementState.ResultShown)
                 {
                     return;
                 }
@@ -260,7 +263,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 if (!session.Player.IsCurrentDungeonRun(identity))
                     return false;
-                if (run.Phase == DungeonRunPhase.ResultShown
+                if (run.SettlementState
+                        == DungeonSettlementState.ResultShown
                     && run.CardRewards != null)
                 {
                     DungeonRunLifecycle.CancelAutoFlip(session);
@@ -392,7 +396,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 {
                     return;
                 }
-                if (run.Phase != DungeonRunPhase.ResultShown)
+                if (run.SettlementState
+                    != DungeonSettlementState.ResultShown)
                 {
                     run.Timers.TryComplete(ticket);
                     return;
@@ -439,7 +444,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 {
                     return;
                 }
-                if (run.Phase != DungeonRunPhase.CardsRevealed)
+                if (run.SettlementState
+                    != DungeonSettlementState.CardsRevealed)
                 {
                     run.Timers.TryComplete(ticket);
                     return;

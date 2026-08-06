@@ -966,8 +966,9 @@ VALUES (@cid, 1, @qid, 3, 0);";
             Check("NPC purchase immediately completes the seeking quest",
                 LoadTrigger(connStr, SeekingPurchaseQuestId) == 0,
                 ref failures);
-            Check("NPC purchase projects one active quest refresh",
-                sender.CountCalls("NOTI:023F") == 1,
+            Check("NPC purchase projects one typed trigger transition",
+                sender.CountCalls("ACK:0021") == 1
+                    && sender.CountCalls("NOTI:023F") == 0,
                 ref failures);
 
             InventoryService.TryResolveMainVirtualSlotByItemId(
@@ -993,10 +994,10 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && discardMutation.ItemTemplateId == purchasedItemId
                     && LoadTrigger(connStr, SeekingPurchaseQuestId)
                         == (uint)purchasedCount
-                    && sender.CountCalls("NOTI:023F") == 1,
+                    && sender.CountCalls("ACK:0021") == 1,
                 ref failures);
             Check("extended delete mutations do not rebuild the active quest list",
-                sender.CountCalls("NOTI:023F") == 1,
+                sender.CountCalls("NOTI:023F") == 0,
                 ref failures);
             Check("discarded seeking progress remains incomplete after reload",
                 QuestService.FindByQuestId(
@@ -1015,7 +1016,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
             Check("restoring the final seeking item completes the same active quest",
                 restored
                     && LoadTrigger(connStr, SeekingPurchaseQuestId) == 0
-                    && sender.CountCalls("NOTI:023F") == 2,
+                    && sender.CountCalls("ACK:0021") == 2,
                 ref failures);
 
             var consumed = inventory.TryConsumeMainItem(
@@ -1032,7 +1033,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
             Check("NPC purchase cost item reduction recalibrates seeking progress",
                 consumed
                 && LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 3,
+                    && sender.CountCalls("ACK:0021") == 3,
                 ref failures);
 
             await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
@@ -1043,7 +1044,8 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 });
             Check("unrelated NPC purchase does not refresh seeking quests",
                 LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 3,
+                    && sender.CountCalls("ACK:0021") == 3
+                    && sender.CountCalls("NOTI:023F") == 0,
                 ref failures);
 
             inventory.SetMainVirtualCount(purchasedSlot, purchasedCount);
@@ -1060,7 +1062,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 });
             Check("stale inventory lease cannot project seeking progress",
                 LoadTrigger(connStr, SeekingPurchaseQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 3,
+                    && sender.CountCalls("ACK:0021") == 3,
                 ref failures);
             return failures;
         }
@@ -1113,6 +1115,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && deleteMutation.ItemTemplateId == SeekingSingleItemId
                     && inventory.CountMainItem(SeekingSingleItemId) == 0
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
+                    && sender.CountCalls("ACK:0021") == 0
                     && sender.CountCalls("NOTI:023F") == 0,
                 ref failures);
 
@@ -1132,7 +1135,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 restored
                     && restoredGrant != null
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 0
-                    && sender.CountCalls("NOTI:023F") == 1,
+                    && sender.CountCalls("ACK:0021") == 1,
                 ref failures);
 
             var sellCode = InventoryShopRuntimeService.TrySellItem(
@@ -1150,7 +1153,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && sellMutation.ItemTemplateId == SeekingSingleItemId
                     && inventory.CountMainItem(SeekingSingleItemId) == 0
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 1,
+                    && sender.CountCalls("ACK:0021") == 1,
                 ref failures);
 
             var restoredForUse = InventoryRewardGrantService.TryCreateAndInsert(
@@ -1183,7 +1186,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && useMutation.ItemTemplateId == SeekingSingleItemId
                     && inventory.CountMainItem(SeekingSingleItemId) == 0
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 2,
+                    && sender.CountCalls("ACK:0021") == 2,
                 ref failures);
 
             var restoredForStaleLease = InventoryRewardGrantService.TryCreateAndInsert(
@@ -1208,7 +1211,8 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 restoredForStaleLease
                     && !staleMatched
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 1
-                    && sender.CountCalls("NOTI:023F") == 2,
+                    && sender.CountCalls("ACK:0021") == 2
+                    && sender.CountCalls("NOTI:023F") == 0,
                 ref failures);
             return failures;
         }
@@ -1275,7 +1279,8 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && withdrawnCharacterGold == initialGold + transferGold
                     && withdrawnCargoGold == 0
                     && LoadTrigger(connStr, SeekingGoldQuestId) == 0
-                    && sender.CountCalls("NOTI:023F") == 1,
+                    && sender.CountCalls("ACK:0021") == 1
+                    && sender.CountCalls("NOTI:023F") == 0,
                 ref failures);
 
             await manager.SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
@@ -1283,7 +1288,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 withdrawMutation);
             Check("replayed gold mutation does not rebuild the quest list",
                 LoadTrigger(connStr, SeekingGoldQuestId) == 0
-                    && sender.CountCalls("NOTI:023F") == 1,
+                    && sender.CountCalls("ACK:0021") == 1,
                 ref failures);
 
             var deposited = InventoryCargoRuntimeService.TryDepositCargoGold(
@@ -1301,7 +1306,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     && depositedCharacterGold == initialGold
                     && depositedCargoGold == transferGold
                     && LoadTrigger(connStr, SeekingGoldQuestId) == 511
-                    && sender.CountCalls("NOTI:023F") == 2,
+                    && sender.CountCalls("ACK:0021") == 2,
                 ref failures);
 
             var rejected = InventoryCargoRuntimeService.TryWithdrawCargoGold(
@@ -1317,7 +1322,7 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 !rejected
                     && rejectedMutation == null
                     && LoadTrigger(connStr, SeekingGoldQuestId) == 511
-                    && sender.CountCalls("NOTI:023F") == 2,
+                    && sender.CountCalls("ACK:0021") == 2,
                 ref failures);
 
             inventory.SetMainVirtualCount(0, initialGold + transferGold);
@@ -1394,13 +1399,14 @@ VALUES (@cid, 1, @qid, 3, 0);";
                     inventoryLease,
                     claim.InventoryMutations);
             }
-            Check("mail attachment mutation immediately completes seeking quest",
+            Check("mail attachment mutation projects typed completion trigger",
                 sent.Success
                     && claim.Success
                     && claim.InventoryMutations.Count == 1
                     && claim.InventoryMutations[0].ItemTemplateId == SeekingSingleItemId
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 0
-                    && mailSender.CountCalls("NOTI:023F") == 1,
+                    && mailSender.CountCalls("ACK:0021") == 1
+                    && mailSender.CountCalls("NOTI:023F") == 0,
                 ref failures);
 
             held = inventory.CountMainItem(SeekingSingleItemId);
@@ -1472,9 +1478,10 @@ VALUES (@cid, 1, @qid, 3, 0);";
                 disjointed
                     && LoadTrigger(connStr, SeekingSingleItemQuestId) == 0,
                 ref failures);
-            Check("disjoint material mutation projects one active quest refresh",
+            Check("disjoint material mutation projects typed completion trigger",
                 disjointed
-                    && disjointSender.CountCalls("NOTI:023F") == 1,
+                    && disjointSender.CountCalls("ACK:0021") == 1
+                    && disjointSender.CountCalls("NOTI:023F") == 0,
                 ref failures);
 
             held = inventory.CountMainItem(SeekingSingleItemId);

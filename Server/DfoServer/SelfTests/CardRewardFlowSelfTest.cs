@@ -45,6 +45,7 @@ namespace DfoServer.SelfTests
             VerifyConfiguredRewardGeneration(ref failures);
             VerifyPaidCardProtocolFields(ref failures);
             VerifySharedKillStatistics(ref failures);
+            VerifyLayoutPacketSequence(ref failures);
             VerifyProjectionSerialization(ref failures);
             var service = new CardRewardCoordinator();
 
@@ -260,6 +261,89 @@ namespace DfoServer.SelfTests
                 ref failures);
             DungeonRunLifecycle.CancelAutoFlip(session);
             session.Close();
+
+            var duplicateSender = new RecordingCardNotificationSender(
+                blockFirstLayout: false);
+            coordinator = new CardRewardCoordinator(sender: duplicateSender);
+            session = new EnhancedClientSession(new TcpClient(), null);
+            session.Player.CharacterId = CharacterId;
+            run = BuildRun(freeGold: 1, paidCardCost: 1);
+            session.Player.CurrentRun = run;
+
+            var duplicateSelections = new Task[16];
+            for (var index = 0; index < duplicateSelections.Length; index++)
+            {
+                duplicateSelections[index] = coordinator.HandleSelectCard(
+                    session,
+                    new byte[] { 0, 1 });
+            }
+            Task.WhenAll(duplicateSelections).GetAwaiter().GetResult();
+            Check(
+                "duplicate selection projects the selected slot exactly once",
+                duplicateSender.LayoutCount == 0
+                    && duplicateSender.CardInfoCount == 1
+                    && run.CardFlipCount == 1
+                    && run.FreeCardSlots[1] == 0,
+                ref failures);
+            DungeonRunLifecycle.CancelAutoFlip(session);
+            session.Close();
+
+            var completedSender = new RecordingCardNotificationSender(
+                blockFirstLayout: false);
+            coordinator = new CardRewardCoordinator(sender: completedSender);
+            session = new EnhancedClientSession(new TcpClient(), null);
+            session.Player.CharacterId = CharacterId;
+            run = BuildRun(freeGold: 1, paidCardCost: 1);
+            run.CardRewards = null;
+            var completed = run.TryCompleteSettlement();
+            session.Player.CurrentRun = run;
+
+            coordinator.HandleSelectCard(session, new byte[] { 0, 0 })
+                .GetAwaiter()
+                .GetResult();
+            coordinator.HandleCardStartRequest(session)
+                .GetAwaiter()
+                .GetResult();
+            var shouldReturn = coordinator.HandleEplpCommand(
+                    session,
+                    new byte[] { 1, 0 })
+                .GetAwaiter()
+                .GetResult();
+            Check(
+                "completed settlement cannot reopen or reproject card UI",
+                completed
+                    && run.SettlementState == DungeonSettlementState.Completed
+                    && run.Phase == DungeonRunPhase.ResultShown
+                    && completedSender.LayoutCount == 0
+                    && completedSender.CardInfoCount == 0
+                    && completedSender.ExitCount == 1
+                    && shouldReturn,
+                ref failures);
+            session.Close();
+        }
+
+        private static void VerifyLayoutPacketSequence(ref int failures)
+        {
+            using (var peer = ConnectedSession.Create())
+            {
+                var sender = new CardRewardNotificationSender();
+                sender.SendLayoutAsync(peer.Session).GetAwaiter().GetResult();
+                var firstRead = peer.TryReadPacket(out var first);
+                var secondRead = peer.TryReadPacket(out var second);
+                Check(
+                    "card layout projects CARD_START before CARD_LAYOUT",
+                    firstRead
+                        && secondRead
+                        && first.Command == 0x01
+                        && first.Type == 0x0045
+                        && first.Body.Length == 1
+                        && first.Body[0] == 0x01
+                        && second.Command == 0x01
+                        && second.Type == 0x0046
+                        && second.Body.Length == 17
+                        && second.Body[0] == 0x01,
+                    ref failures);
+            }
         }
 
         private static void VerifyClearRewardEtc(ref int failures)
@@ -533,6 +617,7 @@ VALUES (@cid, @aid, 'card-reward-flow');";
                     TaskCreationOptions.RunContinuationsAsynchronously);
             private int _layoutCount;
             private int _cardInfoCount;
+            private int _exitCount;
 
             internal RecordingCardNotificationSender(bool blockFirstLayout)
             {
@@ -543,6 +628,7 @@ VALUES (@cid, @aid, 'card-reward-flow');";
 
             internal int LayoutCount => Volatile.Read(ref _layoutCount);
             internal int CardInfoCount => Volatile.Read(ref _cardInfoCount);
+            internal int ExitCount => Volatile.Read(ref _exitCount);
 
             internal bool WaitForLayoutStart()
                 => _layoutEntered.Wait(TimeSpan.FromSeconds(2));
@@ -570,7 +656,10 @@ VALUES (@cid, @aid, 'card-reward-flow');";
                 EnhancedClientSession session,
                 byte state,
                 byte option)
-                => Task.CompletedTask;
+            {
+                Interlocked.Increment(ref _exitCount);
+                return Task.CompletedTask;
+            }
 
             public Task SendItemUpdatesAsync(
                 EnhancedClientSession session,

@@ -36,7 +36,14 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
             var leaderPreviousRoomInstanceId = run.CurrentRoomInstanceId;
 
-            var req = MoveMapRequest.Parse(body);
+            if (!MoveMapRequest.TryParse(body, out var req))
+            {
+                FileLogger.Log(
+                    $"[DungeonHandler] MOVE_MAP ignored truncated body: " +
+                    $"length={body?.Length ?? 0} " +
+                    $"minimum={MoveMapRequest.BodyLength}");
+                return;
+            }
 
             if (run.Phase >= DungeonRunPhase.Cleared)
             {
@@ -89,7 +96,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             int overrideMapId = -1;
 
-            if (req.Unknown23 == 1)
+            if (req.MoveMode == 1)
             {
                 var layeredIds = DungeonData.GetLayeredMapIds(run.DungeonId, moveTarget.X, moveTarget.Y, run.MazeIndex);
                 if (layeredIds != null && layeredIds.Length > 0)

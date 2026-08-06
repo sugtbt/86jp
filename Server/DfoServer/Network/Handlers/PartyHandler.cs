@@ -34,6 +34,7 @@ namespace DfoServer.Network.Handlers
             _announceTownArrivalWithinTransition;
         private readonly Game.Session.CharacterTransitionCoordinator
             _characterTransitions;
+        private PvpRoomHandler _pvpRoomHandler;
         private readonly object _broadcastGatesLock = new object();
         private readonly Dictionary<int, BroadcastGateEntry> _broadcastGates =
             new Dictionary<int, BroadcastGateEntry>();
@@ -66,6 +67,15 @@ namespace DfoServer.Network.Handlers
             // 只向【剩余成员】发包, 绝不向垂死会话本身发(其 socket 已在关闭流程中)。
             if (_sessions != null)
                 _sessions.SessionEnding += OnSessionEndingAsync;
+        }
+
+        internal void AttachPvpRoomHandler(
+            PvpRoomHandler pvpRoomHandler)
+        {
+            _pvpRoomHandler =
+                pvpRoomHandler
+                ?? throw new ArgumentNullException(
+                    nameof(pvpRoomHandler));
         }
 
         public async Task Handle_SET_UDP_IP_PORT(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -1021,6 +1031,24 @@ namespace DfoServer.Network.Handlers
             // ★交易 阶段1: reqType==1 = ENUM_PEER_REQUEST_TYPE TRADE → 给对方弹【交易确认窗】(而非组队框)。
             //   交易形态 body = 11B [A.uid:2][01][peer:4][createTime:4](含 peer, 漏了长度不符被客户端静默丢弃→不弹窗)。
             //   阶段2(放置道具窗/换物)待专项; 此处保证交易请求不弹成组队框, 且 accept 不误组队(见 RES_PEER)。
+            if (reqType == 2)
+            {
+                if (body.Length != 7 ||
+                    _pvpRoomHandler == null)
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] REQUEST_PEER: " +
+                        "invalid/unavailable PvP room invite");
+                    return;
+                }
+
+                await _pvpRoomHandler.HandleRoomInviteRequestAsync(
+                    session,
+                    targetSession,
+                    peerInt);
+                return;
+            }
+
             if (reqType == 1)
             {
                 if (!await RunCurrentPartyPairMutationAsync(
@@ -1157,10 +1185,13 @@ namespace DfoServer.Network.Handlers
 
             if (inviterUid == accepterUid)
             {
+                if (reqType == 2)
+                    await SendPvpInviteFailureAsync(session, 19);
                 return;
             }
             if (reqType != 0 &&
-                reqType != 1)
+                reqType != 1 &&
+                reqType != 2)
             {
                 FileLogger.Log(
                     $"[{ProtocolName}] RES_PEER: unsupported type={reqType}");
@@ -1170,6 +1201,8 @@ namespace DfoServer.Network.Handlers
             if (inviterSession == null)
             {
                 FileLogger.Log($"[{ProtocolName}] RES_PEER: 邀请者 uid={inviterUid} 不在线");
+                if (reqType == 2)
+                    await SendPvpInviteFailureAsync(session, 3);
                 return;
             }
             if (!IsSameGameChannel(session, inviterSession))
@@ -1177,6 +1210,31 @@ namespace DfoServer.Network.Handlers
                 FileLogger.Log(
                     $"[{ProtocolName}] RES_PEER: 跨频道响应已拒绝 " +
                     $"from={session.ListenerPort} to={inviterSession.ListenerPort}");
+                if (reqType == 2)
+                    await SendPvpInviteFailureAsync(session, 19);
+                return;
+            }
+
+            if (reqType == 2)
+            {
+                if (body.Length != 7 ||
+                    _pvpRoomHandler == null)
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] RES_PEER: " +
+                        "invalid/unavailable PvP room response");
+                    await SendPvpInviteFailureAsync(session, 19);
+                    return;
+                }
+
+                await _pvpRoomHandler.HandleRoomInviteResponseAsync(
+                    inviterSession,
+                    session,
+                    BitConverter.ToInt32(body, 3),
+                    checkoutCommitted =>
+                        CheckoutPartyForPvpInviteWithinTransitionAsync(
+                            session,
+                            checkoutCommitted));
                 return;
             }
 
@@ -1697,6 +1755,77 @@ namespace DfoServer.Network.Handlers
                 var owner = Interlocked.Exchange(ref _owner, null);
                 owner?.ReleaseBroadcastGate(_partyId, _entry);
             }
+        }
+
+        private async Task
+            CheckoutPartyForPvpInviteWithinTransitionAsync(
+                EnhancedClientSession session,
+                Action checkoutCommitted)
+        {
+            if (session?.Player == null)
+            {
+                throw new InvalidOperationException(
+                    "PvP invite checkout requires a player");
+            }
+
+            var uid = session.Player.UserId;
+            var result =
+                _partyManager.Leave(
+                    uid,
+                    session.SessionId);
+            if (!result.Ok)
+            {
+                if (_partyManager.GetPartyByUser(uid) != null)
+                {
+                    throw new InvalidOperationException(
+                        "PvP invite party checkout rejected: " +
+                        result.Reason);
+                }
+
+                checkoutCommitted?.Invoke();
+                return;
+            }
+
+            // Leave is already durable at this point. Signal the PvP join
+            // before any best-effort legacy party publications can block or
+            // fail, so the room membership is never rolled back into a split
+            // party/room state.
+            checkoutCommitted?.Invoke();
+
+            try
+            {
+                await SendPartyClearBestEffortAsync(
+                    session,
+                    GetDepartureClearParty(result),
+                    $"pvp-invite-checkout uid={uid}");
+                await PublishCommittedDepartureAsync(
+                    result,
+                    $"pvp-invite-checkout uid={uid}");
+            }
+            catch (Exception ex)
+            {
+                // Leave has already committed, matching native
+                // CheckOutParty. Notification failure cannot roll back the
+                // subsequent PvP join into a split party/room state.
+                FileLogger.Log(
+                    $"[{ProtocolName}] PvP invite party checkout " +
+                    $"publication failed after commit: uid={uid} " +
+                    $"error={ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private static Task SendPvpInviteFailureAsync(
+            EnhancedClientSession session,
+            byte errorCode)
+        {
+            if (session == null)
+                return Task.CompletedTask;
+
+            return session.SendPacketAsync(
+                GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x000B,
+                    new byte[] { 0, errorCode, 2 }));
         }
 
         public void Dispose()

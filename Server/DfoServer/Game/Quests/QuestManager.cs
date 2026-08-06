@@ -122,6 +122,11 @@ namespace DfoServer.Game.Quests
                 ? _service.HandleAcceptQuest(owner, command, _sender.AccountId)
                 : QuestAcceptResult.Fail(23);
             await _sender.SendCmdAckAsync(wireType, QuestAckBuilder.BuildAccept(result));
+            if (result.Success && result.PostAcceptTriggerProjection != null)
+            {
+                await _notifications.SendTriggerChangesAsync(
+                    new[] { result.PostAcceptTriggerProjection });
+            }
         }
 
         public async Task HandleImageCommunicationEquipmentUseAsync(
@@ -353,9 +358,10 @@ namespace DfoServer.Game.Quests
             InventoryLease expectedLease,
             IEnumerable<InventoryMutationResult> mutations)
         {
-            if (!RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
-                    expectedLease,
-                    mutations))
+            var changes = RecalibrateItemSeekingQuestProgressAfterInventoryMutations(
+                expectedLease,
+                mutations);
+            if (changes.Count == 0)
                 return;
 
             var cid = _sender.CharacterId;
@@ -365,7 +371,7 @@ namespace DfoServer.Game.Quests
                     cid))
                 return;
 
-            await _notifications.SendActiveQuestListAsync(cid);
+            await _notifications.SendTriggerChangesAsync(changes);
         }
 
         internal bool RecalibrateItemSeekingQuestProgressAfterInventoryMutationWithoutNotification(
@@ -381,6 +387,14 @@ namespace DfoServer.Game.Quests
         internal bool RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
             InventoryLease expectedLease,
             IEnumerable<InventoryMutationResult> mutations)
+            => RecalibrateItemSeekingQuestProgressAfterInventoryMutations(
+                expectedLease,
+                mutations).Count > 0;
+
+        private IReadOnlyList<QuestSetTriggerResult>
+            RecalibrateItemSeekingQuestProgressAfterInventoryMutations(
+                InventoryLease expectedLease,
+                IEnumerable<InventoryMutationResult> mutations)
         {
             var cid = _sender.CharacterId;
             if (expectedLease == null
@@ -389,12 +403,16 @@ namespace DfoServer.Game.Quests
                     expectedLease.SessionId,
                     cid))
             {
-                return false;
+                return Array.Empty<QuestSetTriggerResult>();
             }
 
             var itemFilter = CollectInventoryMutationItemFilter(mutations);
             return itemFilter.Count > 0
-                && SyncItemSeekingQuestProgressWithoutNotification(itemFilter);
+                ? _service.SyncItemSeekingQuestProgressChanges(
+                    cid,
+                    _sender.AccountId,
+                    itemFilter)
+                : Array.Empty<QuestSetTriggerResult>();
         }
 
         private static HashSet<int> CollectInventoryMutationItemFilter(
