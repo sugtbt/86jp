@@ -25,6 +25,8 @@ namespace DfoServer.Network
     {
         private readonly LoginHandler _loginHandler;
         private readonly CharacterSelectHandler _characterSelectHandler;
+        private readonly CharacterSessionLifecycleCoordinator
+            _characterSessionLifecycle;
         private readonly InventoryHandler _inventoryHandler;
         private readonly LotteryItemHandler _lotteryItemHandler;
         private readonly KnightShieldHandler _knightShieldHandler;
@@ -52,9 +54,6 @@ namespace DfoServer.Network
         private readonly ExpertJobCompoundHandler _expertJobCompoundHandler;
         private readonly ExpertJobGiveupHandler _expertJobGiveupHandler;
         private readonly EnchanterHandler _enchanterHandler;
-        private readonly ICharacterRepository _characterRepository;
-        private readonly SqliteSelectCharacterDataSource _selectCharacterDataSource;
-        private readonly ISessionDirectory _sessionDirectory;
         // 组队与城镇/副本共享同一个 PartyManager 实例: 副本 fan-out 与跟随退出都要看到同一份队伍状态。
         private readonly Game.Party.PartyManager _partyManager;
         private readonly DungeonInstanceRegistry _dungeonInstances;
@@ -107,9 +106,6 @@ namespace DfoServer.Network
             var userInfoBlobRepository = new Game.CharacterData.SqliteUserInfoBlobRepository(databasePath, schemaFilePath);
             var getUserInfoTemplate = userInfoBlobRepository.LoadGetUserInfoTemplate();
 
-            _characterRepository = characterRepository;
-            _selectCharacterDataSource = sqliteSelectCharacterDataSource;
-            _sessionDirectory = sessionDirectory;
             _characterTransitions =
                 new CharacterTransitionCoordinator(sessionDirectory);
             _dungeonInstances = new DungeonInstanceRegistry(
@@ -300,6 +296,22 @@ namespace DfoServer.Network
                 _characterTransitions,
                 pvpUdpRelay: pvpUdpRelay);
             _partyHandler.AttachPvpRoomHandler(_pvpRoomHandler);
+            _characterSessionLifecycle =
+                new CharacterSessionLifecycleCoordinator(
+                    _loginHandler,
+                    _characterSelectHandler,
+                    characterRepository,
+                    sqliteSelectCharacterDataSource,
+                    sessionDirectory,
+                    _characterTransitions,
+                    _expertJobStoreHandler,
+                    _townHandler,
+                    _dungeonInstances,
+                    _dungeonRejoin,
+                    _lotteryItemHandler,
+                    _craneMiniGameHandler,
+                    _pvpRoomHandler,
+                    _inventoryRefreshSender);
 
             _cmdDispatch = new Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>>();
             RegisterLoginHandlers(_cmdDispatch);
@@ -333,39 +345,16 @@ namespace DfoServer.Network
             _partyHandler.Dispose();
         }
 
-        public override async Task OnClientConnected(EnhancedClientSession session)
+        public override Task OnClientConnected(
+            EnhancedClientSession session)
         {
-            FileLogger.Log($"[{ProtocolName}] Admin client connected: {session.SessionId}");
-            PetCreatureRuntimeService.RegisterSession(session);
-            await _loginHandler.Handle_ClientFirstConnected(session);
+            return _characterSessionLifecycle.HandleConnectedAsync(session);
         }
 
-        public override async Task OnClientDisconnected(EnhancedClientSession session)
+        public override Task OnClientDisconnected(
+            EnhancedClientSession session)
         {
-            FileLogger.Log($"[{ProtocolName}] Admin client disconnected: {session.SessionId}");
-            await _expertJobStoreHandler.CloseSessionAsync(session, includeOwner: false);
-            // 联机同屏: 通知同区域其它玩家移除该玩家分身(USER_LEAVE 0x0006)。须在状态清理前发。
-            await _townHandler.NotifyLeaveAsync(session);
-            var charId = session.Player?.CharacterId ?? 0;
-            var detachedForRejoin =
-                Handlers.Dungeon.DungeonRunLifecycle
-                    .DetachRunOnNetworkDisconnect(
-                        session,
-                        _dungeonInstances);
-            if (charId > 0) await _sessionDirectory.UnregisterAsync(charId);
-            if (charId > 0) InventoryContext.Unregister(session.SessionId, charId);
-            if (!detachedForRejoin)
-            {
-                Handlers.Dungeon.DungeonRunLifecycle.EndRunOnTeardown(
-                    session,
-                    "disconnect",
-                    _dungeonInstances);
-            }
-            _dungeonRejoin.ClearSession(session.SessionId);
-            _townHandler.PersistPosition(session, forceImmediate: true, source: "disconnect");
-            _lotteryItemHandler.ClearSession(session.SessionId);
-            _craneMiniGameHandler.ClearSession(session.SessionId);
-            PetCreatureRuntimeService.UnregisterSession(session);
+            return _characterSessionLifecycle.HandleDisconnectedAsync(session);
         }
 
         public override async Task OnPacketReceived(EnhancedClientSession session, FlexiblePacket packet)
@@ -388,6 +377,9 @@ namespace DfoServer.Network
 
         public async Task OnPacketReceived_86JP(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
+            if (!_characterSessionLifecycle.CanDispatch(session, header))
+                return;
+
             if (header.cmd == 0)
             {
 
@@ -411,44 +403,15 @@ namespace DfoServer.Network
 
         private void RegisterCharacterHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
-            d[0x0004] = async (s, h, b) =>
-            {
-                _dungeonRejoin.ClearSession(s.SessionId);
-                var prevCharId = s.Player?.CharacterId ?? 0;
-                if (prevCharId > 0)
-                    await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
-                await _characterSelectHandler.Handle_ENUM_CMDPACKET_SELECT_CHARACTER(s, h, b);
-                if (s.Player != null && s.Player.CharacterId > 0)
-                {
-                    if (prevCharId > 0 && prevCharId != s.Player.CharacterId)
-                    {
-                        await _sessionDirectory.UnregisterAsync(prevCharId);
-                        InventoryContext.Unregister(s.SessionId, prevCharId);
-                    }
-                    _sessionDirectory.Register(s.Player.CharacterId, s);
-                    var gsConnStr = SqliteDatabaseBootstrap.Initialize(
-                        ServerPaths.DatabasePath, ServerPaths.SchemaFilePath);
-                    s.GameSession = new Game.Session.GameSession(s, gsConnStr);
-                    await _pvpRoomHandler.HandleLobbyReadyAsync(s);
-                    await _inventoryRefreshSender.SendAllEquipmentItemLockListRefresh(s);
-                    await s.GameSession.QuestManager.SyncItemSeekingQuestProgressAsync(null);
-                    await PetCreatureRuntimeService.BeginTownAsync(s, "select_character");
-                    await _dungeonRejoin.ProjectCandidateAsync(s);
-                }
-            };
+            d[0x0004] =
+                _characterSessionLifecycle.HandleSelectCharacterAsync;
             d[0x0005] = _characterSelectHandler.Handle_ENUM_CMDPACKET_CREATE_CHARACTER;
             d[0x0006] = _characterSelectHandler.Handle_ENUM_CMDPACKET_DELETE_CHARACTER;
-            d[0x0007] = async (s, h, b) =>
-            {
-                var charId = s.Player?.CharacterId ?? 0;
-                if (charId > 0) await _expertJobStoreHandler.CloseSessionAsync(s, includeOwner: true);
-                if (charId > 0) await _sessionDirectory.UnregisterAsync(charId);
-                if (charId > 0) InventoryContext.Unregister(s.SessionId, charId);
-                _townHandler.PersistPosition(s, forceImmediate: true, source: "return_select");
-                s.GameSession = null;
-                await _characterSelectHandler.Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(s, h, b);
-            };
+            d[0x0007] = _characterSessionLifecycle
+                .HandleReturnSelectCharacterAsync;
             d[0x0008] = _characterSelectHandler.Handle_ENUM_CMDPACKET_GET_USERINFO;
+            d[0x01A8] = _characterSelectHandler
+                .Handle_ENUM_CMDPACKET_OTHER_USER_TITLE_BOOK_LIST;
             d[0x0009] = _staminaHandler.Handle_ENUM_CMDPACKET_RECOVER_STAMINA;
             d[0x02B5] = _characterSelectHandler.Handle_ENUM_CMDPACKET_CHECK_DOUBLE_CHARACTER_NAME;
             d[0x0127] = _characterSelectHandler.Handle_CHANGE_CHARAC_SLOT;

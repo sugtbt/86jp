@@ -72,14 +72,81 @@ namespace DfoServer.Network.Handlers
         }
 
         // 按 UserId 找在线会话(他人外观拉取用)。
+        internal static EnhancedClientSession FindInspectableOnlineByUserId(
+            Game.Session.ISessionDirectory sessions,
+            EnhancedClientSession requester,
+            ushort uid)
+        {
+            if (sessions == null || requester == null)
+                return null;
+
+            EnhancedClientSession match = null;
+            foreach (var s in sessions.GetAllGameSessions())
+            {
+                if (s?.Player != null
+                    && s.Player.CharacterId > 0
+                    && s.Player.UserId == uid
+                    && PartyHandler.IsSameGameChannel(requester, s))
+                {
+                    // UserId is only 16 bits on the wire. Do not disclose an
+                    // arbitrary player when two full character ids collide.
+                    if (match != null && !ReferenceEquals(match, s))
+                        return null;
+                    match = s;
+                }
+            }
+
+            return match;
+        }
+
+        private bool IsAuthorizedInspectRequester(
+            EnhancedClientSession requester)
+        {
+            var player = requester?.Player;
+            return _sessions != null
+                && requester.Account?.AccountId > 0
+                && player != null
+                && player.CharacterId > 0
+                && player.UserId != 0
+                && player.UserId == unchecked((ushort)player.CharacterId)
+                && _sessions.TryGet(player.CharacterId, out var current)
+                && ReferenceEquals(current, requester);
+        }
+
+        private bool IsCurrentInspectableTarget(
+            EnhancedClientSession requester,
+            EnhancedClientSession target,
+            ushort requestedUserId)
+        {
+            var player = target?.Player;
+            return _sessions != null
+                && target.Account?.AccountId > 0
+                && player != null
+                && player.CharacterId > 0
+                && player.UserId == requestedUserId
+                && player.UserId
+                    == unchecked((ushort)player.CharacterId)
+                && _sessions.TryGet(
+                    player.CharacterId,
+                    out var current)
+                && ReferenceEquals(current, target)
+                && PartyHandler.IsSameGameChannel(
+                    requester,
+                    target);
+        }
+        // Kept for the narrow directory self-test and callers that do not have a
+        // requester yet. Production inspect handlers use the channel-aware lookup.
         internal static EnhancedClientSession FindOnlineByUserId(
             Game.Session.ISessionDirectory sessions,
             ushort uid)
         {
-            if (sessions == null) return null;
-            foreach (var s in sessions.GetAllGameSessions())
-                if (s?.Player != null && s.Player.CharacterId > 0 && s.Player.UserId == uid)
-                    return s;
+            if (sessions == null)
+                return null;
+            foreach (var session in sessions.GetAllGameSessions())
+                if (session?.Player != null
+                    && session.Player.CharacterId > 0
+                    && session.Player.UserId == uid)
+                    return session;
             return null;
         }
 
@@ -389,36 +456,128 @@ namespace DfoServer.Network.Handlers
         {
             try
             {
-                // 他人外观(同屏 PULL 模型): body = {u16 uid, byte mode}(见 docs/df_game_r/06-otheruser-appearance.md)。
-                // mode!=2 且 uid 有效且目标在线 → 回目标 USERINFO(0x0002, 复用自身版 BuildNoti2Body 换数据源)。
-                // 自身/选角 roster(mode==2 或 body<3B)走下面既有分支。⚠️ 真机需确认客户端是否用 0x0008 发他人请求 + mode 取值。
-                // 诊断: 查看信息(inspect)真机排查用。记录客户端发的完整 body, 好核对 reqUid 映射。
+                // body = {u16 targetUserId, u8 mode}. Modes 0, 1 and 3 are
+                // target-relative inspect flows; only mode 2 returns the
+                // authenticated requester's account roster. Invalid, stale,
+                // ambiguous or cross-channel targets fail closed.
                 FileLogger.Log($"[{ProtocolName}] GET_USERINFO body={(body != null ? BitConverter.ToString(body) : "null")} selfUid={session.Player?.UserId} selfCid={session.Player?.CharacterId}");
+                if (_sessions == null || body == null || body.Length < 3)
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] GET_USERINFO rejected malformed " +
+                        $"request bodyLen={body?.Length ?? 0}");
+                    return;
+                }
+
                 if (_sessions != null && body != null && body.Length >= 3)
                 {
                     ushort reqUid = BitConverter.ToUInt16(body, 0);
                     byte mode = body[2];
-                    if (mode != 0x02 && reqUid != 0xFFFF && reqUid != session.Player.UserId)
+                    if (mode != 0x00
+                        && mode != 0x01
+                        && mode != 0x02
+                        && mode != 0x03)
                     {
-                        var target = FindOnlineByUserId(_sessions, reqUid);
-                        if (target != null)
+                        FileLogger.Log(
+                            $"[{ProtocolName}] GET_USERINFO rejected " +
+                            $"unknown mode={mode}");
+                        return;
+                    }
+                    if (mode != 0x02)
+                    {
+                        if (reqUid == 0xFFFF)
                         {
-                            // ⚠️ 待真机验证: inspect(mode=3)可能需要【完整明细 subtype-1】而不只精简外观 subtype-0。
-                            //    先发 subtype-0(与同屏他人外观同源, 已验证能渲染外观); 若信息窗仍空, 晨间加发 subtype-1。
-                            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0002, Game.Appearance.AppearanceService.BuildNoti2Body(target.Player)));
-                            FileLogger.Log($"[{ProtocolName}] GET_USERINFO other MATCH reqUid={reqUid} mode={mode} -> USERINFO(0x0002 subtype0) sent (targetCid={target.Player.CharacterId})");
+                            FileLogger.Log(
+                                $"[{ProtocolName}] GET_USERINFO inspect " +
+                                "rejected invalid uid=0xFFFF");
                             return;
                         }
-                        // 未匹配 → 枚举在线 uid, 让真机日志直接显示 reqUid 是否=某在线目标的 UserId(诊断 uid 映射)
+                        if (!IsAuthorizedInspectRequester(session))
+                        {
+                            FileLogger.Log(
+                                $"[{ProtocolName}] GET_USERINFO inspect " +
+                                $"rejected unauthenticated/stale requester");
+                            return;
+                        }
+                        var target = FindInspectableOnlineByUserId(
+                            _sessions,
+                            session,
+                            reqUid);
+                        if (target != null)
+                        {
+                            var otherRoutingByte =
+                                _getUserInfoTemplate?.Pkt0RoutingByte7
+                                ?? (byte)0x01;
+                            var packets = OtherUserInfoResponseBuilder.Build(
+                                _selectCharacterDataSource,
+                                _characterRepository,
+                                target,
+                                mode,
+                                otherRoutingByte,
+                                out var detailError);
+                            if (!IsAuthorizedInspectRequester(session)
+                                || !IsCurrentInspectableTarget(
+                                    session,
+                                    target,
+                                    reqUid))
+                            {
+                                FileLogger.Log(
+                                    $"[{ProtocolName}] GET_USERINFO " +
+                                    $"generation changed before response " +
+                                    $"uid={reqUid}");
+                                return;
+                            }
+                            foreach (var packet in packets)
+                            {
+                                if (!IsAuthorizedInspectRequester(session)
+                                    || !IsCurrentInspectableTarget(
+                                        session,
+                                        target,
+                                        reqUid))
+                                {
+                                    FileLogger.Log(
+                                        $"[{ProtocolName}] GET_USERINFO " +
+                                        $"response aborted after generation " +
+                                        $"change uid={reqUid}");
+                                    return;
+                                }
+                                await session.SendPacketAsync(packet);
+                            }
+                            FileLogger.Log(
+                                $"[{ProtocolName}] GET_USERINFO other MATCH " +
+                                $"reqUid={reqUid} mode={mode} " +
+                                $"packets={packets.Count} " +
+                                $"detailError={detailError ?? "none"} " +
+                                $"targetCid={target.Player.CharacterId}");
+                            return;
+                        }
                         var sb = new System.Text.StringBuilder();
                         foreach (var s in _sessions.GetAllGameSessions())
-                            if (s?.Player != null && s.Player.CharacterId > 0)
+                        {
+                            if (s?.Player != null
+                                && s.Player.CharacterId > 0
+                                && PartyHandler.IsSameGameChannel(session, s))
+                            {
                                 sb.Append($"uid{s.Player.UserId}/cid{s.Player.CharacterId} ");
-                        FileLogger.Log($"[{ProtocolName}] GET_USERINFO other reqUid={reqUid} mode={mode} 未匹配在线目标, 回退 roster(⚠️信息窗无反应根因候选=uid映射). 在线=[{sb.ToString().Trim()}]");
+                            }
+                        }
+                        FileLogger.Log(
+                            $"[{ProtocolName}] GET_USERINFO other reqUid={reqUid} " +
+                            $"mode={mode} no same-channel target; " +
+                            $"online=[{sb.ToString().Trim()}]");
+                        // Do not send the requester's roster into an inspect flow.
+                        return;
                     }
                 }
 
-                var accountId = session.Account?.AccountId ?? 1;
+                var accountId = session.Account?.AccountId ?? 0;
+                if (accountId <= 0)
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] GET_USERINFO roster rejected " +
+                        "unauthenticated requester");
+                    return;
+                }
                 var characterList = BuildCharacterList(accountId);
                 byte routingByte = _getUserInfoTemplate != null ? _getUserInfoTemplate.Pkt0RoutingByte7 : (byte)0;
                 await session.SendPacketAsync(BuildPacketWithRouting(0x00, 0x0002, characterList.Body, routingByte));
@@ -431,6 +590,86 @@ namespace DfoServer.Network.Handlers
             {
                 FileLogger.Log($"[{ProtocolName}] GET_USERINFO EXCEPTION: {ex}");
             }
+        }
+
+        public async Task Handle_ENUM_CMDPACKET_OTHER_USER_TITLE_BOOK_LIST(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            if (!IsAuthorizedInspectRequester(session))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] OTHER_USER_TITLE_BOOK_LIST " +
+                    $"rejected unauthenticated/stale requester");
+                return;
+            }
+
+            if (_sessions == null || body == null || body.Length < 2)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] OTHER_USER_TITLE_BOOK_LIST rejected: " +
+                    $"bodyLen={body?.Length ?? 0} sessions={_sessions != null}");
+                return;
+            }
+
+            var requestedUserId = BitConverter.ToUInt16(body, 0);
+            if (requestedUserId == 0xFFFF)
+            {
+                return;
+            }
+
+            var target = FindInspectableOnlineByUserId(
+                _sessions,
+                session,
+                requestedUserId);
+            if (target == null)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] OTHER_USER_TITLE_BOOK_LIST " +
+                    $"uid={requestedUserId} no same-channel target");
+                return;
+            }
+
+            var packets = OtherUserInfoResponseBuilder.BuildTitleBookList(
+                _selectCharacterDataSource,
+                _characterRepository,
+                target,
+                infoType: 1,
+                out var error);
+            if (!IsAuthorizedInspectRequester(session)
+                || !IsCurrentInspectableTarget(
+                    session,
+                    target,
+                    requestedUserId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] OTHER_USER_TITLE_BOOK_LIST " +
+                    $"generation changed before response " +
+                    $"uid={requestedUserId}");
+                return;
+            }
+            foreach (var packet in packets)
+            {
+                if (!IsAuthorizedInspectRequester(session)
+                    || !IsCurrentInspectableTarget(
+                        session,
+                        target,
+                        requestedUserId))
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] OTHER_USER_TITLE_BOOK_LIST " +
+                        $"response aborted after generation change " +
+                        $"uid={requestedUserId}");
+                    return;
+                }
+                await session.SendPacketAsync(packet);
+            }
+
+            FileLogger.Log(
+                $"[{ProtocolName}] OTHER_USER_TITLE_BOOK_LIST " +
+                $"uid={requestedUserId} packets={packets.Count} " +
+                $"error={error ?? "none"}");
         }
 
         private static bool NameBytesEqual(byte[] a, byte[] b)

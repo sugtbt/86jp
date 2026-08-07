@@ -597,7 +597,9 @@ namespace DfoServer.Network.Handlers
             {
                 _mailboxAlarmStates.Remove(receiverSession);
                 FileLogger.Log($"[Mailbox] SEND receiver alarm failed cid={receiverCharacterId}: {ex.Message}");
-                await _sessionDirectory.UnregisterAsync(receiverCharacterId).ConfigureAwait(false);
+                // Let the protocol disconnect path own directory removal and
+                // role teardown; pre-unregistering here can strand town/dungeon state.
+                receiverSession.Close();
             }
         }
 
