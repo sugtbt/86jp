@@ -94,7 +94,6 @@ namespace PvfLib
             var header = _header;
             byte[] headerBytes = StructToBytes(header);
             PvfDecryptor.Decrypt("HeaD", headerBytes);
-            PvfDecryptor.DecryptGuard(headerBytes);
 
             
             int totalSize = 0x30 + tableBytes.Length + hashBytes.Length +
@@ -407,15 +406,14 @@ namespace PvfLib
 
         private void Parse(byte[] allBytes)
         {
-            
             byte[] headerBytes = allBytes.Slice(0, 0x30);
-            PvfDecryptor.DecryptGuard(headerBytes);
             if (PvfDecryptor.Decrypt("HeaD", headerBytes) != 0)
                 throw new InvalidDataException("PVF 头部解密失败");
 
             var header = headerBytes.ToStruct<PvfHeader>();
             if (header.Signature != MagicSignature)
                 throw new InvalidDataException("无效的 PVF 签名");
+            ValidateHeaderLayout(header, allBytes.Length);
             _header = header;
 
             
@@ -463,6 +461,28 @@ namespace PvfLib
             ParseFileItemsFast(header.FileCount, allBytes, tableOffset);
             ParseGroupItemsFast(header.GroupCount, grpiBytes);
             _hashTable = PvfHashTable.Parse(hashBytes);
+        }
+
+        private static void ValidateHeaderLayout(PvfHeader header, int dataLength)
+        {
+            if (header.FileCount < 0 || header.GroupCount < 0 ||
+                header.HashTableSize < 0 || header.NameTableSize < 0 || header.BodySize < 0)
+            {
+                throw new InvalidDataException("PVF header contains a negative section size.");
+            }
+
+            try
+            {
+                long declaredLength = checked(
+                    0x30L + (long)header.FileCount * 0x18 + header.HashTableSize +
+                    header.NameTableSize + (long)header.GroupCount * 8 + header.BodySize);
+                if (declaredLength > dataLength)
+                    throw new InvalidDataException("PVF header sections exceed the file boundary.");
+            }
+            catch (OverflowException ex)
+            {
+                throw new InvalidDataException("PVF header section sizes overflowed.", ex);
+            }
         }
 
         private void BuildStringBuffers(byte[] nameBytes)
@@ -1263,7 +1283,6 @@ namespace PvfLib
 
                 byte[] headerBytes = StructToBytes(header);
                 PvfDecryptor.Decrypt("HeaD", headerBytes);
-                PvfDecryptor.DecryptGuard(headerBytes);
 
                 using (var outFs = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024))
                 {
